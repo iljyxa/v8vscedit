@@ -13,6 +13,7 @@ import {
 import {
   type RepositoryCliServices,
   maybeRestoreLockSnapshot,
+  maybeRestoreLockSnapshotForFullNames,
   runRepositoryCliCommand,
   runRepositoryCommitAction,
   runRepositoryLockAction,
@@ -741,6 +742,11 @@ async function runFileSyncAfterLockOrUpdate(
         ? await runDecompileExtension(target.extensionName ?? target.displayName, target.configRoot, services.workspaceFolder, services.outputChannel, hooks)
         : await runDecompileMainConfiguration(target.displayName, target.configRoot, services.workspaceFolder, services.outputChannel, hooks);
       if (imported) {
+        // Открываем окно тишины (тот же приём, что и runPostRepositorySync/ExtensionCommands
+        // на любом полном импорте) — иначе отложенные события watcher'а по только что
+        // записанным полным импортом файлам заново пометят конфигурацию «изменённой»
+        // и запустят дорогой полный пересчёт changeDetector.detect().
+        services.markConfigurationsClean([target.configRoot]);
         // Дерево/поддержку уже перестроил reloadEntries() (treeProvider.updateEntries) —
         // повторный refreshRepositoryUi() тут же заново гонял бы buildRoots()
         // (а с ним и supportService.loadConfig на каждый корень) без новой информации.
@@ -771,7 +777,20 @@ async function runFileSyncAfterLockOrUpdate(
       }
     }
 
-    services.repositoryService.captureLockSnapshot(target, repositoryNode);
+    if (plan.fullNames.length > 1) {
+      // Рекурсивный захват Подсистемы: фактически захваченных/довыгруженных объектов
+      // несколько (сама подсистема + участники Content) — снимаем снапшот по каждому,
+      // а не только по узлу подсистемы, иначе правки в объектах-участниках не попадут
+      // под защиту отката при unlock (см. captureLockSnapshotForFullName).
+      for (const fullName of plan.fullNames) {
+        const memberXmlPath = services.repositoryService.resolveXmlPathByFullName(target.configRoot, fullName);
+        if (memberXmlPath) {
+          services.repositoryService.captureLockSnapshotForFullName(target, fullName, memberXmlPath);
+        }
+      }
+    } else {
+      services.repositoryService.captureLockSnapshot(target, repositoryNode);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     services.outputChannel.appendLine(`[repository][file-sync][error] ${message}`);
@@ -822,13 +841,28 @@ async function runFileSyncAfterUnlock(
         ? await runDecompileExtension(target.extensionName ?? target.displayName, target.configRoot, services.workspaceFolder, services.outputChannel, hooks)
         : await runDecompileMainConfiguration(target.displayName, target.configRoot, services.workspaceFolder, services.outputChannel, hooks);
       if (imported) {
+        // См. симметричную правку и обоснование в runFileSyncAfterLockOrUpdate — то же
+        // окно тишины нужно и здесь, полный импорт пишет столько же файлов.
+        services.markConfigurationsClean([target.configRoot]);
         await services.reloadEntries();
         services.refreshActionsView();
       }
       return;
     }
 
-    await maybeRestoreLockSnapshot(toCliServices(services), target, repositoryNode);
+    if (plan.fullNames.length > 1) {
+      // Рекурсивный захват Подсистемы — сравниваем/откатываем по всем фактически
+      // захваченным объектам разом (см. симметричную правку captureLockSnapshotForFullName
+      // в runFileSyncAfterLockOrUpdate), а не только по узлу подсистемы.
+      await maybeRestoreLockSnapshotForFullNames(
+        toCliServices(services),
+        target,
+        plan.fullNames,
+        repositoryNode.label ?? target.displayName
+      );
+    } else {
+      await maybeRestoreLockSnapshot(toCliServices(services), target, repositoryNode);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     services.outputChannel.appendLine(`[repository][file-sync][error] ${message}`);

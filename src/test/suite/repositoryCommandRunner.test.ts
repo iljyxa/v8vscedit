@@ -3,7 +3,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { maybeRestoreLockSnapshot, type RepositoryCliServices } from '../../ui/commands/repository/RepositoryCommandRunner';
+import {
+  maybeRestoreLockSnapshot,
+  maybeRestoreLockSnapshotForFullNames,
+  type RepositoryCliServices,
+} from '../../ui/commands/repository/RepositoryCommandRunner';
 import { RepositoryService, type RepositoryNodeRef, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
@@ -149,5 +153,74 @@ suite('RepositoryCommandRunner — maybeRestoreLockSnapshot (issue #2)', () => {
     assert.strictEqual(fs.readFileSync(objectXmlPath, 'utf-8'), editedContent);
     assert.deepStrictEqual(infoCalls, []);
     assert.strictEqual(repositoryService.getLockSnapshotDiff(target, node).hasSnapshot, false);
+  });
+
+  suite('maybeRestoreLockSnapshotForFullNames — рекурсивный захват Подсистемы с несколькими участниками', () => {
+    let secondXmlPath: string;
+    const firstFullName = 'Справочник.ТестовыйСправочник';
+    const secondFullName = 'Справочник.ВторойУчастник';
+
+    setup(() => {
+      secondXmlPath = path.join(workspaceRoot, 'Catalogs', 'ВторойУчастник.xml');
+      fs.writeFileSync(secondXmlPath, '<Catalog>исходное содержимое участника 2</Catalog>\n', 'utf-8');
+    });
+
+    test('Ни у одного участника нет снапшота — диалог не показывается', async () => {
+      await maybeRestoreLockSnapshotForFullNames(services, target, [firstFullName, secondFullName], 'Продажи');
+      assert.deepStrictEqual(warningCalls, []);
+    });
+
+    test('Ни один участник не менялся — снапшоты тихо удаляются без диалога', async () => {
+      repositoryService.captureLockSnapshotForFullName(target, firstFullName, objectXmlPath);
+      repositoryService.captureLockSnapshotForFullName(target, secondFullName, secondXmlPath);
+
+      await maybeRestoreLockSnapshotForFullNames(services, target, [firstFullName, secondFullName], 'Продажи');
+
+      assert.deepStrictEqual(warningCalls, []);
+      assert.strictEqual(repositoryService.getLockSnapshotDiffForFullName(target, firstFullName).hasSnapshot, false);
+      assert.strictEqual(repositoryService.getLockSnapshotDiffForFullName(target, secondFullName).hasSnapshot, false);
+    });
+
+    test('Изменён только один из двух участников — откат восстанавливает его и снимает оба снапшота', async () => {
+      const firstOriginal = fs.readFileSync(objectXmlPath, 'utf-8');
+      const secondOriginal = fs.readFileSync(secondXmlPath, 'utf-8');
+      repositoryService.captureLockSnapshotForFullName(target, firstFullName, objectXmlPath);
+      repositoryService.captureLockSnapshotForFullName(target, secondFullName, secondXmlPath);
+
+      fs.writeFileSync(objectXmlPath, `${firstOriginal}<!-- правка первого -->\n`, 'utf-8');
+      warningResolution = 'Откатить изменения';
+
+      await maybeRestoreLockSnapshotForFullNames(services, target, [firstFullName, secondFullName], 'Продажи');
+
+      assert.strictEqual(warningCalls.length, 1);
+      assert.ok(String(warningCalls[0][0]).includes('1 объект'), 'В сообщении должно фигурировать число изменённых объектов (1), а не всех переданных (2).');
+      assert.strictEqual(fs.readFileSync(objectXmlPath, 'utf-8'), firstOriginal);
+      assert.strictEqual(fs.readFileSync(secondXmlPath, 'utf-8'), secondOriginal, 'Неизменённый участник не должен трогаться восстановлением.');
+      assert.strictEqual(infoCalls.length, 1);
+      assert.strictEqual(repositoryService.getLockSnapshotDiffForFullName(target, firstFullName).hasSnapshot, false);
+      assert.strictEqual(repositoryService.getLockSnapshotDiffForFullName(target, secondFullName).hasSnapshot, false);
+    });
+
+    test('Пользователь оставляет изменения обоих участников — файлы не трогаются, снапшоты снимаются', async () => {
+      const firstOriginal = fs.readFileSync(objectXmlPath, 'utf-8');
+      repositoryService.captureLockSnapshotForFullName(target, firstFullName, objectXmlPath);
+      repositoryService.captureLockSnapshotForFullName(target, secondFullName, secondXmlPath);
+
+      const firstEdited = `${firstOriginal}<!-- правка -->\n`;
+      const secondEdited = `${fs.readFileSync(secondXmlPath, 'utf-8')}<!-- правка -->\n`;
+      fs.writeFileSync(objectXmlPath, firstEdited, 'utf-8');
+      fs.writeFileSync(secondXmlPath, secondEdited, 'utf-8');
+      warningResolution = 'Оставить изменения';
+
+      await maybeRestoreLockSnapshotForFullNames(services, target, [firstFullName, secondFullName], 'Продажи');
+
+      assert.strictEqual(warningCalls.length, 1);
+      assert.ok(String(warningCalls[0][0]).includes('2 объект'));
+      assert.strictEqual(fs.readFileSync(objectXmlPath, 'utf-8'), firstEdited);
+      assert.strictEqual(fs.readFileSync(secondXmlPath, 'utf-8'), secondEdited);
+      assert.deepStrictEqual(infoCalls, []);
+      assert.strictEqual(repositoryService.getLockSnapshotDiffForFullName(target, firstFullName).hasSnapshot, false);
+      assert.strictEqual(repositoryService.getLockSnapshotDiffForFullName(target, secondFullName).hasSnapshot, false);
+    });
   });
 });

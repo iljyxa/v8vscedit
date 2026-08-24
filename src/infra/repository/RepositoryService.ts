@@ -554,7 +554,24 @@ export class RepositoryService {
   captureLockSnapshot(target: RepositoryTarget, node: RepositoryNodeRef): void {
     const xmlPath = this.resolveObjectXmlPathForSnapshot(node);
     const fullName = this.resolveFullName(node);
-    if (!xmlPath || !fullName || !fs.existsSync(xmlPath)) {
+    if (!xmlPath || !fullName) {
+      return;
+    }
+    this.captureLockSnapshotForFullName(target, fullName, xmlPath);
+  }
+
+  /**
+   * Вариант {@link captureLockSnapshot} по явным fullName и пути к XML, без резолвинга
+   * из узла дерева. Нужен для рекурсивного захвата Подсистемы: фактический состав
+   * захваченных/довыгружаемых объектов (сама подсистема + участники её `<Content>`,
+   * включая вложенные подсистемы) разворачивает `buildPartialDumpPlan`/
+   * `resolveSubsystemMemberFullNames` — это список fullName, а не единственный узел
+   * дерева, поэтому `captureLockSnapshot(target, node)` для такого захвата покрыл бы
+   * снапшотом только саму подсистему, но не её участников (см. `RepositoryCommands.
+   * runFileSyncAfterLockOrUpdate`).
+   */
+  captureLockSnapshotForFullName(target: RepositoryTarget, fullName: string, xmlPath: string): void {
+    if (!fs.existsSync(xmlPath)) {
       return;
     }
 
@@ -589,7 +606,11 @@ export class RepositoryService {
     if (!fullName) {
       return { hasSnapshot: false, changedFiles: [] };
     }
+    return this.getLockSnapshotDiffForFullName(target, fullName);
+  }
 
+  /** Вариант {@link getLockSnapshotDiff} по явному fullName — см. {@link captureLockSnapshotForFullName}. */
+  getLockSnapshotDiffForFullName(target: RepositoryTarget, fullName: string): RepositorySnapshotDiff {
     const snapshotDir = this.getSnapshotDir(target, fullName);
     const manifest = this.readSnapshotManifest(snapshotDir);
     if (!manifest) {
@@ -619,7 +640,11 @@ export class RepositoryService {
     if (!fullName) {
       return [];
     }
+    return this.restoreLockSnapshotForFullName(target, fullName);
+  }
 
+  /** Вариант {@link restoreLockSnapshot} по явному fullName — см. {@link captureLockSnapshotForFullName}. */
+  restoreLockSnapshotForFullName(target: RepositoryTarget, fullName: string): string[] {
     const snapshotDir = this.getSnapshotDir(target, fullName);
     const manifest = this.readSnapshotManifest(snapshotDir);
     if (!manifest) {
@@ -647,6 +672,11 @@ export class RepositoryService {
     if (!fullName) {
       return;
     }
+    this.discardLockSnapshotForFullName(target, fullName);
+  }
+
+  /** Вариант {@link discardLockSnapshot} по явному fullName — см. {@link captureLockSnapshotForFullName}. */
+  discardLockSnapshotForFullName(target: RepositoryTarget, fullName: string): void {
     fs.rmSync(this.getSnapshotDir(target, fullName), { recursive: true, force: true });
   }
 

@@ -418,6 +418,56 @@ suite('RepositoryService', () => {
         fs.writeFileSync(modulePath, originalModuleContent);
       }
     });
+
+    test('*ForFullName-варианты работают эквивалентно узловым и совместимы с ними (снапшот участника рекурсивного захвата Подсистемы)', () => {
+      const target_ = findFirstCatalogWithModule();
+      if (!target_) {
+        return;
+      }
+      const { xmlPath, modulePath, objectName } = target_;
+      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
+      assert.ok(target);
+
+      const fullName = `Справочник.${objectName}`;
+      const originalModuleContent = fs.readFileSync(modulePath);
+      try {
+        // Снимаем снапшот "безузловым" вариантом — именно так его снимает
+        // runFileSyncAfterLockOrUpdate для каждого участника рекурсивного захвата
+        // Подсистемы (fullName + xmlPath из buildPartialDumpPlan/resolveXmlPathByFullName,
+        // без узла дерева).
+        service.captureLockSnapshotForFullName(target, fullName, xmlPath);
+
+        const nodeDiff = service.getLockSnapshotDiff(target, { nodeKind: 'Catalog', label: objectName, xmlPath });
+        assert.strictEqual(nodeDiff.hasSnapshot, true, 'Снапшот, снятый по fullName, должен быть виден и узловому API — хранилище общее.');
+        assert.deepStrictEqual(nodeDiff.changedFiles, []);
+
+        fs.writeFileSync(modulePath, `${originalModuleContent.toString('utf-8')}\n// правка участника подсистемы\n`, 'utf-8');
+        const relativeModulePath = path.relative(EXAMPLE_CF, modulePath).split(path.sep).join('/');
+        const changedDiff = service.getLockSnapshotDiffForFullName(target, fullName);
+        assert.deepStrictEqual(changedDiff.changedFiles, [relativeModulePath]);
+
+        const restored = service.restoreLockSnapshotForFullName(target, fullName);
+        assert.ok(restored.some((p) => path.resolve(p) === path.resolve(modulePath)));
+        assert.ok(fs.readFileSync(modulePath).equals(originalModuleContent));
+
+        service.discardLockSnapshotForFullName(target, fullName);
+        assert.strictEqual(service.getLockSnapshotDiffForFullName(target, fullName).hasSnapshot, false);
+      } finally {
+        fs.writeFileSync(modulePath, originalModuleContent);
+      }
+    });
+
+    test('captureLockSnapshotForFullName по несуществующему пути не создаёт снапшот', () => {
+      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
+      assert.ok(target);
+
+      const fullName = 'Справочник.НесуществующийУчастникПодсистемы';
+      const xmlPath = path.join(EXAMPLE_CF, 'Catalogs', 'НесуществующийУчастникПодсистемы.xml');
+      assert.doesNotThrow(() => {
+        service.captureLockSnapshotForFullName(target, fullName, xmlPath);
+      });
+      assert.strictEqual(service.getLockSnapshotDiffForFullName(target, fullName).hasSnapshot, false);
+    });
   });
 
   test('resolveXmlPathByFullName — находит файл объекта в hierarchical- и flat-структуре, null для неизвестного', () => {

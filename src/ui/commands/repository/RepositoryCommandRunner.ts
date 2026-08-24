@@ -280,6 +280,56 @@ export async function maybeRestoreLockSnapshot(
   services.repositoryService.discardLockSnapshot(target, node);
 }
 
+/**
+ * Агрегатный вариант {@link maybeRestoreLockSnapshot} для рекурсивного захвата
+ * Подсистемы, где фактически захваченных/довыгруженных объектов несколько (сама
+ * подсистема + участники `<Content>`, включая вложенные подсистемы — см.
+ * `RepositoryService.resolveSubsystemMemberFullNames`). Одиночный узел здесь не
+ * подходит: `maybeRestoreLockSnapshot(node)` сравнил бы со снапшотом только сам
+ * узел подсистемы, полностью пропустив изменения в захваченных объектах-участниках
+ * (issue #2 для рекурсивного захвата Подсистемы).
+ *
+ * Один диалог на весь набор объектов — не по одному диалогу на объект: изменённых
+ * участников за один захват может быть много, и по одному подтверждению на каждый
+ * означало бы серию модальных окон подряд.
+ */
+export async function maybeRestoreLockSnapshotForFullNames(
+  services: RepositoryCliServices,
+  target: RepositoryTarget,
+  fullNames: readonly string[],
+  label: string
+): Promise<void> {
+  const withSnapshot = fullNames
+    .map((fullName) => ({ fullName, diff: services.repositoryService.getLockSnapshotDiffForFullName(target, fullName) }))
+    .filter((item) => item.diff.hasSnapshot);
+
+  const changed = withSnapshot.filter((item) => item.diff.changedFiles.length > 0);
+  if (changed.length > 0) {
+    const totalChangedFiles = changed.reduce((sum, item) => sum + item.diff.changedFiles.length, 0);
+    const restoreChoice = 'Откатить изменения';
+    const keepChoice = 'Оставить изменения';
+    const choice = await vscode.window.showWarningMessage(
+      `Файлы ${String(changed.length)} объект(ов) «${label}» (${String(totalChangedFiles)} файл(ов) суммарно) ` +
+        'были изменены после захвата. Откатить их к состоянию на момент захвата?',
+      { modal: true },
+      restoreChoice,
+      keepChoice
+    );
+
+    if (choice === restoreChoice) {
+      for (const item of changed) {
+        const restored = services.repositoryService.restoreLockSnapshotForFullName(target, item.fullName);
+        services.outputChannel.appendLine(`[repository] Откат файлов "${item.fullName}" к состоянию на момент захвата: ${restored.join(', ')}`);
+      }
+      void vscode.window.showInformationMessage(`Изменения объектов «${label}» (${String(changed.length)}) откачены к состоянию на момент захвата.`);
+    }
+  }
+
+  for (const item of withSnapshot) {
+    services.repositoryService.discardLockSnapshotForFullName(target, item.fullName);
+  }
+}
+
 export async function runRepositoryCommitAction(
   services: RepositoryCliServices,
   node: RepositoryNodeRef,
