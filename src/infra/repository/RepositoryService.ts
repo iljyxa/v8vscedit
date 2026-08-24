@@ -827,7 +827,7 @@ export class RepositoryService {
     const typeName = fullName.slice(0, dotIndex);
     const objectName = fullName.slice(dotIndex + 1);
     const kind = ONE_C_TYPE_NAMES_BY_PREFIX.get(typeName);
-    const folder = kind ? META_TYPES[kind]?.folder : undefined;
+    const folder = kind ? META_TYPES[kind].folder : undefined;
     if (!folder) {
       return null;
     }

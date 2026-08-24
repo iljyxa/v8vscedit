@@ -205,7 +205,6 @@ export async function runRepositoryLockAction(
     failureOperation: 'захвате объектов хранилища',
     afterSuccess: () => {
       services.repositoryService.setLocked(target, objects.fullNames, true);
-      services.repositoryService.captureLockSnapshot(target, node);
     },
   }, services);
 }
@@ -231,19 +230,23 @@ export async function runRepositoryUnlockAction(
     successMessage: `Объекты "${node.label ?? target.displayName}" освобождены.`,
     errorTitle: `Ошибка освобождения объектов "${node.label ?? target.displayName}".`,
     failureOperation: 'освобождении объектов хранилища',
-    afterSuccess: async () => {
+    afterSuccess: () => {
       services.repositoryService.setLocked(target, objects.fullNames, false);
-      await maybeRestoreLockSnapshot(services, target, node);
     },
   }, services);
 }
 
 /**
- * После успешного `unlock` сравнивает файлы объекта со снапшотом, снятым при захвате
- * (см. `RepositoryService.captureLockSnapshot`), и при расхождении предлагает пользователю
+ * Сравнивает файлы объекта со снапшотом, снятым при захвате (см.
+ * `RepositoryService.captureLockSnapshot`), и при расхождении предлагает пользователю
  * откатить их — иначе изменения, сделанные во время захвата, молча остаются на диске
  * даже после отмены захвата (issue #2). Снапшот в любом случае удаляется по завершении:
  * захват снят, и его смысл как точки отсчёта для отката исчерпан.
+ *
+ * Вызывается из `RepositoryCommands.ts` после успешного `unlock` — только для отдельных
+ * объектов (не для рекурсивного захвата корня целиком, там путь другой — полный импорт
+ * из базы, см. `RepositoryCommands.runFileSyncAfterUnlock`) и только если включена
+ * настройка `v8vscedit.repository.syncFilesOnLockUnlock`.
  */
 export async function maybeRestoreLockSnapshot(
   services: RepositoryCliServices,

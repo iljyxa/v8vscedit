@@ -12,6 +12,7 @@ import {
 } from '../ext/ExtensionCommandRunner';
 import {
   type RepositoryCliServices,
+  maybeRestoreLockSnapshot,
   runRepositoryCliCommand,
   runRepositoryCommitAction,
   runRepositoryLockAction,
@@ -192,7 +193,7 @@ export function registerRepositoryCommands(
         refreshRepositoryUi(services);
         const target = requireTarget(services.repositoryService, repositoryNode);
         if (target) {
-          void runAutoDumpAfterRepositoryOperation(target, repositoryNode, recursive, services);
+          void runFileSyncAfterLockOrUpdate(target, repositoryNode, recursive, services);
         }
       }
     }),
@@ -220,6 +221,10 @@ export function registerRepositoryCommands(
       const ok = await runRepositoryUnlockAction(toCliServices(services), repositoryNode, recursive, force);
       if (ok) {
         refreshRepositoryUi(services);
+        const target = requireTarget(services.repositoryService, repositoryNode);
+        if (target) {
+          void runFileSyncAfterUnlock(target, repositoryNode, recursive, services);
+        }
       }
     }),
 
@@ -297,7 +302,7 @@ export function registerRepositoryCommands(
         refreshRepositoryUi(services);
         const target = requireTarget(services.repositoryService, repositoryNode);
         if (target) {
-          void runAutoDumpAfterRepositoryOperation(target, repositoryNode, recursive, services);
+          void runFileSyncAfterLockOrUpdate(target, repositoryNode, recursive, services);
         }
       }
     }),
@@ -663,44 +668,70 @@ async function runPostRepositorySync(target: RepositoryTarget, services: Command
 }
 
 /**
- * После успешного захвата/получения объектов хранилища — если не отключено
- * настройкой `v8vscedit.repository.autoDumpAfterLock` — довыгружает их из БД в
- * файлы, устраняя расхождение между хранилищем и локальными XML без дорогого
- * полного импорта всей конфигурации на каждый точечный захват. Захват корня
- * конфигурации/расширения целиком (см. `RepositoryService.buildPartialDumpPlan`)
- * — единственное исключение: там частичная выгрузка равна полной, поэтому
- * выполняется обычный полный импорт (тот же путь, что и ручная кнопка
- * «Импортировать из базы»).
+ * Читает единую настройку `v8vscedit.repository.syncFilesOnLockUnlock`, управляющую
+ * всем циклом синхронизации файлов с базой при захвате/получении/отмене захвата —
+ * см. {@link runFileSyncAfterLockOrUpdate} и {@link runFileSyncAfterUnlock}. Настройка
+ * одна на весь цикл: выключена — не работает ни довыгрузка из базы, ни локальный
+ * снапшот для отката, ни полный импорт при отмене захвата корня.
+ */
+function isFileSyncOnLockUnlockEnabled(): boolean {
+  return vscode.workspace
+    .getConfiguration('v8vscedit.repository')
+    .get<boolean>('syncFilesOnLockUnlock', true);
+}
+
+/**
+ * Готовит `beforeProjectFilesChanged`-хук для операций дампа/импорта из базы: файлы
+ * пишет расширение само, контролируемо — предупреждаем watcher источников
+ * (Container.wireConfigurationSourceWatcher), чтобы он не запускал СВОЙ независимый
+ * пересчёт дерева/поддержки на те же самые пути параллельно с явным reloadEntries()
+ * вызывающей стороны. Тот же приём, что и в ExtensionCommands.createImportHooks.
+ */
+function buildFileSyncHooks(services: CommandServices): { beforeProjectFilesChanged: (filePaths: string[]) => void } {
+  return {
+    beforeProjectFilesChanged: (filePaths: string[]) => {
+      services.suppressConfigurationReloadForFiles(filePaths);
+    },
+  };
+}
+
+/**
+ * После успешного захвата/получения объектов хранилища — если включена настройка
+ * `v8vscedit.repository.syncFilesOnLockUnlock` — довыгружает их из БД в файлы,
+ * устраняя расхождение между хранилищем и локальными XML без дорогого полного
+ * импорта всей конфигурации на каждый точечный захват. Захват корня конфигурации/
+ * расширения целиком (см. `RepositoryService.buildPartialDumpPlan`) — единственное
+ * исключение: там частичная выгрузка равна полной, поэтому выполняется обычный
+ * полный импорт (тот же путь, что и ручная кнопка «Импортировать из базы»).
+ *
+ * Для отдельных объектов дополнительно снимает локальный снапшот файлов
+ * (`RepositoryService.captureLockSnapshot`, issue #2) — точку отсчёта для
+ * возможного отката при `unlock` (см. {@link runFileSyncAfterUnlock}). Снапшот
+ * снимается ПОСЛЕ довыгрузки (если она прошла успешно), чтобы точкой отсчёта было
+ * состояние, подтверждённое базой, а не произвольное локальное состояние на
+ * диске на момент запуска команды; если довыгрузка не выполнялась или не удалась —
+ * тем не менее снимается запасной снапшот с текущего состояния диска.
  *
  * Не блокирует основной хендлер команды (вызывается через `void`, как и
  * {@link runPostRepositorySync}) — захват/получение уже завершились успешно,
- * довыгрузка — это отдельный фоновый шаг со своим прогрессом.
+ * довыгрузка — это отдельный фоновый шаг со своим прогрессом. Используется и для
+ * `v8vscedit.repository.lock`, и для `v8vscedit.repository.update` — оба оставляют
+ * локальные файлы потенциально рассинхронизированными с базой ровно тем же образом.
  */
-async function runAutoDumpAfterRepositoryOperation(
+async function runFileSyncAfterLockOrUpdate(
   target: RepositoryTarget,
   repositoryNode: RepositoryCommandNode,
   recursive: boolean,
   services: CommandServices
 ): Promise<void> {
-  const autoDumpEnabled = vscode.workspace
-    .getConfiguration('v8vscedit.repository')
-    .get<boolean>('autoDumpAfterLock', true);
-  if (!autoDumpEnabled) {
+  if (!isFileSyncOnLockUnlockEnabled()) {
     return;
   }
 
   try {
     const objects = services.repositoryService.createObjectsFileForNode(repositoryNode, recursive);
     const plan = services.repositoryService.buildPartialDumpPlan(repositoryNode, objects, recursive);
-    // Файлы дампа расширение пишет само, контролируемо — предупреждаем watcher
-    // источников (Container.wireConfigurationSourceWatcher), чтобы он не запускал
-    // СВОЙ независимый пересчёт дерева/поддержки на те же самые пути параллельно
-    // с явным reloadEntries() ниже. Тот же приём, что и в ExtensionCommands.createImportHooks.
-    const hooks = {
-      beforeProjectFilesChanged: (filePaths: string[]) => {
-        services.suppressConfigurationReloadForFiles(filePaths);
-      },
-    };
+    const hooks = buildFileSyncHooks(services);
 
     if (plan.rootCaptureFull) {
       void vscode.window.showInformationMessage(
@@ -716,34 +747,93 @@ async function runAutoDumpAfterRepositoryOperation(
         await services.reloadEntries();
         services.refreshActionsView();
       }
+      // Для корня целиком локальный снапшот не снимается — у него нет единого XML-файла
+      // объекта-владельца, к которому его можно привязать (см. RepositoryService).
       return;
     }
 
-    if (plan.fullNames.length === 0) {
-      return;
+    if (plan.fullNames.length > 0) {
+      const dumped = await runPartialImportFromDatabase(
+        {
+          kind: target.configKind,
+          name: target.displayName,
+          rootPath: target.configRoot,
+          extensionName: target.extensionName,
+        },
+        plan.fullNames,
+        services.workspaceFolder,
+        services.outputChannel,
+        hooks
+      );
+      if (dumped) {
+        await services.reloadEntries();
+        services.refreshActionsView();
+      }
     }
 
-    const dumped = await runPartialImportFromDatabase(
-      {
-        kind: target.configKind,
-        name: target.displayName,
-        rootPath: target.configRoot,
-        extensionName: target.extensionName,
-      },
-      plan.fullNames,
-      services.workspaceFolder,
-      services.outputChannel,
-      hooks
-    );
-    if (dumped) {
-      await services.reloadEntries();
-      services.refreshActionsView();
-    }
+    services.repositoryService.captureLockSnapshot(target, repositoryNode);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    services.outputChannel.appendLine(`[repository][auto-dump][error] ${message}`);
+    services.outputChannel.appendLine(`[repository][file-sync][error] ${message}`);
     void vscode.window.showWarningMessage(
       `Не удалось автоматически выгрузить объекты «${repositoryNode.label ?? target.displayName}» из базы: ${message}`
+    );
+  }
+}
+
+/**
+ * После успешного `unlock` — если включена настройка
+ * `v8vscedit.repository.syncFilesOnLockUnlock` — синхронизирует локальные файлы
+ * с состоянием базы после отмены захвата (issue #2). Два разных пути в зависимости
+ * от того, что было захвачено:
+ *
+ * - Рекурсивный захват корня конфигурации/расширения целиком: при отмене захвата
+ *   в хранилище база возвращает конфигурацию к состоянию ДО захвата (поведение
+ *   платформы 1С, не зависит от расширения) — выполняется обычный полный импорт
+ *   из базы, чтобы синхронизировать с этим откаченным состоянием локальные файлы.
+ *   Локального снапшота для корня нет (см. {@link runFileSyncAfterLockOrUpdate}),
+ *   поэтому альтернативы «откатить/оставить» здесь не предлагается — импорт просто
+ *   приводит файлы в соответствие базе.
+ * - Отдельный объект: используется локальный снапшот, снятый при захвате —
+ *   {@link maybeRestoreLockSnapshot} сравнивает текущие файлы со снапшотом и, если
+ *   они разошлись, предлагает пользователю откатить их к состоянию на момент
+ *   захвата либо оставить как есть.
+ */
+async function runFileSyncAfterUnlock(
+  target: RepositoryTarget,
+  repositoryNode: RepositoryCommandNode,
+  recursive: boolean,
+  services: CommandServices
+): Promise<void> {
+  if (!isFileSyncOnLockUnlockEnabled()) {
+    return;
+  }
+
+  try {
+    const objects = services.repositoryService.createObjectsFileForNode(repositoryNode, recursive);
+    const plan = services.repositoryService.buildPartialDumpPlan(repositoryNode, objects, recursive);
+
+    if (plan.rootCaptureFull) {
+      const hooks = buildFileSyncHooks(services);
+      void vscode.window.showInformationMessage(
+        `Захват всей конфигурации «${target.displayName}» отменён — выполняется полный импорт из базы для синхронизации файлов.`
+      );
+      const imported = target.configKind === 'cfe'
+        ? await runDecompileExtension(target.extensionName ?? target.displayName, target.configRoot, services.workspaceFolder, services.outputChannel, hooks)
+        : await runDecompileMainConfiguration(target.displayName, target.configRoot, services.workspaceFolder, services.outputChannel, hooks);
+      if (imported) {
+        await services.reloadEntries();
+        services.refreshActionsView();
+      }
+      return;
+    }
+
+    await maybeRestoreLockSnapshot(toCliServices(services), target, repositoryNode);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    services.outputChannel.appendLine(`[repository][file-sync][error] ${message}`);
+    void vscode.window.showWarningMessage(
+      `Не удалось синхронизировать файлы объектов «${repositoryNode.label ?? target.displayName}» с базой после отмены захвата: ${message}`
     );
   }
 }
