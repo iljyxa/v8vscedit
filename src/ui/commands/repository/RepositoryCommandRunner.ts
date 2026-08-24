@@ -205,6 +205,7 @@ export async function runRepositoryLockAction(
     failureOperation: 'захвате объектов хранилища',
     afterSuccess: () => {
       services.repositoryService.setLocked(target, objects.fullNames, true);
+      services.repositoryService.captureLockSnapshot(target, node);
     },
   }, services);
 }
@@ -230,10 +231,50 @@ export async function runRepositoryUnlockAction(
     successMessage: `Объекты "${node.label ?? target.displayName}" освобождены.`,
     errorTitle: `Ошибка освобождения объектов "${node.label ?? target.displayName}".`,
     failureOperation: 'освобождении объектов хранилища',
-    afterSuccess: () => {
+    afterSuccess: async () => {
       services.repositoryService.setLocked(target, objects.fullNames, false);
+      await maybeRestoreLockSnapshot(services, target, node);
     },
   }, services);
+}
+
+/**
+ * После успешного `unlock` сравнивает файлы объекта со снапшотом, снятым при захвате
+ * (см. `RepositoryService.captureLockSnapshot`), и при расхождении предлагает пользователю
+ * откатить их — иначе изменения, сделанные во время захвата, молча остаются на диске
+ * даже после отмены захвата (issue #2). Снапшот в любом случае удаляется по завершении:
+ * захват снят, и его смысл как точки отсчёта для отката исчерпан.
+ */
+export async function maybeRestoreLockSnapshot(
+  services: RepositoryCliServices,
+  target: RepositoryTarget,
+  node: RepositoryNodeRef
+): Promise<void> {
+  const diff = services.repositoryService.getLockSnapshotDiff(target, node);
+  if (!diff.hasSnapshot) {
+    return;
+  }
+
+  if (diff.changedFiles.length > 0) {
+    const label = node.label ?? target.displayName;
+    const restoreChoice = 'Откатить изменения';
+    const keepChoice = 'Оставить изменения';
+    const choice = await vscode.window.showWarningMessage(
+      `Файлы объекта "${label}" были изменены после захвата (${String(diff.changedFiles.length)}). ` +
+        'Откатить их к состоянию на момент захвата?',
+      { modal: true },
+      restoreChoice,
+      keepChoice
+    );
+
+    if (choice === restoreChoice) {
+      const restored = services.repositoryService.restoreLockSnapshot(target, node);
+      services.outputChannel.appendLine(`[repository] Откат файлов "${label}" к состоянию на момент захвата: ${restored.join(', ')}`);
+      void vscode.window.showInformationMessage(`Изменения объекта "${label}" откачены к состоянию на момент захвата.`);
+    }
+  }
+
+  services.repositoryService.discardLockSnapshot(target, node);
 }
 
 export async function runRepositoryCommitAction(

@@ -4,6 +4,7 @@ import * as path from 'path';
 import type { MetaKind } from '../../domain/MetaTypes';
 import type { ProjectSecretStorage } from '../environment/ProjectSecretStorage';
 import { escapeXmlAttribute as escapeXml, parseConfigXml, parseObjectXml } from '../xml';
+import { getObjectLocationFromXml } from '../fs/ObjectLocation';
 
 export interface RepositoryBinding {
   repoPath: string;
@@ -37,6 +38,22 @@ export interface RepositoryNodeRef {
     tabularSectionName?: string;
     ownerObjectXmlPath?: string;
   };
+}
+
+/**
+ * Результат сравнения файлов объекта с их снапшотом, снятым на момент захвата
+ * (`captureLockSnapshot`). `hasSnapshot: false` — снапшота нет (объект не захватывался
+ * через этот механизм, либо для узла снапшот не поддерживается — см. `captureLockSnapshot`).
+ */
+export interface RepositorySnapshotDiff {
+  hasSnapshot: boolean;
+  /** Пути (относительно `configRoot`) файлов, изменившихся или удалённых после захвата. */
+  changedFiles: string[];
+}
+
+interface RepositorySnapshotManifest {
+  /** Пути файлов относительно `configRoot`, зафиксированные снапшотом (POSIX-разделители). */
+  files: string[];
 }
 
 interface RepositoryScopeState {
@@ -138,6 +155,21 @@ const CHILD_LIKE_KINDS: ReadonlySet<string> = new Set([
   'Resource',
   'EnumValue',
   'Column',
+]);
+
+/**
+ * Виды узлов, у которых нет собственного XML-файла объекта: корень конфигурации/расширения
+ * и узлы группировки дерева. У них не бывает ни полного имени объекта (`resolveFullName`),
+ * ни файлов для снапшота захвата (`resolveObjectXmlPathForSnapshot`).
+ */
+const ROOT_OR_GROUP_KINDS_WITHOUT_OWN_XML: ReadonlySet<string> = new Set([
+  'configuration',
+  'extension',
+  'extensions-root',
+  'group-common',
+  'group-type',
+  'NumeratorsBranch',
+  'SequencesBranch',
 ]);
 
 /**
@@ -485,14 +517,121 @@ export class RepositoryService {
     this.saveStateFile(state);
   }
 
+  /**
+   * Снимает снапшот файлов объекта в момент его локального захвата (`v8vscedit.repository.lock`).
+   * Снапшот не зависит от git — он нужен, чтобы `unlock` мог предложить откат к состоянию
+   * на момент захвата (issue #2), даже если в проекте нет `.git` или изменения уже закоммичены.
+   *
+   * Для узлов, у которых нет собственного XML-файла объекта (корень конфигурации/расширения,
+   * узлы группировки) снапшот не снимается — откатывать нечего, т.к. `createObjectsFileForNode`
+   * в этом случае не привязывает захват к конкретным файлам на диске.
+   */
+  captureLockSnapshot(target: RepositoryTarget, node: RepositoryNodeRef): void {
+    const xmlPath = this.resolveObjectXmlPathForSnapshot(node);
+    const fullName = this.resolveFullName(node);
+    if (!xmlPath || !fullName || !fs.existsSync(xmlPath)) {
+      return;
+    }
+
+    const files = this.collectObjectFiles(xmlPath);
+    const snapshotDir = this.getSnapshotDir(target, fullName);
+    // Затираем возможный снапшот от предыдущего захвата этого же объекта — актуален только
+    // снапшот, снятый последним `lock`.
+    fs.rmSync(snapshotDir, { recursive: true, force: true });
+
+    const filesDir = path.join(snapshotDir, 'files');
+    const relativeFiles: string[] = [];
+    for (const file of files) {
+      const relative = path.relative(target.configRoot, file).split(path.sep).join('/');
+      relativeFiles.push(relative);
+      const destination = path.join(filesDir, relative);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.copyFileSync(file, destination);
+    }
+
+    const manifest: RepositorySnapshotManifest = { files: relativeFiles };
+    fs.writeFileSync(path.join(snapshotDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8');
+  }
+
+  /**
+   * Сравнивает текущее содержимое файлов объекта со снапшотом, снятым при захвате.
+   * Отсутствующий снапшот (объект не захватывался, либо снапшот уже израсходован
+   * `discardLockSnapshot`) отдаётся как `hasSnapshot: false`, а не как «изменений нет» —
+   * вызывающая сторона не должна путать эти два случая.
+   */
+  getLockSnapshotDiff(target: RepositoryTarget, node: RepositoryNodeRef): RepositorySnapshotDiff {
+    const fullName = this.resolveFullName(node);
+    if (!fullName) {
+      return { hasSnapshot: false, changedFiles: [] };
+    }
+
+    const snapshotDir = this.getSnapshotDir(target, fullName);
+    const manifest = this.readSnapshotManifest(snapshotDir);
+    if (!manifest) {
+      return { hasSnapshot: false, changedFiles: [] };
+    }
+
+    const changedFiles: string[] = [];
+    for (const relative of manifest.files) {
+      const currentPath = path.join(target.configRoot, relative);
+      const snapshotPath = path.join(snapshotDir, 'files', relative);
+      if (!fs.existsSync(currentPath) || !filesAreEqual(currentPath, snapshotPath)) {
+        changedFiles.push(relative);
+      }
+    }
+
+    return { hasSnapshot: true, changedFiles };
+  }
+
+  /**
+   * Восстанавливает файлы объекта из снапшота, снятого при захвате. Возвращает
+   * абсолютные пути восстановленных файлов (для лога вызывающей стороны).
+   * Файлы, появившиеся после захвата и не входившие в снапшот, не удаляются —
+   * известное ограничение (см. issue #2, вариант A).
+   */
+  restoreLockSnapshot(target: RepositoryTarget, node: RepositoryNodeRef): string[] {
+    const fullName = this.resolveFullName(node);
+    if (!fullName) {
+      return [];
+    }
+
+    const snapshotDir = this.getSnapshotDir(target, fullName);
+    const manifest = this.readSnapshotManifest(snapshotDir);
+    if (!manifest) {
+      return [];
+    }
+
+    const restored: string[] = [];
+    for (const relative of manifest.files) {
+      const destination = path.join(target.configRoot, relative);
+      const source = path.join(snapshotDir, 'files', relative);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.copyFileSync(source, destination);
+      restored.push(destination);
+    }
+    return restored;
+  }
+
+  /**
+   * Удаляет снапшот объекта. Вызывается после `unlock` независимо от решения
+   * пользователя об откате — снапшот, снятый предыдущим захватом, теряет смысл,
+   * как только объект снова свободен.
+   */
+  discardLockSnapshot(target: RepositoryTarget, node: RepositoryNodeRef): void {
+    const fullName = this.resolveFullName(node);
+    if (!fullName) {
+      return;
+    }
+    fs.rmSync(this.getSnapshotDir(target, fullName), { recursive: true, force: true });
+  }
+
   resolveFullName(node: RepositoryNodeRef): string | null {
     const kind = node.nodeKind as MetaKind | undefined;
     if (!kind) {
       return null;
     }
 
-    if (kind === 'configuration' || kind === 'extension' || kind === 'extensions-root' ||
-      kind === 'group-common' || kind === 'group-type' || kind === 'NumeratorsBranch' || kind === 'SequencesBranch') {
+    if (ROOT_OR_GROUP_KINDS_WITHOUT_OWN_XML.has(kind)) {
       return null;
     }
 
@@ -585,6 +724,79 @@ export class RepositoryService {
       : null;
     this.rootFullNameCache.set(cacheKey, { mtimeMs, value: fullName });
     return fullName;
+  }
+
+  /**
+   * Путь к XML корневого объекта-владельца для целей снапшота захвата. Повторяет маршрутизацию
+   * `resolveFullName`: для дочерних узлов (реквизит/ТЧ/форма/…) снапшотится не сам узел,
+   * а владелец — именно владелец захватывается и именно его файлы могут быть изменены.
+   * Для корня конфигурации/расширения и узлов группировки собственного XML-файла нет — `null`.
+   */
+  private resolveObjectXmlPathForSnapshot(node: RepositoryNodeRef): string | null {
+    const kind = node.nodeKind as MetaKind | undefined;
+    if (!kind) {
+      return null;
+    }
+
+    if (CHILD_LIKE_KINDS.has(kind)) {
+      return node.metaContext?.ownerObjectXmlPath ?? null;
+    }
+
+    if (ROOT_OR_GROUP_KINDS_WITHOUT_OWN_XML.has(kind)) {
+      return null;
+    }
+
+    return node.xmlPath ?? null;
+  }
+
+  /**
+   * Файлы, относящиеся к объекту: сам XML + всё содержимое его каталога (Ext/, Forms/,
+   * Templates/ и т.п.), если каталог существует (выгрузка в «глубоком» формате).
+   * Для «плоской» выгрузки (XML без соседнего каталога) — только сам XML-файл.
+   */
+  private collectObjectFiles(xmlPath: string): string[] {
+    const files = new Set<string>();
+    files.add(path.resolve(xmlPath));
+
+    const { objectDir } = getObjectLocationFromXml(xmlPath);
+    if (isExistingDirectory(objectDir)) {
+      this.walkFilesInto(objectDir, files);
+    }
+
+    return [...files];
+  }
+
+  private walkFilesInto(dir: string, out: Set<string>): void {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        this.walkFilesInto(fullPath, out);
+      } else if (entry.isFile()) {
+        out.add(path.resolve(fullPath));
+      }
+    }
+  }
+
+  private getSnapshotDir(target: RepositoryTarget, fullName: string): string {
+    const scopeKey = this.buildScopeKey(target);
+    const fullNameHash = crypto.createHash('sha1').update(fullName).digest('hex');
+    return path.join(this.workspaceRoot, '.v8vscedit', 'repository', 'snapshots', scopeKey, fullNameHash);
+  }
+
+  private readSnapshotManifest(snapshotDir: string): RepositorySnapshotManifest | null {
+    const manifestPath = path.join(snapshotDir, 'manifest.json');
+    if (!fs.existsSync(manifestPath)) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as Partial<RepositorySnapshotManifest>;
+      if (!Array.isArray(parsed.files)) {
+        return null;
+      }
+      return { files: parsed.files };
+    } catch {
+      return null;
+    }
   }
 
   private resolveOwnerObjectXmlPath(filePath: string): string | null {
@@ -868,4 +1080,27 @@ function getFileMtimeMs(filePath: string): number | undefined {
 
 function normalizePathKey(filePath: string): string {
   return path.resolve(filePath).toLowerCase();
+}
+
+function filesAreEqual(leftPath: string, rightPath: string): boolean {
+  try {
+    return fs.readFileSync(leftPath).equals(fs.readFileSync(rightPath));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `existsSync` + `statSync(...).isDirectory()` в одну проверку без промежуточного гонки
+ * TOCTOU-исключения (`objectDir` мог исчезнуть между вызовами). Ветка "существует, но не
+ * каталог" (коллизия имени объекта с одноимённым файлом) недостижима при штатной выгрузке
+ * 1С — `stat` в остальном либо кидает ENOENT (нет пути), либо подтверждает каталог.
+ */
+function isExistingDirectory(dirPath: string): boolean {
+  try {
+    /* c8 ignore next */
+    return fs.statSync(dirPath).isDirectory();
+  } catch {
+    return false;
+  }
 }
