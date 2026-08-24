@@ -351,10 +351,10 @@ export async function runPartialImportFromDatabase(
 
   return runAgentConfigurationOperation(
     {
-      progressTitle: `Частичная выгрузка объектов «${target.name}» во внутренний XML`,
-      progressStartMessage: 'Частичный импорт через агент...',
-      successMessage: `Объекты «${target.name}» (${String(fullNames.length)}) выгружены из базы.`,
-      errorTitle: `Ошибка частичной выгрузки объектов «${target.name}».`,
+      progressTitle: `Импорт захваченных объектов «${target.name}» во внутренний XML`,
+      progressStartMessage: 'Импорт захваченных объектов через агент...',
+      successMessage: `Объекты «${target.name}» (${String(fullNames.length)}) импортированы из базы.`,
+      errorTitle: `Ошибка импорта захваченных объектов «${target.name}».`,
       showSuccessMessage: false,
       workspaceFolder,
       outputChannel,
@@ -402,11 +402,11 @@ async function runBatchPartialDump(
     return await runInternalCliCommand(
       {
         cliArgs,
-        progressTitle: `Частичная выгрузка объектов «${target.name}» во внутренний XML`,
-        progressStartMessage: `Выгрузка ${String(fullNames.length)} объект(ов) из базы во временный каталог...`,
-        successMessage: `Объекты «${target.name}» (${String(fullNames.length)}) выгружены из базы.`,
-        errorTitle: `Ошибка частичной выгрузки объектов «${target.name}».`,
-        failureOperation: 'частичной выгрузке объектов из базы',
+        progressTitle: `Импорт захваченных объектов «${target.name}» во внутренний XML`,
+        progressStartMessage: `Импорт ${String(fullNames.length)} объект(ов) из базы во временный каталог...`,
+        successMessage: `Объекты «${target.name}» (${String(fullNames.length)}) импортированы из базы.`,
+        errorTitle: `Ошибка импорта захваченных объектов «${target.name}».`,
+        failureOperation: 'импорте захваченных объектов из базы',
         logPrefix: 'export-configuration',
         showSuccessMessage: false,
         onProgressMessage: hooks?.onProgressMessage,
