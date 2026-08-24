@@ -147,6 +147,34 @@ export function patchHashSnapshot(
   };
 }
 
+/**
+ * Точечно обновляет хеш-кэш конфигурации/расширения по конкретным изменённым файлам —
+ * в отличие от полного пересчёта всего `configDir` (используется для 100%-full импорта),
+ * не трогает файлы вне `relativeFiles`. Кэш метаданных (структуру дерева объектов) не
+ * обновляет: частичная выгрузка после захвата/получения из хранилища меняет содержимое
+ * уже существующих объектов, а не состав дерева. Удаления в этом кэше не отражаются —
+ * известное ограничение частичной выгрузки (см. `RepositoryService.buildPartialDumpPlan`).
+ *
+ * Общий для агентского (`AgentOperationService.importPartialFromDatabase`) и batch-пути
+ * (`ExtensionCommandRunner.runBatchPartialDump`) частичной выгрузки — раньше эта логика
+ * дублировалась в обоих местах.
+ */
+export function patchHashCacheForFiles(
+  projectRoot: string,
+  target: 'cf' | 'cfe',
+  configDir: string,
+  extensionName: string,
+  relativeFiles: readonly string[]
+): void {
+  const scopeKey = buildScopeKey(target, configDir, extensionName);
+  const previous = loadHashCache(projectRoot, scopeKey);
+  const supportedFiles = relativeFiles
+    .map((relativeFile) => relativeFile.replace(/\\/g, '/'))
+    .filter((relativeFile) => isSupportedConfigFile(relativeFile));
+  const changedHashes = collectCurrentHashes(configDir, supportedFiles);
+  saveHashCache(projectRoot, patchHashSnapshot(previous, changedHashes, []));
+}
+
 export function collectCurrentHashes(configDir: string, relativePaths: string[]): Record<string, string> {
   const result: Record<string, string> = {};
   for (const relativePath of relativePaths) {

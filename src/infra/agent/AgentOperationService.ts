@@ -12,8 +12,8 @@ import {
   buildScopeKey,
   collectCurrentHashes,
   diffHashSnapshots,
-  isSupportedConfigFile,
   loadHashCache,
+  patchHashCacheForFiles,
   patchHashSnapshot,
   saveHashCache,
 } from '../cache/HashCache';
@@ -167,7 +167,8 @@ export class AgentOperationService {
         // ExtensionCommandRunner.runBatchPartialDump). Здесь — точечный патч только
         // по relativeFiles; кэш метаданных (дерево объектов) не трогаем — состав
         // объектов от частичной выгрузки не меняется, меняется только их содержимое.
-        this.patchHashCacheForFiles(target, relativeFiles);
+        const extensionName = target.kind === 'cfe' ? target.extensionName ?? target.name : '';
+        patchHashCacheForFiles(this.projectRoot, target.kind, target.rootPath, extensionName, relativeFiles);
         return { changedProjectFiles };
       } finally {
         fs.rmSync(workspace.workspaceRoot, { recursive: true, force: true });
@@ -301,22 +302,6 @@ export class AgentOperationService {
     const scopeKey = buildScopeKey(target.kind, target.rootPath, extensionName);
     saveHashCache(this.projectRoot, buildHashSnapshot(scopeKey, target.rootPath));
     saveMetadataCacheForEntry(this.projectRoot, scopeKey, { kind: target.kind, rootPath: target.rootPath });
-  }
-
-  /**
-   * Точечный аналог {@link refreshCaches} для частичной выгрузки — патчит хеш-кэш
-   * только по `relativeFiles`, не пересобирает его полным обходом `target.rootPath`
-   * и не трогает кэш метаданных (см. {@link importPartialFromDatabase}).
-   */
-  private patchHashCacheForFiles(target: AgentConfigurationOperationTarget, relativeFiles: readonly string[]): void {
-    const extensionName = target.kind === 'cfe' ? target.extensionName ?? target.name : '';
-    const scopeKey = buildScopeKey(target.kind, target.rootPath, extensionName);
-    const previous = loadHashCache(this.projectRoot, scopeKey);
-    const supportedFiles = relativeFiles
-      .map((relativeFile) => relativeFile.replace(/\\/g, '/'))
-      .filter((relativeFile) => isSupportedConfigFile(relativeFile));
-    const changedHashes = collectCurrentHashes(target.rootPath, supportedFiles);
-    saveHashCache(this.projectRoot, patchHashSnapshot(previous, changedHashes, []));
   }
 
   /**

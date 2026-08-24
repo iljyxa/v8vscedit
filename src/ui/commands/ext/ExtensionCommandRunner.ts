@@ -23,14 +23,7 @@ import {
 } from '../../../infra/process';
 import { readExtensionListFromDumpFile, resolveDbPassword, type ProjectSecretStorage } from '../../../infra/environment';
 import { collectAllRelativeFiles, syncSelectedSnapshotFiles } from '../../../infra/agent/DirectorySnapshot';
-import {
-  buildScopeKey,
-  collectCurrentHashes,
-  isSupportedConfigFile,
-  loadHashCache,
-  patchHashSnapshot,
-  saveHashCache,
-} from '../../../infra/cache/HashCache';
+import { patchHashCacheForFiles } from '../../../infra/cache/HashCache';
 
 type NodeArg = MetadataNode | { xmlPath?: string; nodeKind?: string; label?: string };
 
@@ -427,7 +420,7 @@ async function runBatchPartialDump(
           // частичной выгрузки. Здесь хеш-кэш патчится только по реально изменённым
           // файлам через ту же infra/cache/HashCache, что использует агентский
           // инкрементальный путь (AgentOperationService.loadChanged).
-          patchHashCacheForFiles(target.kind, target.extensionName ?? '', target.rootPath, workspaceFolder, relativeFiles);
+          patchHashCacheForFiles(workspaceFolder.uri.fsPath, target.kind, target.rootPath, target.extensionName ?? '', relativeFiles);
         },
       },
       workspaceFolder,
@@ -2019,34 +2012,6 @@ async function refreshConfigurationHashCache(
   if (!refreshed) {
     outputChannel.appendLine(`[refresh-hash-cache] Не удалось обновить кэш после импорта: ${name}.`);
   }
-}
-
-/**
- * Точечно обновляет хеш-кэш конфигурации/расширения по конкретным изменённым
- * файлам — в отличие от {@link refreshConfigurationHashCache} (полный пересчёт
- * всего `configRoot`, используется для 100%-full импорта), не трогает файлы вне
- * `relativeFiles`. Метаданные (структуру дерева объектов) не обновляет: частичная
- * выгрузка после захвата/получения из хранилища меняет содержимое уже существующих
- * объектов, а не состав дерева, поэтому пересборка кэша метаданных здесь не нужна.
- * Удаления в этом кэше не отражаются — известное ограничение частичной выгрузки
- * (см. комментарий у `runBatchPartialDump`/`RepositoryService.buildPartialDumpPlan`).
- */
-function patchHashCacheForFiles(
-  target: 'cf' | 'cfe',
-  extensionName: string,
-  configRoot: string,
-  workspaceFolder: vscode.WorkspaceFolder,
-  relativeFiles: readonly string[]
-): void {
-  const scopeKey = buildScopeKey(target, configRoot, extensionName);
-  const projectRoot = workspaceFolder.uri.fsPath;
-  const previous = loadHashCache(projectRoot, scopeKey);
-  const supportedFiles = relativeFiles
-    .map((relativeFile) => relativeFile.replace(/\\/g, '/'))
-    .filter((relativeFile) => isSupportedConfigFile(relativeFile));
-  const changedHashes = collectCurrentHashes(configRoot, supportedFiles);
-  const patched = patchHashSnapshot(previous, changedHashes, []);
-  saveHashCache(projectRoot, patched);
 }
 
 function yieldToUi(): Promise<void> {

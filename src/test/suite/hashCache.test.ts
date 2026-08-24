@@ -7,6 +7,7 @@ import {
   buildScopeKey,
   diffHashSnapshots,
   loadHashCache,
+  patchHashCacheForFiles,
   saveHashCache,
 } from '../../infra/cache/HashCache';
 import { collectConfigFilesForLoad, detectPotentialRename } from '../../infra/agent/ConfigLoadFileCollector';
@@ -93,6 +94,37 @@ suite('HashCache', () => {
       assert.ok(snapshot.files['DataProcessors/Обработка/Templates/Текст/Ext/Template.bin']);
       assert.ok(snapshot.files['CommonTemplates/Описание/Ext/Template/ru.html']);
       assert.ok(!snapshot.files['README.txt']);
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('patchHashCacheForFiles точечно обновляет только переданные поддерживаемые файлы, не трогая остальной кэш', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-hash-patch-'));
+    try {
+      fs.mkdirSync(path.join(tempRoot, 'Catalogs'), { recursive: true });
+      fs.writeFileSync(path.join(tempRoot, 'Catalogs', 'Тест.xml'), '<xml v="1"/>', 'utf-8');
+      fs.writeFileSync(path.join(tempRoot, 'ConfigDumpInfo.xml'), '<skip/>', 'utf-8');
+
+      const scopeKey = buildScopeKey('cf', tempRoot);
+      saveHashCache(tempRoot, {
+        schemaVersion: 1,
+        scopeKey,
+        generatedAt: '',
+        files: {
+          'Catalogs/Тест.xml': 'устаревший-хеш',
+          'Documents/НеЗатронутый.xml': 'хеш-остаётся',
+        },
+      });
+
+      // ConfigDumpInfo.xml — неподдерживаемый файл (isSupportedConfigFile), должен
+      // быть отфильтрован и не попасть в кэш, несмотря на явную передачу в списке.
+      patchHashCacheForFiles(tempRoot, 'cf', tempRoot, '', ['Catalogs/Тест.xml', 'ConfigDumpInfo.xml']);
+
+      const patched = loadHashCache(tempRoot, scopeKey);
+      assert.notStrictEqual(patched.files['Catalogs/Тест.xml'], 'устаревший-хеш', 'Хеш изменённого файла должен обновиться.');
+      assert.strictEqual(patched.files['Documents/НеЗатронутый.xml'], 'хеш-остаётся', 'Файлы вне списка не трогаются.');
+      assert.ok(!patched.files['ConfigDumpInfo.xml'], 'Неподдерживаемый файл не должен попасть в кэш.');
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
