@@ -56,6 +56,36 @@ export function syncSelectedSnapshotFiles(sourceDir: string, targetDir: string, 
   }
 }
 
+/**
+ * Собирает относительные пути ВСЕХ файлов внутри `dir` (без сравнения с другим
+ * деревом). Нужна для мёржа частичной выгрузки (`-Objects`/`-listFile` по
+ * конкретным fullName): в отличие от {@link collectSnapshotProjectFiles}, которая
+ * трактует отсутствие пути в источнике как «удалено в БД» — это корректно только
+ * когда источник является ПОЛНЫМ зеркалом конфигурации. Для частичного дампа
+ * источник содержит только запрошенные объекты, и та же логика ошибочно пометила
+ * бы как «удалённые» файлы всех остальных, не участвовавших в дампе объектов.
+ * Поэтому для частичного дампа безопасно только «то, что реально появилось
+ * в `dir`» — без каких-либо выводов об удалении.
+ */
+export function collectAllRelativeFiles(dir: string): string[] {
+  const result: string[] = [];
+  const walk = (current: string): void => {
+    if (!fs.existsSync(current)) {
+      return;
+    }
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(entryPath);
+        continue;
+      }
+      result.push(path.relative(dir, entryPath));
+    }
+  };
+  walk(dir);
+  return result;
+}
+
 export function collectSnapshotProjectFiles(sourceDir: string, targetDir: string): string[] {
   const result = new Set<string>();
   collectSourceProjectFiles(sourceDir, targetDir, result);

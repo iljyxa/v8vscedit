@@ -782,6 +782,11 @@
           "default": "",
           "description": "Пароль 1С для live-инструментов MCP bsl-analyzer"
         },
+        "v8vscedit.repository.autoDumpAfterLock": {
+          "type": "boolean",
+          "default": true,
+          "description": "Автоматически выгружать из базы в файлы объекты, захваченные или полученные из хранилища конфигурации. Для захвата всей конфигурации/расширения целиком вместо частичной выгрузки выполняется полный «Импорт из базы»."
+        },
         "v8vscedit.configuration.operationMode": {
           "type": "string",
           "enum": [

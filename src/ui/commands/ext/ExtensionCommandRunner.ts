@@ -22,6 +22,15 @@ import {
   runProcess,
 } from '../../../infra/process';
 import { readExtensionListFromDumpFile, resolveDbPassword, type ProjectSecretStorage } from '../../../infra/environment';
+import { collectAllRelativeFiles, syncSelectedSnapshotFiles } from '../../../infra/agent/DirectorySnapshot';
+import {
+  buildScopeKey,
+  collectCurrentHashes,
+  isSupportedConfigFile,
+  loadHashCache,
+  patchHashSnapshot,
+  saveHashCache,
+} from '../../../infra/cache/HashCache';
 
 type NodeArg = MetadataNode | { xmlPath?: string; nodeKind?: string; label?: string };
 
@@ -316,6 +325,117 @@ export async function runDecompileMainConfiguration(
       );
     }
   );
+}
+
+/**
+ * Частичная выгрузка из БД в файлы по явному списку fullName объектов (в отличие
+ * от {@link runDecompileMainConfiguration}/{@link runDecompileExtension}, которые
+ * всегда выгружают конфигурацию/расширение целиком). Используется после
+ * захвата/получения объектов хранилища — см. `RepositoryCommandRunner.ts`.
+ * Диспетчеризует между batch- и agent-режимом так же, как полный импорт.
+ */
+export async function runPartialImportFromDatabase(
+  target: { kind: 'cf' | 'cfe'; name: string; rootPath: string; extensionName?: string },
+  fullNames: readonly string[],
+  workspaceFolder: vscode.WorkspaceFolder,
+  outputChannel: vscode.OutputChannel,
+  hooks?: ConfigurationImportHooks
+): Promise<boolean> {
+  if (fullNames.length === 0) {
+    return true;
+  }
+
+  if (!isAgentConfigurationOperationMode()) {
+    return runBatchPartialDump(target, fullNames, workspaceFolder, outputChannel, hooks);
+  }
+
+  return runAgentConfigurationOperation(
+    {
+      progressTitle: `Частичная выгрузка объектов «${target.name}» во внутренний XML`,
+      progressStartMessage: 'Частичный импорт через агент...',
+      successMessage: `Объекты «${target.name}» (${String(fullNames.length)}) выгружены из базы.`,
+      errorTitle: `Ошибка частичной выгрузки объектов «${target.name}».`,
+      showSuccessMessage: false,
+      workspaceFolder,
+      outputChannel,
+      hooks,
+      rootPath: target.rootPath,
+    },
+    async (service, operationHooks) => {
+      await service.importPartialFromDatabase(
+        { kind: target.kind, name: target.name, rootPath: target.rootPath, extensionName: target.extensionName },
+        fullNames,
+        operationHooks
+      );
+    }
+  );
+}
+
+async function runBatchPartialDump(
+  target: { kind: 'cf' | 'cfe'; name: string; rootPath: string; extensionName?: string },
+  fullNames: readonly string[],
+  workspaceFolder: vscode.WorkspaceFolder,
+  outputChannel: vscode.OutputChannel,
+  hooks?: ConfigurationImportHooks
+): Promise<boolean> {
+  const settingsPath = resolveSettingsPath(workspaceFolder.uri.fsPath, target.rootPath);
+  const connection = await resolveConnectionFromSettings(settingsPath);
+  const tempRoot = createWorkspaceTempDir(workspaceFolder.uri.fsPath, 'import-partial-');
+  const tempConfigDir = path.join(tempRoot, target.kind);
+  fs.mkdirSync(tempConfigDir, { recursive: true });
+  const cliArgs = [
+    'export-configuration',
+    '-ProjectRoot',
+    workspaceFolder.uri.fsPath,
+    '-Target',
+    target.kind,
+    '-ConfigDir',
+    tempConfigDir,
+    '-Mode',
+    'Partial',
+    '-Objects',
+    fullNames.join(','),
+    ...(target.kind === 'cfe' && target.extensionName ? ['-Extension', target.extensionName] : []),
+    ...buildConnectionCliArgs(connection),
+  ];
+  try {
+    return await runInternalCliCommand(
+      {
+        cliArgs,
+        progressTitle: `Частичная выгрузка объектов «${target.name}» во внутренний XML`,
+        progressStartMessage: `Выгрузка ${String(fullNames.length)} объект(ов) из базы во временный каталог...`,
+        successMessage: `Объекты «${target.name}» (${String(fullNames.length)}) выгружены из базы.`,
+        errorTitle: `Ошибка частичной выгрузки объектов «${target.name}».`,
+        failureOperation: 'частичной выгрузке объектов из базы',
+        logPrefix: 'export-configuration',
+        showSuccessMessage: false,
+        onProgressMessage: hooks?.onProgressMessage,
+        afterSuccess: async () => {
+          // Только реально появившиеся в temp-каталоге файлы — НЕ syncDirectorySnapshot,
+          // который зеркалирует и удалил бы из проекта всё, чего нет в частичном дампе
+          // (см. комментарий у collectAllRelativeFiles).
+          const relativeFiles = collectAllRelativeFiles(tempConfigDir);
+          const changedProjectFiles = relativeFiles.map((relativeFile) => path.join(target.rootPath, relativeFile));
+          hooks?.onProgressMessage?.(`замена файлов частичной выгрузки: ${String(changedProjectFiles.length)}`);
+          hooks?.beforeProjectFilesChanged?.(changedProjectFiles);
+          await yieldToUi();
+          syncSelectedSnapshotFiles(tempConfigDir, target.rootPath, relativeFiles);
+          hooks?.beforeProjectFilesChanged?.(changedProjectFiles);
+          hooks?.onProgressMessage?.('обновление кэша хешей (точечно)');
+          // НЕ refreshConfigurationHashCache — тот пересобирает хеш-кэш ПОЛНЫМ обходом
+          // всего configRoot (десятки тысяч файлов), что сводит на нет весь смысл
+          // частичной выгрузки. Здесь хеш-кэш патчится только по реально изменённым
+          // файлам через ту же infra/cache/HashCache, что использует агентский
+          // инкрементальный путь (AgentOperationService.loadChanged).
+          patchHashCacheForFiles(target.kind, target.extensionName ?? '', target.rootPath, workspaceFolder, relativeFiles);
+        },
+      },
+      workspaceFolder,
+      outputChannel
+    );
+  } finally {
+    removeTempDir(tempRoot, outputChannel);
+  }
 }
 
 export async function runApplyDatabaseConfiguration(
@@ -1899,6 +2019,34 @@ async function refreshConfigurationHashCache(
   if (!refreshed) {
     outputChannel.appendLine(`[refresh-hash-cache] Не удалось обновить кэш после импорта: ${name}.`);
   }
+}
+
+/**
+ * Точечно обновляет хеш-кэш конфигурации/расширения по конкретным изменённым
+ * файлам — в отличие от {@link refreshConfigurationHashCache} (полный пересчёт
+ * всего `configRoot`, используется для 100%-full импорта), не трогает файлы вне
+ * `relativeFiles`. Метаданные (структуру дерева объектов) не обновляет: частичная
+ * выгрузка после захвата/получения из хранилища меняет содержимое уже существующих
+ * объектов, а не состав дерева, поэтому пересборка кэша метаданных здесь не нужна.
+ * Удаления в этом кэше не отражаются — известное ограничение частичной выгрузки
+ * (см. комментарий у `runBatchPartialDump`/`RepositoryService.buildPartialDumpPlan`).
+ */
+function patchHashCacheForFiles(
+  target: 'cf' | 'cfe',
+  extensionName: string,
+  configRoot: string,
+  workspaceFolder: vscode.WorkspaceFolder,
+  relativeFiles: readonly string[]
+): void {
+  const scopeKey = buildScopeKey(target, configRoot, extensionName);
+  const projectRoot = workspaceFolder.uri.fsPath;
+  const previous = loadHashCache(projectRoot, scopeKey);
+  const supportedFiles = relativeFiles
+    .map((relativeFile) => relativeFile.replace(/\\/g, '/'))
+    .filter((relativeFile) => isSupportedConfigFile(relativeFile));
+  const changedHashes = collectCurrentHashes(configRoot, supportedFiles);
+  const patched = patchHashSnapshot(previous, changedHashes, []);
+  saveHashCache(projectRoot, patched);
 }
 
 function yieldToUi(): Promise<void> {

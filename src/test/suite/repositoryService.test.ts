@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
@@ -186,6 +187,110 @@ suite('RepositoryService', () => {
     service.resolveTargetByXmlPath(xmlPath);
     assert.ok(service.getConfigRootCacheSize() > 0);
   });
+
+  test('resolveXmlPathByFullName — находит файл объекта в hierarchical- и flat-структуре, null для неизвестного', () => {
+    const configRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-resolve-fullname-'));
+
+    // Плоский вариант: <Папка>/<Имя>.xml (как в реальной выгрузке справочников).
+    fs.mkdirSync(path.join(configRoot, 'Catalogs'), { recursive: true });
+    fs.writeFileSync(path.join(configRoot, 'Catalogs', 'Номенклатура.xml'), '<MetaDataObject/>', 'utf-8');
+
+    // Вложенный вариант: <Папка>/<Имя>/<Имя>.xml.
+    fs.mkdirSync(path.join(configRoot, 'Documents', 'ЗаказПокупателя'), { recursive: true });
+    fs.writeFileSync(
+      path.join(configRoot, 'Documents', 'ЗаказПокупателя', 'ЗаказПокупателя.xml'),
+      '<MetaDataObject/>',
+      'utf-8'
+    );
+
+    assert.strictEqual(
+      service.resolveXmlPathByFullName(configRoot, 'Справочник.Номенклатура'),
+      path.join(configRoot, 'Catalogs', 'Номенклатура.xml')
+    );
+    assert.strictEqual(
+      service.resolveXmlPathByFullName(configRoot, 'Документ.ЗаказПокупателя'),
+      path.join(configRoot, 'Documents', 'ЗаказПокупателя', 'ЗаказПокупателя.xml')
+    );
+    assert.strictEqual(service.resolveXmlPathByFullName(configRoot, 'Справочник.НеСуществует'), null);
+    assert.strictEqual(service.resolveXmlPathByFullName(configRoot, 'НеизвестныйТип.Что-то'), null);
+    assert.strictEqual(service.resolveXmlPathByFullName(configRoot, 'БезТочки'), null);
+
+    fs.rmSync(configRoot, { recursive: true, force: true });
+  });
+
+  test('resolveSubsystemMemberFullNames — раскрывает Content с переводом типа в русский fullName, рекурсивно по дочерним подсистемам', () => {
+    const configRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-subsystem-members-'));
+    fs.mkdirSync(path.join(configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница'), { recursive: true });
+
+    // Content хранит английский префикс (Catalog/Document — MetaKind), а не русский
+    // технический fullName хранилища — это и должен переводить resolveSubsystemMemberFullNames.
+    fs.writeFileSync(
+      path.join(configRoot, 'Subsystems', 'Продажи.xml'),
+      buildSubsystemXml('Продажи', ['Catalog.Товары'], ['Розница']),
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница', 'Розница.xml'),
+      buildSubsystemXml('Розница', ['Document.ЗаказПокупателя'], []),
+      'utf-8'
+    );
+
+    const subsystemXmlPath = path.join(configRoot, 'Subsystems', 'Продажи.xml');
+
+    const nonRecursive = service.resolveSubsystemMemberFullNames(subsystemXmlPath, false);
+    assert.deepStrictEqual(
+      [...nonRecursive].sort(),
+      ['Подсистема.Продажи', 'Справочник.Товары'].sort()
+    );
+
+    const recursive = service.resolveSubsystemMemberFullNames(subsystemXmlPath, true);
+    assert.deepStrictEqual(
+      [...recursive].sort(),
+      ['Подсистема.Продажи', 'Справочник.Товары', 'Подсистема.Розница', 'Документ.ЗаказПокупателя'].sort()
+    );
+
+    fs.rmSync(configRoot, { recursive: true, force: true });
+  });
+
+  test('buildPartialDumpPlan — три ветки: корень целиком, рекурсивная Подсистема, обычный объект', () => {
+    const configRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-partial-plan-'));
+    fs.mkdirSync(path.join(configRoot, 'Subsystems'), { recursive: true });
+    fs.writeFileSync(
+      path.join(configRoot, 'Subsystems', 'Продажи.xml'),
+      buildSubsystemXml('Продажи', ['Catalog.Товары'], []),
+      'utf-8'
+    );
+
+    // Захват корня конфигурации/расширения целиком — частичная выгрузка не имеет смысла.
+    const rootPlan = service.buildPartialDumpPlan(
+      { nodeKind: 'configuration' },
+      { fullNames: ['__configuration_root__'] },
+      true
+    );
+    assert.strictEqual(rootPlan.rootCaptureFull, true);
+    assert.deepStrictEqual(rootPlan.fullNames, []);
+
+    // Рекурсивный захват Подсистемы — состав раскрывается через resolveSubsystemMemberFullNames.
+    const subsystemXmlPath = path.join(configRoot, 'Subsystems', 'Продажи.xml');
+    const subsystemPlan = service.buildPartialDumpPlan(
+      { nodeKind: 'Subsystem', xmlPath: subsystemXmlPath },
+      { fullNames: ['Подсистема.Продажи'] },
+      true
+    );
+    assert.strictEqual(subsystemPlan.rootCaptureFull, false);
+    assert.deepStrictEqual([...subsystemPlan.fullNames].sort(), ['Подсистема.Продажи', 'Справочник.Товары'].sort());
+
+    // Обычный объект (в т.ч. с recursive=true) — fullName узла достаточно как есть.
+    const objectPlan = service.buildPartialDumpPlan(
+      { nodeKind: 'Catalog', xmlPath: path.join(configRoot, 'Catalogs', 'Товары.xml') },
+      { fullNames: ['Справочник.Товары'] },
+      true
+    );
+    assert.strictEqual(objectPlan.rootCaptureFull, false);
+    assert.deepStrictEqual(objectPlan.fullNames, ['Справочник.Товары']);
+
+    fs.rmSync(configRoot, { recursive: true, force: true });
+  });
 });
 
 // Ищет справочник, у которого есть XML и реальный ObjectModule.bsl рядом.
@@ -235,6 +340,25 @@ function findFirstCatalogWithForm(): { xmlPath: string; formModulePath: string; 
     }
   }
   return null;
+}
+
+// Минимальный валидный XML подсистемы — тот же формат, что в subsystemXmlService.test.ts.
+function buildSubsystemXml(name: string, refs: string[], childSubsystems: string[]): string {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<MetaDataObject>
+  <Subsystem>
+    <Properties>
+      <Name>${name}</Name>
+      <Synonym/>
+      ${refs.length > 0
+        ? `<Content>${refs.map((ref) => `<xr:Item xsi:type="xr:MDObjectRef">${ref}</xr:Item>`).join('')}</Content>`
+        : '<Content/>'}
+    </Properties>
+    ${childSubsystems.length > 0
+      ? `<ChildObjects>${childSubsystems.map((child) => `<Subsystem>${child}</Subsystem>`).join('')}</ChildObjects>`
+      : '<ChildObjects/>'}
+  </Subsystem>
+</MetaDataObject>`;
 }
 
 function restoreFile(filePath: string, backup: string | undefined): void {
