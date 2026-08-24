@@ -1,10 +1,11 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import type { MetaKind } from '../../domain/MetaTypes';
+import { META_TYPES, type MetaKind } from '../../domain/MetaTypes';
 import type { ProjectSecretStorage } from '../environment/ProjectSecretStorage';
 import { escapeXmlAttribute as escapeXml, parseConfigXml, parseObjectXml } from '../xml';
 import { getObjectLocationFromXml } from '../fs/ObjectLocation';
+import { SubsystemXmlService, type SubsystemInfo } from '../xml/SubsystemXmlService';
 
 export interface RepositoryBinding {
   repoPath: string;
@@ -54,6 +55,18 @@ export interface RepositorySnapshotDiff {
 interface RepositorySnapshotManifest {
   /** Пути файлов относительно `configRoot`, зафиксированные снапшотом (POSIX-разделители). */
   files: string[];
+}
+
+/**
+ * План частичной выгрузки объектов из БД в файлы после захвата/получения из
+ * хранилища. `rootCaptureFull=true` означает, что был захвачен/получен корень
+ * конфигурации/расширения целиком — в этом случае частичная выгрузка равна
+ * полной, и вызывающая сторона должна выполнить обычный полный импорт вместо
+ * частичного (см. {@link RepositoryService.buildPartialDumpPlan}).
+ */
+export interface RepositoryPartialDumpPlan {
+  readonly rootCaptureFull: boolean;
+  readonly fullNames: readonly string[];
 }
 
 interface RepositoryScopeState {
@@ -137,6 +150,18 @@ const ONE_C_TYPE_NAMES: Partial<Record<MetaKind, string>> = {
   Sequence: 'Последовательность',
   ExternalDataSource: 'ВнешнийИсточникДанных',
 };
+
+/**
+ * Обратное отображение {@link ONE_C_TYPE_NAMES}: технический русский префикс
+ * fullName → вид метаданных. Нужно для {@link RepositoryService.resolveXmlPathByFullName},
+ * которая по fullName (например, `Справочник.Номенклатура`) находит локальный XML —
+ * обратная задача по отношению к `resolveRootObjectFullName`.
+ */
+const ONE_C_TYPE_NAMES_BY_PREFIX: ReadonlyMap<string, MetaKind> = new Map(
+  (Object.entries(ONE_C_TYPE_NAMES) as [MetaKind, string][]).map(
+    ([kind, typeName]): [string, MetaKind] => [typeName, kind]
+  )
+);
 
 /**
  * Виды дочерних узлов (ChildTag + Column), для которых захват идёт
@@ -692,6 +717,130 @@ export class RepositoryService {
     };
   }
 
+  /**
+   * Строит план частичной выгрузки для объектов, только что захваченных/полученных
+   * из хранилища (`objects` — результат {@link createObjectsFileForNode} для того же
+   * узла и того же `recursive`). Локальный захват хранит только fullName самого узла
+   * (см. комментарий у {@link createObjectsFileForNode}) — сервер хранилища при
+   * `includeChildObjects`/`includeObjectsFromSubordinateSubsystems` раскрывает состав
+   * сам, и это раскрытие нигде локально не сохраняется. Поэтому:
+   *  - для захвата корня конфигурации/расширения целиком частичная выгрузка
+   *    бессмысленна (она была бы равна полной) — вызывающая сторона должна
+   *    выполнить обычный полный импорт;
+   *  - для рекурсивного захвата Подсистемы состав участников нужно раскрыть самим
+   *    через {@link resolveSubsystemMemberFullNames} (их fullName не выводится из
+   *    одного имени подсистемы, в отличие от дочерних артефактов обычного объекта);
+   *  - для остальных случаев (обычный объект, в том числе с рекурсивным захватом
+   *    собственных форм/реквизитов/макетов) достаточно fullName самого узла — его
+   *    дочерние артефакты и так резолвятся к тому же fullName в `isMetadataEditRestricted`.
+   */
+  buildPartialDumpPlan(
+    node: RepositoryNodeRef,
+    objects: { fullNames: string[] },
+    recursive: boolean
+  ): RepositoryPartialDumpPlan {
+    const [firstFullName] = objects.fullNames;
+    if (firstFullName === CONFIGURATION_ROOT_LOCK_NAME || firstFullName === EXTENSION_ROOT_LOCK_NAME) {
+      return { rootCaptureFull: true, fullNames: [] };
+    }
+
+    if (node.nodeKind === 'Subsystem' && recursive && node.xmlPath) {
+      return { rootCaptureFull: false, fullNames: this.resolveSubsystemMemberFullNames(node.xmlPath, true) };
+    }
+
+    return { rootCaptureFull: false, fullNames: objects.fullNames };
+  }
+
+  /**
+   * Раскрывает состав подсистемы для частичной выгрузки: fullName самой подсистемы
+   * плюс fullName каждого объекта из её `<Content>`. При `recursive=true` (соответствует
+   * `includeObjectsFromSubordinateSubsystems` в {@link createObjectsFileForNode}) рекурсивно
+   * обходит дочерние подсистемы тем же способом, каким это делает дерево подсистем
+   * в `SubsystemToolsService` (`<Папка>/<Имя>/<Имя>.xml`, иначе `<Папка>/<Имя>.xml`).
+   */
+  resolveSubsystemMemberFullNames(subsystemXmlPath: string, recursive: boolean): string[] {
+    const subsystemXmlService = new SubsystemXmlService();
+    const result = new Set<string>();
+    const visited = new Set<string>();
+
+    const visit = (xmlPath: string): void => {
+      const key = normalizePathKey(xmlPath);
+      if (visited.has(key) || !fs.existsSync(xmlPath)) {
+        return;
+      }
+      visited.add(key);
+
+      let subsystem: SubsystemInfo;
+      try {
+        subsystem = subsystemXmlService.readSubsystem(xmlPath);
+      } catch {
+        // Повреждённый/нечитаемый XML подсистемы не должен ронять весь план дампа —
+        // просто пропускаем эту ветку, как и остальные best-effort резолверы в этом файле.
+        return;
+      }
+
+      const ownFullName = this.buildRootObjectFullName('Subsystem', undefined, subsystem.name);
+      if (ownFullName) {
+        result.add(ownFullName);
+      }
+      // ВАЖНО: `<Content>` хранит ссылки с английским префиксом вида `Catalog.Товары`
+      // (см. SubsystemToolsService.KNOWN_SINGULAR_TYPES = Object.keys(META_TYPES)) —
+      // это другой алфавит имён, чем русский технический fullName хранилища
+      // (`Справочник.Товары`, ONE_C_TYPE_NAMES), который ожидают `-Objects`/`-listFile`.
+      // Просто копировать contentRefs как есть — значит передать конфигуратору
+      // несуществующие имена объектов.
+      for (const ref of subsystem.contentRefs) {
+        const repositoryFullName = convertContentRefToRepositoryFullName(ref);
+        if (repositoryFullName) {
+          result.add(repositoryFullName);
+        }
+      }
+
+      if (!recursive) {
+        return;
+      }
+      for (const child of subsystem.childSubsystems) {
+        const nested = path.join(subsystem.homeDir, 'Subsystems', child, `${child}.xml`);
+        const flat = path.join(subsystem.homeDir, 'Subsystems', `${child}.xml`);
+        visit(fs.existsSync(nested) ? nested : flat);
+      }
+    };
+
+    visit(subsystemXmlPath);
+    return [...result];
+  }
+
+  /**
+   * Обратная задача к {@link resolveRootObjectFullName}: по fullName объекта
+   * (например, `Справочник.Номенклатура`) находит его локальный XML-файл внутри
+   * `configRoot`. Нужна для частичной выгрузки — `-Objects`/`-listFile` работают с
+   * fullName, а мёрж результата в проект — с относительными путями файлов.
+   * Возвращает `null`, если тип не распознан или файл не найден (например, участник
+   * подсистемы ещё не выгружен локально).
+   */
+  resolveXmlPathByFullName(configRoot: string, fullName: string): string | null {
+    const dotIndex = fullName.indexOf('.');
+    if (dotIndex <= 0 || dotIndex === fullName.length - 1) {
+      return null;
+    }
+
+    const typeName = fullName.slice(0, dotIndex);
+    const objectName = fullName.slice(dotIndex + 1);
+    const kind = ONE_C_TYPE_NAMES_BY_PREFIX.get(typeName);
+    const folder = kind ? META_TYPES[kind]?.folder : undefined;
+    if (!folder) {
+      return null;
+    }
+
+    const typeDir = path.join(configRoot, folder);
+    const nested = path.join(typeDir, objectName, `${objectName}.xml`);
+    if (fs.existsSync(nested)) {
+      return nested;
+    }
+    const flat = path.join(typeDir, `${objectName}.xml`);
+    return fs.existsSync(flat) ? flat : null;
+  }
+
   private buildRootObjectFullName(kind: MetaKind, xmlPath: string | undefined, fallbackLabel: string | undefined): string | null {
     const rootKindName = ONE_C_TYPE_NAMES[kind];
     if (!rootKindName) {
@@ -1103,4 +1252,23 @@ function isExistingDirectory(dirPath: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Переводит ссылку из `<Content>` подсистемы (английский префикс вида
+ * `Catalog.Товары`, см. {@link resolveSubsystemMemberFullNames}) в технический
+ * fullName хранилища (`Справочник.Товары`, {@link ONE_C_TYPE_NAMES}). Возвращает
+ * `null` для нераспознанного префикса — например, UUID-ссылки на ещё не
+ * переименованный/удалённый объект, которую платформа кладёт в Content вместо
+ * имени.
+ */
+function convertContentRefToRepositoryFullName(ref: string): string | null {
+  const dotIndex = ref.indexOf('.');
+  if (dotIndex <= 0 || dotIndex === ref.length - 1) {
+    return null;
+  }
+  const englishType = ref.slice(0, dotIndex) as MetaKind;
+  const objectName = ref.slice(dotIndex + 1);
+  const russianType = ONE_C_TYPE_NAMES[englishType];
+  return russianType ? `${russianType}.${objectName}` : null;
 }

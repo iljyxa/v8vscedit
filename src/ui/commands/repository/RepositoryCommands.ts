@@ -6,6 +6,7 @@ import {
   runApplyDatabaseConfiguration,
   runDecompileExtension,
   runDecompileMainConfiguration,
+  runPartialImportFromDatabase,
   runUpdateExtension,
   runUpdateMainConfiguration,
 } from '../ext/ExtensionCommandRunner';
@@ -189,6 +190,10 @@ export function registerRepositoryCommands(
       const ok = await runRepositoryLockAction(toCliServices(services), repositoryNode, recursive);
       if (ok) {
         refreshRepositoryUi(services);
+        const target = requireTarget(services.repositoryService, repositoryNode);
+        if (target) {
+          void runAutoDumpAfterRepositoryOperation(target, repositoryNode, recursive, services);
+        }
       }
     }),
 
@@ -290,6 +295,10 @@ export function registerRepositoryCommands(
       });
       if (ok) {
         refreshRepositoryUi(services);
+        const target = requireTarget(services.repositoryService, repositoryNode);
+        if (target) {
+          void runAutoDumpAfterRepositoryOperation(target, repositoryNode, recursive, services);
+        }
       }
     }),
 
@@ -650,6 +659,92 @@ async function runPostRepositorySync(target: RepositoryTarget, services: Command
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     services.outputChannel.appendLine(`[repository][post-sync][error] ${message}`);
+  }
+}
+
+/**
+ * После успешного захвата/получения объектов хранилища — если не отключено
+ * настройкой `v8vscedit.repository.autoDumpAfterLock` — довыгружает их из БД в
+ * файлы, устраняя расхождение между хранилищем и локальными XML без дорогого
+ * полного импорта всей конфигурации на каждый точечный захват. Захват корня
+ * конфигурации/расширения целиком (см. `RepositoryService.buildPartialDumpPlan`)
+ * — единственное исключение: там частичная выгрузка равна полной, поэтому
+ * выполняется обычный полный импорт (тот же путь, что и ручная кнопка
+ * «Импортировать из базы»).
+ *
+ * Не блокирует основной хендлер команды (вызывается через `void`, как и
+ * {@link runPostRepositorySync}) — захват/получение уже завершились успешно,
+ * довыгрузка — это отдельный фоновый шаг со своим прогрессом.
+ */
+async function runAutoDumpAfterRepositoryOperation(
+  target: RepositoryTarget,
+  repositoryNode: RepositoryCommandNode,
+  recursive: boolean,
+  services: CommandServices
+): Promise<void> {
+  const autoDumpEnabled = vscode.workspace
+    .getConfiguration('v8vscedit.repository')
+    .get<boolean>('autoDumpAfterLock', true);
+  if (!autoDumpEnabled) {
+    return;
+  }
+
+  try {
+    const objects = services.repositoryService.createObjectsFileForNode(repositoryNode, recursive);
+    const plan = services.repositoryService.buildPartialDumpPlan(repositoryNode, objects, recursive);
+    // Файлы дампа расширение пишет само, контролируемо — предупреждаем watcher
+    // источников (Container.wireConfigurationSourceWatcher), чтобы он не запускал
+    // СВОЙ независимый пересчёт дерева/поддержки на те же самые пути параллельно
+    // с явным reloadEntries() ниже. Тот же приём, что и в ExtensionCommands.createImportHooks.
+    const hooks = {
+      beforeProjectFilesChanged: (filePaths: string[]) => {
+        services.suppressConfigurationReloadForFiles(filePaths);
+      },
+    };
+
+    if (plan.rootCaptureFull) {
+      void vscode.window.showInformationMessage(
+        `Захвачена/получена вся конфигурация «${target.displayName}» целиком — выполняется полный импорт из базы.`
+      );
+      const imported = target.configKind === 'cfe'
+        ? await runDecompileExtension(target.extensionName ?? target.displayName, target.configRoot, services.workspaceFolder, services.outputChannel, hooks)
+        : await runDecompileMainConfiguration(target.displayName, target.configRoot, services.workspaceFolder, services.outputChannel, hooks);
+      if (imported) {
+        // Дерево/поддержку уже перестроил reloadEntries() (treeProvider.updateEntries) —
+        // повторный refreshRepositoryUi() тут же заново гонял бы buildRoots()
+        // (а с ним и supportService.loadConfig на каждый корень) без новой информации.
+        await services.reloadEntries();
+        services.refreshActionsView();
+      }
+      return;
+    }
+
+    if (plan.fullNames.length === 0) {
+      return;
+    }
+
+    const dumped = await runPartialImportFromDatabase(
+      {
+        kind: target.configKind,
+        name: target.displayName,
+        rootPath: target.configRoot,
+        extensionName: target.extensionName,
+      },
+      plan.fullNames,
+      services.workspaceFolder,
+      services.outputChannel,
+      hooks
+    );
+    if (dumped) {
+      await services.reloadEntries();
+      services.refreshActionsView();
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    services.outputChannel.appendLine(`[repository][auto-dump][error] ${message}`);
+    void vscode.window.showWarningMessage(
+      `Не удалось автоматически выгрузить объекты «${repositoryNode.label ?? target.displayName}» из базы: ${message}`
+    );
   }
 }
 
