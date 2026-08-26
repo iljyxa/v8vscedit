@@ -2,3 +2,8 @@
 *.ts text eol=lf
 *.md text eol=lf
 *.json text eol=lf
+
+# Тестовая выгрузка 1С: часть фикстур намеренно хранится в исходном BOM/CRLF
+# виде реальных выгрузок (тесты сохранения формата, см. CLAUDE.md/writeTextFilePreservingBomAndEol) —
+# git не должен трогать переводы строк внутри example/.
+example/** -text

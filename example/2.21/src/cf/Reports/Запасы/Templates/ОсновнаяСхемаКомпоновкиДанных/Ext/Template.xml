@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DataCompositionSchema xmlns="http://v8.1c.ru/8.1/data-composition-system/schema"
+	xmlns:dcscom="http://v8.1c.ru/8.1/data-composition-system/common"
+	xmlns:dcscor="http://v8.1c.ru/8.1/data-composition-system/core"
+	xmlns:dcsset="http://v8.1c.ru/8.1/data-composition-system/settings"
+	xmlns:v8="http://v8.1c.ru/8.1/data/core"
+	xmlns:v8ui="http://v8.1c.ru/8.1/data/ui"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+	<dataSource>
+		<name>ИсточникДанных1</name>
+		<dataSourceType>Local</dataSourceType>
+	</dataSource>
+	<dataSet xsi:type="DataSetQuery">
+		<name>ОстаткиНаСкладах</name>
+		<field xsi:type="DataSetFieldField">
+			<dataPath>Номенклатура</dataPath>
+			<field>Номенклатура</field>
+			<valueType>
+				<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Номенклатура</v8:Type>
+			</valueType>
+		</field>
+		<dataSource>ИсточникДанных1</dataSource>
+		<query>ВЫБРАТЬ ОстаткиТоваровОстатки.Номенклатура КАК Номенклатура ИЗ РегистрНакопления.ОстаткиТоваров.Остатки() КАК ОстаткиТоваровОстатки</query>
+	</dataSet>
+	<dataSet xsi:type="DataSetQuery">
+		<name>Резервы</name>
+		<field xsi:type="DataSetFieldField">
+			<dataPath>Номенклатура</dataPath>
+			<field>Номенклатура</field>
+			<valueType>
+				<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Номенклатура</v8:Type>
+			</valueType>
+		</field>
+		<dataSource>ИсточникДанных1</dataSource>
+		<query>ВЫБРАТЬ РезервыТоваровОстатки.Номенклатура КАК Номенклатура ИЗ РегистрНакопления.РезервыТоваров.Остатки() КАК РезервыТоваровОстатки</query>
+	</dataSet>
+	<dataSet xsi:type="DataSetUnion">
+		<name>ОстаткиИРезервы</name>
+		<field>
+			<dataPath>Номенклатура</dataPath>
+			<field>Номенклатура</field>
+		</field>
+		<items>
+			<item>
+				<dataSet>ОстаткиНаСкладах</dataSet>
+			</item>
+			<item>
+				<dataSet>Резервы</dataSet>
+			</item>
+		</items>
+	</dataSet>
+	<dataSetLink>
+		<dataSet1>ОстаткиНаСкладах</dataSet1>
+		<dataSet2>Резервы</dataSet2>
+		<sourceExpression>Номенклатура</sourceExpression>
+		<destinationExpression>Номенклатура</destinationExpression>
+	</dataSetLink>
+	<settingsVariant>
+		<name>Основной</name>
+		<settings>
+			<selection>
+				<item xsi:type="dcsset:SelectedItemField"><field>Номенклатура</field></item>
+			</selection>
+		</settings>
+	</settingsVariant>
+	<settingsVariant>
+		<name>ПоСкладам</name>
+		<settings>
+			<selection>
+				<item xsi:type="dcsset:SelectedItemField"><field>Номенклатура</field></item>
+			</selection>
+		</settings>
+	</settingsVariant>
+</DataCompositionSchema>
