@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { type MetaKind, getMetaFolder, getMetaLabel, isModuleSlotValid } from '../../domain/MetaTypes';
 import type { ModuleSlot } from '../../domain/ModuleSlot';
-import { type ObjectLocation, getObjectLocationFromXml } from './ObjectLocation';
+import { type ObjectLocation, findObjectXmlInFolder, getObjectLocationFromXml } from './ObjectLocation';
 
 export { getObjectLocationFromXml } from './ObjectLocation';
 
@@ -36,17 +36,7 @@ export class MetaPathResolver {
       return null;
     }
 
-    const deepPath = path.join(configRoot, folder, name, `${name}.xml`);
-    if (fs.existsSync(deepPath)) {
-      return deepPath;
-    }
-
-    const flatPath = path.join(configRoot, folder, `${name}.xml`);
-    if (fs.existsSync(flatPath)) {
-      return flatPath;
-    }
-
-    return null;
+    return findObjectXmlInFolder(configRoot, folder, name);
   }
 
   /** Разбор пути к объекту: корень, папка категории, имя, каталог объекта */

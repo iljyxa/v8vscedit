@@ -7,18 +7,31 @@
 // Правила:
 //   • НОВЫЙ файл (неотслеживаемый) — все исполняемые строки должны быть покрыты (=100%).
 //   • МОДИФИЦИРОВАННЫЙ файл — покрыты должны быть только ДОБАВЛЕННЫЕ/изменённые строки
-//     (из `git diff -U0 HEAD`); легаси-строки того же файла не трогаем.
+//     (из `git diff -U0 <база>`, см. COVERAGE_BASE_REF); легаси-строки того же файла не трогаем.
+//     Закоммиченный в ветке новый файл при явной базе целиком попадает в дифф — эквивалент «нового».
 //   • Чисто-типовой файл и composition root (Container/extension) — вне гейта.
 //
 // Источник данных — `coverage/lcov.info` (те же цифры, что и `coverage:report`).
 // Использование: `npm run coverage:changed` (стадия qa-e2e TDD-конвейера).
+//
+// Параметры:
+//   • COVERAGE_BASE_REF=<ref> — база сравнения (по умолчанию HEAD, т.е. только незакоммиченное).
+//     Для закоммиченной ветки: `COVERAGE_BASE_REF=main npm run coverage:changed`. Сравнение идёт
+//     с точкой ответвления (`git merge-base <ref> HEAD`), чтобы ушедший вперёд ref не подмешал
+//     в патч чужие изменения. Если база задана явно, а изменений нет — это ошибка вызова (exit 2).
+//   • --ignore-test-failures (или COVERAGE_IGNORE_TEST_FAILURES=1) — не останавливаться на
+//     упавших тестах, а считать покрытие по сформированному lcov. Регресс ловит отдельный
+//     полный `npm test` стадии qa; флаг нужен, когда красное — унаследованные падения вне патча.
 
 /* global console, process */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 
 const ROOT = process.cwd();
+const IGNORE_TEST_FAILURES =
+  process.argv.includes('--ignore-test-failures') || process.env.COVERAGE_IGNORE_TEST_FAILURES === '1';
+const EXPLICIT_BASE_REF = process.env.COVERAGE_BASE_REF?.trim() || undefined;
 
 function git(args) {
   try {
@@ -62,25 +75,45 @@ function isProdTs(f) {
   );
 }
 
+function resolveBase() {
+  if (!EXPLICIT_BASE_REF) return 'HEAD';
+  const base = git(['merge-base', EXPLICIT_BASE_REF, 'HEAD']).trim();
+  if (!base) {
+    console.error(`[coverage:changed] Не удалось найти общую точку HEAD и COVERAGE_BASE_REF=${EXPLICIT_BASE_REF}.`);
+    process.exit(2);
+  }
+  return base;
+}
+
+const BASE = resolveBase();
+
 const untracked = git(['ls-files', '--others', '--exclude-standard'])
   .split('\n')
   .map((s) => s.trim())
   .filter((f) => f && isProdTs(f) && existsSync(path.join(ROOT, f)));
 
-const modified = git(['diff', '--name-only', 'HEAD'])
+// Diff базы с рабочим деревом: закоммиченные в ветке и незакоммиченные правки вместе.
+const modified = git(['diff', '--name-only', BASE])
   .split('\n')
   .map((s) => s.trim())
   .filter((f) => f && isProdTs(f) && !untracked.includes(f) && existsSync(path.join(ROOT, f)));
 
 const changed = [...untracked, ...modified];
 if (changed.length === 0) {
-  console.log('[coverage:changed] Изменённых production-файлов нет — проверять нечего.');
+  if (EXPLICIT_BASE_REF) {
+    // Явная база без изменений почти всегда означает ошибку вызова (не та ветка/ref),
+    // а не «нечего проверять» — молчаливый зелёный здесь маскировал бы непроверенный патч.
+    console.error(`[coverage:changed] Относительно COVERAGE_BASE_REF=${EXPLICIT_BASE_REF} изменённых production-файлов нет — проверьте ref.`);
+    process.exit(2);
+  }
+  console.log('[coverage:changed] Незакоммиченных изменений production-файлов нет — проверять нечего.');
+  console.log('[coverage:changed] Если изменения задачи уже закоммичены, укажите базу: COVERAGE_BASE_REF=main npm run coverage:changed');
   process.exit(0);
 }
 
 // Добавленные/изменённые строки модифицированного файла из unified=0 diff.
 function addedLines(rel) {
-  const diff = git(['diff', '--unified=0', 'HEAD', '--', rel]);
+  const diff = git(['diff', '--unified=0', BASE, '--', rel]);
   const lines = new Set();
   const re = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/;
   for (const line of diff.split('\n')) {
@@ -115,23 +148,41 @@ function isTypeOnly(rel) {
   );
 }
 
+console.log(`[coverage:changed] База сравнения: ${EXPLICIT_BASE_REF ? `${EXPLICIT_BASE_REF} (${BASE.slice(0, 10)})` : 'HEAD'}`);
 console.log('[coverage:changed] Проверяю patch-покрытие по файлам:');
 for (const f of untracked) console.log('  • (новый)', f);
 for (const f of modified) console.log('  • (изменён)', f);
 
+const runStartedAt = Date.now();
 const run = spawnSync('npx', ['c8', '--reporter=lcov', '--reporter=text', 'npm', 'test'], {
   cwd: ROOT,
   stdio: 'inherit',
   shell: process.platform === 'win32',
 });
+// Прерывание (сигнал) или сбой запуска — не «упавшие тесты»: lcov неполного прогона
+// дал бы заниженные цифры, поэтому флаг --ignore-test-failures здесь не действует.
+if (run.signal || run.error) {
+  console.error(`[coverage:changed] Прогон не завершился: ${run.signal ?? run.error?.message}.`);
+  process.exit(1);
+}
 if (run.status !== 0) {
-  console.error('[coverage:changed] npm test упал — сначала почини тесты.');
-  process.exit(run.status ?? 1);
+  if (!IGNORE_TEST_FAILURES) {
+    console.error('[coverage:changed] npm test упал — сначала почини тесты.');
+    console.error('[coverage:changed] Если падения унаследованные и вне патча: npm run coverage:changed -- --ignore-test-failures');
+    process.exit(run.status ?? 1);
+  }
+  console.warn(`[coverage:changed] npm test завершился с кодом ${run.status ?? 'null'} — продолжаю по --ignore-test-failures; регресс проверяется отдельным прогоном npm test.`);
 }
 
 const lcovPath = path.join(ROOT, 'coverage', 'lcov.info');
 if (!existsSync(lcovPath)) {
   console.error(`[coverage:changed] Не найден ${lcovPath} — c8 не сформировал lcov.`);
+  process.exit(1);
+}
+// lcov от прошлого запуска дал бы цифры чужого прогона — особенно опасно, когда
+// падение тестов разрешено и код процесса больше не сигналит о сбое c8.
+if (statSync(lcovPath).mtimeMs < runStartedAt) {
+  console.error(`[coverage:changed] ${lcovPath} не обновлён этим прогоном — c8 не сформировал свежий lcov.`);
   process.exit(1);
 }
 

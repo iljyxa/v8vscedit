@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { MetaKind } from '../../domain/MetaTypes';
 import type { ProjectSecretStorage } from '../environment/ProjectSecretStorage';
+import { findObjectXmlInFolder } from '../fs/ObjectLocation';
 import { escapeXmlAttribute as escapeXml, parseConfigXml, parseObjectXml } from '../xml';
 
 export interface RepositoryBinding {
@@ -609,13 +610,7 @@ export class RepositoryService {
       return fs.existsSync(flatXmlPath) ? flatXmlPath : null;
     }
 
-    const deepXmlPath = path.join(configRoot, folderName, objectSegment, `${objectSegment}.xml`);
-    if (fs.existsSync(deepXmlPath)) {
-      return deepXmlPath;
-    }
-
-    const flatXmlPath = path.join(configRoot, folderName, `${objectSegment}.xml`);
-    return fs.existsSync(flatXmlPath) ? flatXmlPath : null;
+    return findObjectXmlInFolder(configRoot, folderName, objectSegment);
   }
 
   private readEnvFile(): Record<string, unknown> {

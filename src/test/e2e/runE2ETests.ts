@@ -1,15 +1,6 @@
 import * as path from 'path';
 import { runTests } from '@vscode/test-electron';
-
-const VSCODE_ENV_PREFIXES = ['VSCODE_', 'ELECTRON_'];
-
-function sanitizeInheritedIdeEnv(): void {
-  for (const key of Object.keys(process.env)) {
-    if (VSCODE_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))) {
-      Reflect.deleteProperty(process.env, key);
-    }
-  }
-}
+import { takeRunnerSettingsAndSanitize } from '../runnerEnv';
 
 /**
  * Запуск E2E-набора: открывает проект-выгрузку 1С как workspace и гоняет
@@ -21,12 +12,11 @@ function sanitizeInheritedIdeEnv(): void {
  */
 async function main(): Promise<void> {
   try {
-    sanitizeInheritedIdeEnv();
+    const { version } = takeRunnerSettingsAndSanitize();
 
     const extensionDevelopmentPath = path.resolve(__dirname, '../../../');
     const extensionTestsPath = path.resolve(__dirname, './index');
     const workspace = process.env.E2E_WORKSPACE ?? path.resolve(__dirname, '../../../example/2.20');
-    const version = process.env.VSCODE_TEST_VERSION ?? 'stable';
 
     await runTests({
       extensionDevelopmentPath,

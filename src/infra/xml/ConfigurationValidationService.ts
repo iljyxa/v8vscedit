@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getMetaFolder, META_TYPES, type MetaKind } from '../../domain/MetaTypes';
+import { findObjectXmlInFolder } from '../fs/ObjectLocation';
 import { ConfigXmlReader } from './ConfigXmlReader';
 import { extractSimpleTag } from './XmlUtils';
 
@@ -169,9 +170,7 @@ function validateChildObjects(
       continue;
     }
     for (const name of names) {
-      const flatXmlPath = path.join(configRoot, folder, `${name}.xml`);
-      const deepXmlPath = path.join(configRoot, folder, name, `${name}.xml`);
-      if (fs.existsSync(flatXmlPath) || fs.existsSync(deepXmlPath)) {
+      if (findObjectXmlInFolder(configRoot, folder, name) !== null) {
         ok(`${kind}.${name}: XML найден.`);
       } else {
         error(`${kind}.${name}: XML-файл не найден в ${folder}.`);

@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 
 /** Разобранный путь к объекту метаданных внутри каталога выгрузки */
@@ -42,4 +43,31 @@ export function getObjectLocationFromXml(xmlPath: string): ObjectLocation {
     objectName: fileName,
     objectDir: path.join(xmlDir, fileName),
   };
+}
+
+/**
+ * Ищет XML объекта метаданных в папке категории выгрузки: сначала глубокая форма
+ * `<Root>/<Folder>/<Name>/<Name>.xml`, затем плоская `<Root>/<Folder>/<Name>.xml`.
+ *
+ * Глубокая форма проверяется первой, чтобы сохранить порядок, в котором искали
+ * прежние копии этой логики (`MetaPathResolver.resolveXml`,
+ * `RepositoryService.resolveOwnerObjectXmlPath`): при одновременном наличии обоих
+ * файлов результат не меняется.
+ *
+ * Имя папки категории вычисляет вызывающий — из `META_TYPES` или из сегмента пути
+ * к модулю; своего словаря «тип → папка» здесь нет, поэтому функция работает и
+ * для папок, которых нет в реестре.
+ */
+export function findObjectXmlInFolder(configRoot: string, folderName: string, objectName: string): string | null {
+  const deepPath = path.join(configRoot, folderName, objectName, `${objectName}.xml`);
+  if (fs.existsSync(deepPath)) {
+    return deepPath;
+  }
+
+  const flatPath = path.join(configRoot, folderName, `${objectName}.xml`);
+  if (fs.existsSync(flatPath)) {
+    return flatPath;
+  }
+
+  return null;
 }
