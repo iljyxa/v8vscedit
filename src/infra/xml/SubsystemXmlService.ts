@@ -3,6 +3,7 @@ import * as path from 'path';
 import { ConfigXmlReader } from './ConfigXmlReader';
 import { escapeXmlText, extractSimpleTag, unescapeXml, writeTextFilePreservingBomAndEol } from './XmlUtils';
 import { getMetaFolder, getMetaLabel, META_TYPES, type MetaKind } from '../../domain/MetaTypes';
+import { findObjectXmlInFolder } from '../fs/ObjectLocation';
 
 export type SubsystemPropertyKey =
   | 'Name'
@@ -388,11 +389,14 @@ export class SubsystemXmlService {
     }
 
     const info = this.configReader.read(configPath);
-    const subsystemsRoot = path.join(configRoot, getMetaFolder('Subsystem') ?? 'Subsystems');
+    // Фолбэк недостижим: у Subsystem папка задана в META_TYPES константой; `??` нужен только
+    // из-за сигнатуры getMetaFolder (string | null).
+    /* c8 ignore next */
+    const subsystemsFolder = getMetaFolder('Subsystem') ?? 'Subsystems';
     const rootNames = info.childObjects.get('Subsystem') ?? [];
     return rootNames
       .map((name) => {
-        const xmlPath = resolveSubsystemXml(subsystemsRoot, name);
+        const xmlPath = findObjectXmlInFolder(configRoot, subsystemsFolder, name);
         return xmlPath
           ? this.buildSubsystemMembershipNode(xmlPath, objectRef, new Set())
           : undefined;
@@ -423,7 +427,7 @@ export class SubsystemXmlService {
     const subsystem = this.readSubsystem(xmlPath);
     const children = subsystem.childSubsystems
       .map((childName) => {
-        const childXmlPath = resolveSubsystemXml(path.join(subsystem.homeDir, 'Subsystems'), childName);
+        const childXmlPath = findObjectXmlInFolder(subsystem.homeDir, 'Subsystems', childName);
         return childXmlPath
           ? this.buildSubsystemMembershipNode(childXmlPath, objectRef, nextVisited)
           : undefined;
@@ -484,15 +488,6 @@ function findConfigRoot(startPath: string): string {
 function getSubsystemHomeDir(xmlPath: string, subsystemName: string): string {
   const dir = path.dirname(xmlPath);
   return path.basename(dir) === subsystemName ? dir : path.join(dir, subsystemName);
-}
-
-function resolveSubsystemXml(root: string, name: string): string | undefined {
-  const nested = path.join(root, name, `${name}.xml`);
-  if (fs.existsSync(nested)) {
-    return nested;
-  }
-  const flat = path.join(root, `${name}.xml`);
-  return fs.existsSync(flat) ? flat : undefined;
 }
 
 function flattenSubsystemMembershipTree(tree: SubsystemMembershipTreeNode[]): SubsystemMembershipTreeNode[] {
