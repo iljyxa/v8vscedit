@@ -62,8 +62,12 @@ if (!target || allowedDirs.length === 0) {
   allow();
 }
 
-const root = input?.cwd ?? process.cwd();
-const absoluteTarget = resolve(root, target);
+// Разрешённые каталоги отсчитываются от корня проекта, а не от cwd сессии: после `cd src` в Bash
+// cwd смещается, и `src/test` превратился бы в `src/src/test` — легитимная запись была бы отклонена.
+// Относительный путь цели, наоборот, задан относительно cwd сессии.
+const cwd = input?.cwd ?? process.cwd();
+const root = process.env.CLAUDE_PROJECT_DIR ?? cwd;
+const absoluteTarget = resolve(cwd, target);
 
 const isInsideAllowed = allowedDirs.some((entry) => {
   const base = resolve(root, entry);
