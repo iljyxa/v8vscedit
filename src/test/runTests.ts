@@ -13,11 +13,13 @@ function sanitizeInheritedIdeEnv(): void {
 
 async function main(): Promise<void> {
   try {
+    // Собственные настройки прогона тоже начинаются с VSCODE_ — читаем их до санитайза,
+    // иначе он удалит их вместе с унаследованным окружением IDE.
+    const version = process.env.VSCODE_TEST_VERSION ?? 'stable';
     sanitizeInheritedIdeEnv();
 
     const extensionDevelopmentPath = path.resolve(__dirname, '../../');
     const extensionTestsPath = path.resolve(__dirname, './suite/index');
-    const version = process.env.VSCODE_TEST_VERSION ?? 'stable';
 
     await runTests({
       extensionDevelopmentPath,
