@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { findObjectXmlInFolder } from '../fs/ObjectLocation';
 import type { Logger } from './Logger';
 
 /**
@@ -23,6 +24,13 @@ interface ConfigSupportData {
   /** UUID объекта → режим поддержки */
   uuidToMode: Map<string, SupportMode>;
 }
+
+/**
+ * Дочерние папки объекта, у элементов которых бывает собственный XML со своей
+ * строкой в `ParentConfigurations.bin`. Команд здесь нет: в выгрузке команда
+ * описана внутри XML владельца, отдельного файла у неё нет.
+ */
+const CHILD_FOLDERS_WITH_OWN_XML: readonly string[] = ['Forms', 'Templates'];
 
 const UUID_ATTR_RE = /uuid="([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i;
 
@@ -88,8 +96,16 @@ export class SupportInfoService {
 
   /**
    * Возвращает режим поддержки по пути к файлу объекта.
-   * Для BSL-модулей резолвит `<Тип>/<Имя>/<Имя>.xml`; если конфигурация не
-   * имеет данных поддержки — возвращает {@link SupportMode.None}.
+   * Для BSL-модулей режим берётся по XML объекта-владельца, который лежит либо в
+   * глубокой (`<Тип>/<Имя>/<Имя>.xml`), либо в плоской (`<Тип>/<Имя>.xml`)
+   * раскладке выгрузки: модуль всегда в `<Тип>/<Имя>/Ext/`, а XML объекта при
+   * плоской выгрузке — уровнем выше. Модули форм и макетов берут режим из
+   * собственного XML, если он есть. Команда объекта своего XML не имеет, и её
+   * модуль получает режим владельца. Это приближение: у `<Command uuid=…>` в XML
+   * владельца есть собственный uuid, и его режим в `ParentConfigurations.bin`
+   * может отличаться, но поиск uuid дочернего элемента внутри XML владельца
+   * здесь не выполняется — прежнее поведение (всегда `None`) было хуже.
+   * Если конфигурация не имеет данных поддержки — {@link SupportMode.None}.
    */
   getSupportMode(filePath: string): SupportMode {
     const normFilePath = normPath(filePath);
@@ -169,8 +185,13 @@ export class SupportInfoService {
   }
 
   /**
-   * По пути к BSL-модулю находит XML-файл объекта метаданных:
-   * `TypeFolder/ObjectName/[…]/Ext/Module.bsl` → `TypeFolder/ObjectName/ObjectName.xml`.
+   * По пути к BSL-модулю находит XML-файл, по uuid которого определяется режим:
+   *   - модуль формы/макета `TypeFolder/ObjectName/{Forms|Templates}/Child/Ext/…` →
+   *     собственный XML `TypeFolder/ObjectName/{Forms|Templates}/Child.xml`, если он есть;
+   *   - иначе (модуль объекта, команда, дочерний без своего XML) → XML владельца в
+   *     глубокой или плоской раскладке через {@link findObjectXmlInFolder}.
+   * Папка типа берётся из пути, а не из реестра типов: так режим определяется и
+   * для папок, которых реестр не знает.
    */
   private resolveObjectXmlForBsl(
     bslPath: string,
@@ -192,14 +213,19 @@ export class SupportInfoService {
 
     const childFolder = bslParts[rootDepth + 2];
     const childName = bslParts[rootDepth + 3];
-    const xmlPath = childFolder && childName && ['Forms', 'Commands', 'Templates'].includes(childFolder)
-      ? path.join(originalRoot, typeFolder, objectName, childFolder, childName + '.xml')
-      : path.join(originalRoot, typeFolder, objectName, objectName + '.xml');
-    if (!fs.existsSync(xmlPath)) {
-      this.log.appendLine(`[support] XML-файл не существует: ${xmlPath}`);
+    if (childFolder && childName && CHILD_FOLDERS_WITH_OWN_XML.includes(childFolder)) {
+      const childXmlPath = path.join(originalRoot, typeFolder, objectName, childFolder, childName + '.xml');
+      if (fs.existsSync(childXmlPath)) {
+        return childXmlPath;
+      }
+    }
+
+    const ownerXmlPath = findObjectXmlInFolder(originalRoot, typeFolder, objectName);
+    if (!ownerXmlPath) {
+      this.log.appendLine(`[support] XML объекта не найден: ${typeFolder}/${objectName}`);
       return undefined;
     }
-    return xmlPath;
+    return ownerXmlPath;
   }
 
   private getUuidForFile(filePath: string): string | undefined {
