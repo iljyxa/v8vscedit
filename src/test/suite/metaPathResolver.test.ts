@@ -73,4 +73,54 @@ suite('MetaPathResolver', () => {
 
     assert.ok(modulePath?.endsWith('ManagerModule.bsl'));
   });
+
+  /**
+   * `resolveXml` уже умел искать и глубокую, и плоскую раскладку —
+   * эти тесты фиксируют поведение (и защищают от регрессии), когда
+   * реализация переедет на общую `findObjectXmlInFolder`
+   * (`infra/fs/ObjectLocation.ts`), которой сейчас пользуется и
+   * `SupportInfoService`, и `RepositoryService`.
+   */
+  suite('resolveXml', () => {
+    test('находит XML в глубокой раскладке', () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-resolve-xml-'));
+      const deepPath = path.join(tempRoot, 'Catalogs', 'Спр1', 'Спр1.xml');
+      fs.mkdirSync(path.dirname(deepPath), { recursive: true });
+      fs.writeFileSync(deepPath, '');
+
+      const result = new MetaPathResolver().resolveXml(tempRoot, 'Catalog', 'Спр1');
+
+      assert.strictEqual(result, deepPath);
+    });
+
+    test('находит XML в плоской раскладке, если глубокой нет', () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-resolve-xml-'));
+      const flatPath = path.join(tempRoot, 'Catalogs', 'Спр1.xml');
+      fs.mkdirSync(path.dirname(flatPath), { recursive: true });
+      fs.writeFileSync(flatPath, '');
+
+      const result = new MetaPathResolver().resolveXml(tempRoot, 'Catalog', 'Спр1');
+
+      assert.strictEqual(result, flatPath);
+    });
+
+    test('возвращает null, если XML объекта не существует ни в одной из раскладок', () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-resolve-xml-'));
+      fs.mkdirSync(path.join(tempRoot, 'Catalogs'), { recursive: true });
+
+      const result = new MetaPathResolver().resolveXml(tempRoot, 'Catalog', 'НетТакогоСправочника');
+
+      assert.strictEqual(result, null);
+    });
+
+    test('возвращает null для типа метаданных без папки выгрузки (например, служебной группы дерева)', () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-resolve-xml-'));
+
+      // 'group-type' — служебный узел дерева без записи `folder` в META_TYPES
+      // (см. domain/MetaTypes.ts): getMetaFolder возвращает null для него.
+      const result = new MetaPathResolver().resolveXml(tempRoot, 'group-type', 'Что-угодно');
+
+      assert.strictEqual(result, null);
+    });
+  });
 });
