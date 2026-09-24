@@ -8,11 +8,15 @@
  * репозиторный захват и не знает про `supportService` вовсе — эти тесты
  * фиксируют ожидаемое поведение и должны падать до реализации фикса.
  *
- * Фикстуры реальные: минимальный справочник копируется из
- * `example/2.21/src/cf`, а `ParentConfigurations.bin` синтезируется на
- * временной копии с UUID этого справочника/конфигурации и нужным кодом
- * режима — формат `<uuid>,<uuid>,<mode>` совпадает с тем, что разбирает
- * `SupportInfoService.parseBinFile`.
+ * Фикстуры реальные, синтетики нет: объекты копируются из `example/2.21/src/cf`,
+ * а `Ext/ParentConfigurations.bin` — РЕАЛЬНЫЙ файл той же выгрузки (см.
+ * `parentConfigurationsParser.test.ts`): в нём справочник
+ * `АвансовыйОтчетПрисоединенныеФайлы` имеет код `a=0` (не редактируется →
+ * `SupportMode.Locked`), а `Контрагенты` — код `a=2` (снят с поддержки →
+ * `SupportMode.None`, никогда не `Locked`, несмотря на числовое совпадение со
+ * старой — неверной — трактовкой кода 2 как запрета). Для сценария «изменения
+ * запрещены» у нового (не входящего в поставку) корня используется другой
+ * реальный файл — `example/support/changes-forbidden/ParentConfigurations.bin`.
  */
 import * as assert from 'assert';
 import * as fs from 'fs';
@@ -22,12 +26,13 @@ import * as vscode from 'vscode';
 import { MetadataMutationService } from '../../ui/commands/metadata/MetadataMutationService';
 import { MetadataXmlCreator } from '../../infra/xml/MetadataXmlCreator';
 import { MetadataXmlRemover } from '../../infra/xml/MetadataXmlRemover';
-import { SupportInfoService } from '../../infra/support/SupportInfoService';
+import { SupportInfoService, SupportMode } from '../../infra/support/SupportInfoService';
 import { RepositoryService } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import type { Logger } from '../../infra/support/Logger';
 import type { CommandServices } from '../../ui/commands/_shared';
+import { CHANGES_FORBIDDEN_BIN_PATH } from './support/realConfigFixtures';
 
 /** Фейковый SecretStore на Map — структурный контракт vscode.SecretStorage. */
 function createFakeSecretStore(): SecretStore {
@@ -52,6 +57,7 @@ function createFakeProjectSecretStorage(root: string): ProjectSecretStorage {
 
 const EXAMPLE_CF = path.resolve(__dirname, '../../../example/2.21/src/cf');
 const SAMPLE_CATALOG_XML = path.join(EXAMPLE_CF, 'Catalogs', 'АвансовыйОтчетПрисоединенныеФайлы.xml');
+const KONTRAGENTY_XML = path.join(EXAMPLE_CF, 'Catalogs', 'Контрагенты.xml');
 
 class TestLogger implements Logger {
   readonly messages: string[] = [];
@@ -92,31 +98,45 @@ suite('MetadataMutationService — проверка SupportMode.Locked при ad
     fs.writeFileSync(path.join(configRoot, 'Configuration.xml'), xml, 'utf-8');
   }
 
+  /** Копирует реальный XML-объект из example/2.21 в подготовленный configRoot и возвращает его uuid. */
+  function copyRealObject(sourceXmlPath: string, folder: string, destName: string): { xmlPath: string; uuid: string } {
+    const dir = path.join(configRoot, folder);
+    fs.mkdirSync(dir, { recursive: true });
+    const content = fs.readFileSync(sourceXmlPath, 'utf-8');
+    fs.writeFileSync(path.join(dir, destName), content, 'utf-8');
+    const uuidMatch = /uuid="([0-9a-f-]{36})"/i.exec(content);
+    assert.ok(uuidMatch, 'В образце объекта должен быть uuid — иначе фикстура сломана');
+    return { xmlPath: path.join(dir, destName), uuid: uuidMatch[1].toLowerCase() };
+  }
+
   /** Копирует реальный справочник из example/2.21 в подготовленный configRoot и возвращает его uuid. */
   function copySampleCatalog(): { xmlPath: string; uuid: string } {
-    const catalogsDir = path.join(configRoot, 'Catalogs');
-    fs.mkdirSync(catalogsDir, { recursive: true });
-    const content = fs.readFileSync(SAMPLE_CATALOG_XML, 'utf-8');
-    const destName = 'ТестовыйСправочник.xml';
-    fs.writeFileSync(path.join(catalogsDir, destName), content, 'utf-8');
-    const uuidMatch = /uuid="([0-9a-f-]{36})"/i.exec(content);
-    assert.ok(uuidMatch, 'В образце справочника должен быть uuid — иначе фикстура сломана');
-    return { xmlPath: path.join(catalogsDir, destName), uuid: uuidMatch[1].toLowerCase() };
+    return copyRealObject(SAMPLE_CATALOG_XML, 'Catalogs', 'ТестовыйСправочник.xml');
   }
 
   /**
-   * Синтезирует `Ext/ParentConfigurations.bin` в формате, который разбирает
-   * `SupportInfoService.parseBinFile`: строки `<uuid>,<uuid>,<mode>`.
-   * Реальный `.bin` из example/ не подходит — там нет объектов с mode=2
-   * (запрет редактирования), поэтому режим синтезируется явно под тест.
+   * Копирует РЕАЛЬНЫЙ `Ext/ParentConfigurations.bin` из `example/2.21/src/cf`
+   * (та же поставка, что и `SAMPLE_CATALOG_XML`) — без синтеза: справочник
+   * `АвансовыйОтчетПрисоединенныеФайлы` имеет в нём код `a=0` (не
+   * редактируется → `SupportMode.Locked`), см. `parentConfigurationsParser.test.ts`.
    */
-  function writeParentConfigurationsBin(uuidToMode: ReadonlyMap<string, number>): void {
+  function copyRealParentConfigurationsBin(): void {
     const extDir = path.join(configRoot, 'Ext');
     fs.mkdirSync(extDir, { recursive: true });
-    const rows = [...uuidToMode.entries()]
-      .map(([uuid, mode]) => `${uuid},${uuid},${String(mode)}`)
-      .join(',');
-    fs.writeFileSync(path.join(extDir, 'ParentConfigurations.bin'), `{6,0,1,${rows}}`, 'latin1');
+    fs.copyFileSync(path.join(EXAMPLE_CF, 'Ext', 'ParentConfigurations.bin'), path.join(extDir, 'ParentConfigurations.bin'));
+  }
+
+  /**
+   * Копирует РЕАЛЬНЫЙ `ParentConfigurations.bin` с флагом «изменения
+   * запрещены» в заголовке (`example/support/changes-forbidden`) — та же
+   * поставка, но при этом флаге поддержка блокирует ЛЮБОЙ путь под корнем
+   * независимо от кода конкретной записи (в т.ч. новый, не входящий в
+   * поставку, uuid — как ниже в тесте на корень конфигурации).
+   */
+  function copyForbiddenParentConfigurationsBin(): void {
+    const extDir = path.join(configRoot, 'Ext');
+    fs.mkdirSync(extDir, { recursive: true });
+    fs.copyFileSync(CHANGES_FORBIDDEN_BIN_PATH, path.join(extDir, 'ParentConfigurations.bin'));
   }
 
   function createCommandServices(overrides: {
@@ -143,13 +163,19 @@ suite('MetadataMutationService — проверка SupportMode.Locked при ad
 
   test('Отклоняет добавление дочернего элемента к объекту, помеченному SupportMode.Locked', async () => {
     writeConfigurationXml('11111111-1111-1111-1111-111111111111');
-    const { xmlPath: catalogXmlPath, uuid: catalogUuid } = copySampleCatalog();
-    writeParentConfigurationsBin(new Map([[catalogUuid, 2]]));
+    const { xmlPath: catalogXmlPath } = copySampleCatalog();
+    // Реальный .bin: АвансовыйОтчетПрисоединенныеФайлы имеет код a=0 (не
+    // редактируется) → SupportMode.Locked.
+    copyRealParentConfigurationsBin();
 
     const supportService = new SupportInfoService(new TestLogger());
     supportService.loadConfig(configRoot);
     // Убедимся, что фикстура действительно даёт Locked — иначе тест бессмыслен.
-    assert.strictEqual(supportService.getSupportMode(catalogXmlPath), 2, 'Фикстура должна давать SupportMode.Locked для справочника');
+    assert.strictEqual(
+      supportService.getSupportMode(catalogXmlPath),
+      SupportMode.Locked,
+      'Фикстура должна давать SupportMode.Locked для справочника'
+    );
 
     const repositoryService = new RepositoryService(tempDir, createFakeProjectSecretStorage(tempDir));
     const services = createCommandServices({ supportService, repositoryService });
@@ -177,14 +203,21 @@ suite('MetadataMutationService — проверка SupportMode.Locked при ad
   });
 
   test('Отклоняет добавление корневого объекта, если корень конфигурации помечен SupportMode.Locked', async () => {
+    // Синтетический uuid корня намеренно НЕ входит в реальную поставку — при
+    // флаге «изменения запрещены» это не важно: Locked действует на любой
+    // путь под корнем независимо от того, числится ли его uuid в поставке.
     const configUuid = '22222222-2222-2222-2222-222222222222';
     writeConfigurationXml(configUuid);
-    writeParentConfigurationsBin(new Map([[configUuid, 2]]));
+    copyForbiddenParentConfigurationsBin();
 
     const supportService = new SupportInfoService(new TestLogger());
     supportService.loadConfig(configRoot);
     const configXmlPath = path.join(configRoot, 'Configuration.xml');
-    assert.strictEqual(supportService.getSupportMode(configXmlPath), 2, 'Фикстура должна давать SupportMode.Locked для корня конфигурации');
+    assert.strictEqual(
+      supportService.getSupportMode(configXmlPath),
+      SupportMode.Locked,
+      'Фикстура должна давать SupportMode.Locked для корня конфигурации'
+    );
 
     const repositoryService = new RepositoryService(tempDir, createFakeProjectSecretStorage(tempDir));
     const services = createCommandServices({ supportService, repositoryService });
@@ -218,7 +251,11 @@ suite('MetadataMutationService — проверка SupportMode.Locked при ad
 
     const supportService = new SupportInfoService(new TestLogger());
     supportService.loadConfig(configRoot);
-    assert.strictEqual(supportService.getSupportMode(catalogXmlPath), 0, 'Без ParentConfigurations.bin режим должен быть None');
+    assert.strictEqual(
+      supportService.getSupportMode(catalogXmlPath),
+      SupportMode.None,
+      'Без ParentConfigurations.bin режим должен быть None'
+    );
 
     const repositoryService = new RepositoryService(tempDir, createFakeProjectSecretStorage(tempDir));
     const services = createCommandServices({ supportService, repositoryService });
@@ -236,6 +273,42 @@ suite('MetadataMutationService — проверка SupportMode.Locked при ad
     assert.strictEqual(result.success, true, `Добавление должно пройти без ограничений: ${result.message}`);
     const xml = fs.readFileSync(catalogXmlPath, 'utf-8');
     assert.ok(xml.includes('<Name>РеквизитБезОграничений</Name>'), 'Реквизит должен быть добавлен в XML справочника');
+  });
+
+  test('РЕГРЕССИЯ: объект снятый с поддержки (код a=2 в реальном .bin) добавляет реквизит успешно', async () => {
+    // Старая (неверная) трактовка использовала «сырой» код `a` файла напрямую
+    // как SupportMode — код 2 совпадал с числовым значением SupportMode.Locked
+    // и потому «снятый с поддержки» объект (a=2, реально ПОЛНОСТЬЮ свободен от
+    // ограничений — SupportMode.None) ошибочно блокировался. Контрагенты в
+    // реальной поставке имеют именно код a=2.
+    writeConfigurationXml('66666666-6666-6666-6666-666666666666');
+    const { xmlPath: kontragentyXmlPath } = copyRealObject(KONTRAGENTY_XML, 'Catalogs', 'Контрагенты.xml');
+    copyRealParentConfigurationsBin();
+
+    const supportService = new SupportInfoService(new TestLogger());
+    supportService.loadConfig(configRoot);
+    assert.strictEqual(
+      supportService.getSupportMode(kontragentyXmlPath),
+      SupportMode.None,
+      'Контрагенты (a=2 в реальном .bin) должны давать SupportMode.None, а не Locked'
+    );
+
+    const repositoryService = new RepositoryService(tempDir, createFakeProjectSecretStorage(tempDir));
+    const services = createCommandServices({ supportService, repositoryService });
+    const mutationService = new MetadataMutationService(services);
+
+    const result = await mutationService.addMetadata({
+      target: {
+        kind: 'child',
+        ownerObjectXmlPath: kontragentyXmlPath,
+        childTag: 'Attribute',
+      },
+      name: 'НовыйРеквизитКонтрагента',
+    });
+
+    assert.strictEqual(result.success, true, `Добавление должно пройти без ограничений: ${result.message}`);
+    const xml = fs.readFileSync(kontragentyXmlPath, 'utf-8');
+    assert.ok(xml.includes('<Name>НовыйРеквизитКонтрагента</Name>'), 'Реквизит должен быть добавлен в XML справочника');
   });
 
   test('РЕГРЕССИЯ: существующая репозиторная проверка продолжает отклонять незахваченный объект', async () => {

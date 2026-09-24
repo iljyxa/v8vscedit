@@ -1,0 +1,9 @@
+{
+  "allowChanges": false,
+  "default": "locked",
+  "objects": {
+    "Configuration": "editable",
+    "Document.ПриходТовара": "editable",
+    "Catalog.Контрагенты": "removed"
+  }
+}

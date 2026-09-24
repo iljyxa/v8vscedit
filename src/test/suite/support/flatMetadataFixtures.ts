@@ -85,17 +85,71 @@ export function writeBslFile(bslPath: string, content = ''): string {
 }
 
 /**
- * Синтезирует `Ext/ParentConfigurations.bin` в формате, который разбирает
- * `SupportInfoService.parseBinFile`: строки `<uuid>,<uuid>,<mode>`. Формат
- * заголовка `{6,0,1,...}` — образец из `metadataMutationServiceSupport.test.ts`.
+ * Коды режима поддержки объекта («a» — первое число в записи `a,b,uuid,uuid`
+ * реального `Ext/ParentConfigurations.bin`, см. шапку
+ * `example/tools/build-supported-cf.mjs`): 0 — объект поставщика не
+ * редактируется, 1 — редактируется с сохранением поддержки, 2 — снят с
+ * поддержки. Это НЕ значения `SupportMode` — трактовку кода в домен делает
+ * `SupportInfoService` (0→Locked, 1→Editable, 2→None).
  */
-export function writeParentConfigurationsBin(configRoot: string, uuidToMode: ReadonlyMap<string, number>): string {
+export const SUPPORT_BIN_CODE = { locked: 0, editable: 1, removed: 2 } as const;
+
+/**
+ * Шапка поставщика и числовой хвост записей — взяты буквально из реального
+ * `example/2.21/src/cf/Ext/ParentConfigurations.bin` (та же поставка, что и в
+ * `example/2.20`): `{6,<флаг>,<vendorCount>,<uuid1>,<copyMatches>,<uuid2>,
+ * "<версия>","<поставщик>","<имя>",<declaredCount>,<записи>,<хвост>}`. Смысл
+ * `<uuid1>`/`<uuid2>`/хвоста для тестов не важен — они лишь должны сохранять
+ * реальную форму, чтобы `parseParentConfigurations` не отбивал файл как
+ * нераспознанный.
+ */
+const VENDOR_UUID_1 = 'd373e051-3ee4-4d72-8f88-e47ab1df50aa';
+const VENDOR_UUID_2 = '13aef131-d246-42a7-9f3c-b3ccaf6f386f';
+const VENDOR_VERSION = '0.0.0.1';
+const VENDOR_NAME = 'Example';
+const VENDOR_CONFIG_NAME = 'ТорговыйУчет';
+const TAIL_NUMBERS = '0,0,0,1,0,0,0,1,0,1,0,1,1,1,1';
+
+/**
+ * Синтезирует `Ext/ParentConfigurations.bin` в реальном формате платформы
+ * (`{6,<флаг>,<vendorCount>,…,<declaredCount>,a,b,uuid,uuid,…,<хвост>}`,
+ * см. `parseParentConfigurations`). `records` — карта uuid объекта → код `a`
+ * (см. {@link SUPPORT_BIN_CODE}); `extraRecords` добавляет записи с
+ * ПОВТОРЯЮЩИМСЯ uuid (несколько поставщиков одного объекта) — `ReadonlyMap` не
+ * допускает дублей ключей, поэтому такие записи передаются отдельным списком.
+ */
+export function writeParentConfigurationsBin(
+  configRoot: string,
+  records: ReadonlyMap<string, number>,
+  options?: {
+    changesForbidden?: boolean;
+    vendorCount?: number;
+    declaredCount?: number;
+    bom?: boolean;
+    extraRecords?: readonly [number, string][];
+  }
+): string {
   const extDir = path.join(configRoot, 'Ext');
   fs.mkdirSync(extDir, { recursive: true });
-  const rows = [...uuidToMode.entries()]
-    .map(([uuid, mode]) => `${uuid},${uuid},${String(mode)}`)
-    .join(',');
+
+  const allRecords: [number, string][] = [...records.entries()].map(([uuid, code]) => [code, uuid]);
+  if (options?.extraRecords) {
+    allRecords.push(...options.extraRecords);
+  }
+  const declaredCount = options?.declaredCount ?? allRecords.length;
+  const recordsBody = allRecords.map(([code, uuid]) => `${String(code)},0,${uuid},${uuid}`).join(',');
+
+  const header =
+    `{6,${options?.changesForbidden ? '1' : '0'},${String(options?.vendorCount ?? 1)},` +
+    `${VENDOR_UUID_1},0,${VENDOR_UUID_2},"${VENDOR_VERSION}","${VENDOR_NAME}","${VENDOR_CONFIG_NAME}",` +
+    String(declaredCount);
+  const body = recordsBody ? `,${recordsBody}` : '';
+  const content = `${header}${body},${TAIL_NUMBERS}}`;
+
   const binPath = path.join(extDir, 'ParentConfigurations.bin');
-  fs.writeFileSync(binPath, `{6,0,1,${rows}}`, 'latin1');
+  // BOM через String.fromCharCode (не литеральным невидимым символом в
+  // исходнике) — см. те же соображения в minimalConfigurationXml выше.
+  const bom = options?.bom ? String.fromCharCode(0xfeff) : '';
+  fs.writeFileSync(binPath, bom + content, 'utf-8');
   return binPath;
 }

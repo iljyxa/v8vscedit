@@ -35,6 +35,13 @@
 // Платформы: V8_PLATFORM_DIR (по умолчанию /opt/1cv8/x86_64/8.5.1.1529) и V8_PLATFORM_DIR_220
 // (по умолчанию /opt/1cv8/x86_64/8.3.27.2342, нужна только для --export формата 2.20).
 // Без дисплея Конфигуратор запускается через xvfb-run.
+//
+// Фикстура «изменения запрещены» (example/support/changes-forbidden/ParentConfigurations.bin —
+// флаг запрета в заголовке = 1 при правилах объектов 1/2, поставка та же, что у example/2.21):
+//   CF=example/2.21/src/cf/Ext/ParentConfigurations/ТорговыйУчет.cf
+//   node example/tools/build-supported-cf.mjs --source $CF --vendor $CF \
+//     --rules example/tools/support-rules-forbidden.json --out <каталог>
+//   cp <каталог>/work/check/Ext/ParentConfigurations.bin example/support/changes-forbidden/
 
 /* global console, process */
 import { spawnSync } from 'node:child_process';
