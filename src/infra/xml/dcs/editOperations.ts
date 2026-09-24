@@ -12,6 +12,7 @@ import {
   editFirstVariantSettings,
   extractBlock,
   insertBeforeClose,
+  insertIntoSchemaRoot,
   matchBlocks,
   readText,
   removeElementByChildText,
@@ -36,23 +37,23 @@ export function applyEdit(xml: string, operation: SkdEditOperation, value: strin
     case 'add-field':
       return editFirstDataSet(xml, options.dataSet, (block) => insertBeforeClose(block, 'dataSet', buildFieldXml(value, '\t\t')));
     case 'add-total':
-      return insertBeforeClose(xml, 'DataCompositionSchema', buildTotalFieldXml(value));
+      return insertIntoSchemaRoot(xml, 'totalField', buildTotalFieldXml(value));
     case 'add-calculated-field':
-      return insertBeforeClose(xml, 'DataCompositionSchema', buildCalculatedFieldXml(value));
+      return insertIntoSchemaRoot(xml, 'calculatedField', buildCalculatedFieldXml(value));
     case 'add-parameter':
-      return insertBeforeClose(xml, 'DataCompositionSchema', buildParameterXmlWithAutoDates(value).join('\n'));
+      return insertIntoSchemaRoot(xml, 'parameter', buildParameterXmlWithAutoDates(value).join('\n'));
     case 'add-dataSet': {
       const [name, query] = value.includes(':') ? value.split(/:(.+)/) : [`НаборДанных${String(countTags(xml, 'dataSet') + 1)}`, value];
-      return insertBeforeClose(xml, 'DataCompositionSchema', buildDataSetXml({ name: name.trim(), query: query.trim(), fields: [] }, readText(matchBlocks(xml, 'dataSource')[0] ?? '', 'name') || 'ИсточникДанных1'));
+      return insertIntoSchemaRoot(xml, 'dataSet', buildDataSetXml({ name: name.trim(), query: query.trim(), fields: [] }, readText(matchBlocks(xml, 'dataSource')[0] ?? '', 'name') || 'ИсточникДанных1'));
     }
     case 'add-variant':
       return insertBeforeClose(xml, 'DataCompositionSchema', buildVariantXml(parseVariant(value), []));
     case 'add-dataSetLink':
-      return insertBeforeClose(xml, 'DataCompositionSchema', buildDataSetLinkXml(value));
+      return insertIntoSchemaRoot(xml, 'dataSetLink', buildDataSetLinkXml(value));
     case 'add-conditionalAppearance':
       return editFirstVariantSettings(xml, options.variant, (settings) => appendIntoSection(settings, 'conditionalAppearance', buildConditionalAppearanceItemXml(value)));
     case 'add-drilldown':
-      return insertBeforeClose(xml, 'DataCompositionSchema', buildDrilldownTemplateXml(value));
+      return insertIntoSchemaRoot(xml, 'template', buildDrilldownTemplateXml(value));
     case 'set-query':
       return editFirstDataSet(xml, options.dataSet, (block) => replaceOrInsert(block, 'query', escapeXmlText(value), 'dataSet'));
     case 'patch-query':
@@ -198,7 +199,7 @@ export function replaceParameterBlock(xml: string, value: string, warnings: stri
     }
   }
   warnings.push(`Параметр не найден, добавлен новый: ${parsed.name}.`);
-  return insertBeforeClose(xml, 'DataCompositionSchema', replacement);
+  return insertIntoSchemaRoot(xml, 'parameter', replacement);
 }
 
 export function modifyFirstItemInSection(xml: string, sectionTag: string, sectionXml: string): string {

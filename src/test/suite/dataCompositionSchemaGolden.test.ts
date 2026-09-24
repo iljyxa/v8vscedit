@@ -605,8 +605,9 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '</DataCompositionSchema>';
     assert.strictEqual(afterModifyField, expectedAfterModifyField);
 
-    // Шаг 3: add-parameter — новый параметр вставляется перед </DataCompositionSchema>,
-    // то есть ПОСЛЕ settingsVariant (insertBeforeClose на корень схемы).
+    // Шаг 3: add-parameter — новый параметр встаёт после существующих параметров, перед
+    // первым settingsVariant: порядок прямых детей корня схемы — xs:sequence, снятый с выгрузки
+    // платформы (iljyxa/v8vscedit#31). Остальной документ не переформатируется.
     const editAddParameter = service.edit({
       templatePath,
       operation: 'add-parameter',
@@ -616,21 +617,9 @@ suite('DataCompositionSchemaService — байт-golden характеризац
     assert.strictEqual(editAddParameter.warnings.length, 0);
 
     const afterAddParameter = fs.readFileSync(templatePath, 'utf-8');
-    assert.ok(afterAddParameter.endsWith(
-      '\t<parameter>' + '\r\n'
-      + '\t\t<name>ПериодАнализа</name>' + '\r\n'
-      + '\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
-      + '\t\t\t<v8:item><v8:lang>ru</v8:lang><v8:content>Период анализа</v8:content></v8:item>' + '\r\n'
-      + '\t\t</title>' + '\r\n'
-      + '\t\t<valueType>' + '\r\n'
-      + '\t\t\t<v8:Type>v8:StandardPeriod</v8:Type>' + '\r\n'
-      + '\t\t</valueType>' + '\r\n'
-      + '\t</parameter>' + '\r\n'
-      + '</DataCompositionSchema>'
-    ), 'новый параметр ПериодАнализа должен быть вставлен последним перед закрытием корня');
-    // Полный эталон — та же строка afterModifyField с точечной вставкой параметра
-    // перед закрывающим корневым тегом (insertBeforeClose не переформатирует остальной документ).
-    const expectedAfterAddParameter = expectedAfterModifyField.slice(0, -('</DataCompositionSchema>'.length))
+    const settingsVariantAt = expectedAfterModifyField.indexOf('\t<settingsVariant>');
+    assert.ok(settingsVariantAt > expectedAfterModifyField.indexOf('\t</parameter>'), 'в фикстуре параметр стоит до settingsVariant');
+    const expectedAfterAddParameter = expectedAfterModifyField.slice(0, settingsVariantAt)
       + '\t<parameter>' + '\r\n'
       + '\t\t<name>ПериодАнализа</name>' + '\r\n'
       + '\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
@@ -640,7 +629,7 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t\t<v8:Type>v8:StandardPeriod</v8:Type>' + '\r\n'
       + '\t\t</valueType>' + '\r\n'
       + '\t</parameter>' + '\r\n'
-      + '</DataCompositionSchema>';
+      + expectedAfterModifyField.slice(settingsVariantAt);
     assert.strictEqual(afterAddParameter, expectedAfterAddParameter);
 
     // Шаг 4: rename-parameter — переименовывает ТОЛЬКО <name> целевого <parameter>,
@@ -668,9 +657,8 @@ suite('DataCompositionSchemaService — байт-golden характеризац
 
     // Шаг 5: reorder-parameters — переставляет блоки <parameter> на их собственных местах
     // (iljyxa/v8vscedit#29): i-й по позиции параметр заменяется i-м в новом порядке. Исходный
-    // ПоказыватьПодробности стоит до settingsVariant, добавленный на шаге 3 ПериодАнализа — после;
-    // после перестановки на этих местах оказываются ПериодАнализа и ПоказыватьПодробности
-    // соответственно, разделители и остальной документ не меняются ни на символ.
+    // ПоказыватьПодробности и добавленный на шаге 3 ПериодАнализа стоят подряд до settingsVariant;
+    // после перестановки они меняются местами, разделители и остальной документ не меняются.
     const periodBlock =
       '<parameter>' + '\r\n'
       + '\t\t<name>ПериодАнализа</name>' + '\r\n'
@@ -698,8 +686,8 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t<use>Always</use>' + '\r\n'
       + '\t</parameter>';
     const settingsVariantIndex = afterRename.indexOf('\t<settingsVariant>');
-    assert.ok(afterRename.indexOf(showDetailsBlock) < settingsVariantIndex, 'до перестановки ПоказыватьПодробности стоит до settingsVariant');
-    assert.ok(afterRename.indexOf(periodBlock) > settingsVariantIndex, 'до перестановки ПериодАнализа стоит после settingsVariant');
+    assert.ok(afterRename.indexOf(showDetailsBlock) < afterRename.indexOf(periodBlock), 'до перестановки ПоказыватьПодробности стоит первым');
+    assert.ok(afterRename.indexOf(periodBlock) < settingsVariantIndex, 'оба параметра стоят до settingsVariant');
 
     const editReorder = service.edit({
       templatePath,
