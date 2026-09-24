@@ -306,8 +306,8 @@ suite('DataCompositionSchemaService — байт-golden характеризац
   test('edit — цепочка add-field/modify-field/add-parameter/rename-parameter/reorder-parameters на реальной выгрузке example/2.21 (Reports/ПраваДоступа): полный байтовый эталон после каждого шага', () => {
     // Реальная выгрузка 1С с BOM + CRLF: сохранение обоих через
     // writeTextFilePreservingBomAndEol — часть контракта, который обязан пережить
-    // дробление сервиса. Фикстура компактна (68 строк), но содержит multi-valueType
-    // поле "Пользователь" (4 альтернативных <v8:Type>), namespace-префиксованный
+    // дробление сервиса. Фикстура компактна (84 строки), но содержит multi-valueType
+    // поле "Пользователь" (3 альтернативных <v8:Type>), namespace-префиксованный
         // settingsVariant (dcsset:) и <parameter> с value/useRestriction/use — то есть
     // задевает основные ветки replaceFieldBlock/replaceParameterBlock/renameParameter.
     const fixture = path.resolve(
@@ -342,6 +342,11 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t\t\t\t<v8:content>Пользователь</v8:content>' + '\r\n'
       + '\t\t\t\t</v8:item>' + '\r\n'
       + '\t\t\t</title>' + '\r\n'
+      + '\t\t\t<valueType>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Пользователи</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Контрагенты</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Организации</v8:Type>' + '\r\n'
+      + '\t\t\t</valueType>' + '\r\n'
       + '\t\t</field>' + '\r\n'
       + '\t\t<dataSource>ИсточникДанных1</dataSource>' + '\r\n'
       + '\t\t<query>ВЫБРАТЬ\n\tПользователи.Ссылка КАК Пользователь\nИЗ\n\tСправочник.Пользователи КАК Пользователи\n\nОБЪЕДИНИТЬ ВСЕ\n\nВЫБРАТЬ\n\tКонтрагенты.Ссылка\nИЗ\n\tСправочник.Контрагенты КАК Контрагенты\n\nОБЪЕДИНИТЬ ВСЕ\n\nВЫБРАТЬ\n\tОрганизации.Ссылка\nИЗ\n\tСправочник.Организации КАК Организации</query>' + '\r\n'
@@ -421,6 +426,11 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t\t\t\t<v8:content>Пользователь</v8:content>' + '\r\n'
       + '\t\t\t\t</v8:item>' + '\r\n'
       + '\t\t\t</title>' + '\r\n'
+      + '\t\t\t<valueType>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Пользователи</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Контрагенты</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Организации</v8:Type>' + '\r\n'
+      + '\t\t\t</valueType>' + '\r\n'
       + '\t\t</field>' + '\r\n'
       + '\t\t<dataSource>ИсточникДанных1</dataSource>' + '\r\n'
       + '\t\t<query>ВЫБРАТЬ' + '\r\n'
@@ -538,6 +548,11 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t\t\t\t<v8:content>Пользователь</v8:content>' + '\r\n'
       + '\t\t\t\t</v8:item>' + '\r\n'
       + '\t\t\t</title>' + '\r\n'
+      + '\t\t\t<valueType>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Пользователи</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Контрагенты</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Организации</v8:Type>' + '\r\n'
+      + '\t\t\t</valueType>' + '\r\n'
       + '\t\t</field>' + '\r\n'
       + '\t\t<dataSource>ИсточникДанных1</dataSource>' + '\r\n'
       + '\t\t<query>ВЫБРАТЬ' + '\r\n'
@@ -710,6 +725,11 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t\t\t\t<v8:content>Пользователь</v8:content>' + '\r\n'
       + '\t\t\t\t</v8:item>' + '\r\n'
       + '\t\t\t</title>' + '\r\n'
+      + '\t\t\t<valueType>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Пользователи</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Контрагенты</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Организации</v8:Type>' + '\r\n'
+      + '\t\t\t</valueType>' + '\r\n'
       + '\t\t</field>' + '\r\n'
       + '\t\t<dataSource>ИсточникДанных1</dataSource>' + '\r\n'
       + '\t\t<query>ВЫБРАТЬ' + '\r\n'
@@ -828,9 +848,6 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       '  ПодробныеСведенияОПравахДоступа: boolean',
       '',
       '--- Variants ---',
-      // settingsVariant в этой реальной выгрузке использует namespace-префикс
-      // dcsset:name/dcsset:settings — parseSchema ищет НЕпрефиксованные <name>/<selection>,
-      // поэтому name и selection варианта закономерно пустые (задокументированное поведение).
       '  : selection=Auto',
     ];
     assert.deepStrictEqual(info.lines, expectedLines);
