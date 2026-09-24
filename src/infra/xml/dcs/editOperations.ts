@@ -181,9 +181,20 @@ export function replaceParameterBlock(xml: string, value: string, warnings: stri
     return xml;
   }
   const replacement = buildParameterXml(parsed);
-  for (const block of matchBlocks(xml, 'parameter')) {
-    if (readText(block, 'name') === parsed.name) {
-      return xml.replace(block, () => replacement);
+  // Только прямые <parameter> корня: регулярка по всему документу начинала блок с
+  // самозакрывающегося вложенного <parameter/> (например, в dataSetLink) и тянула его до
+  // </parameter> следующего параметра схемы — замена съедала закрывающий тег связи.
+  const rootRange = findNestingAwareElementRange(xml, 'DataCompositionSchema');
+  if (!rootRange) {
+    warnings.push('modify-parameter: не найден корень DataCompositionSchema.');
+    return xml;
+  }
+  const rootInner = xml.slice(rootRange.openEnd, rootRange.closeStart);
+  for (const range of findDirectElementRanges(rootInner, 'parameter')) {
+    if (readText(rootInner.slice(range.start, range.end), 'name') === parsed.name) {
+      // Отступ перед блоком остаётся из исходника, поэтому у замены он срезается.
+      const start = rootRange.openEnd + range.start;
+      return xml.slice(0, start) + replacement.trimStart() + xml.slice(rootRange.openEnd + range.end);
     }
   }
   warnings.push(`Параметр не найден, добавлен новый: ${parsed.name}.`);
