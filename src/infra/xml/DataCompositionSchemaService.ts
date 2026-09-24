@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { XMLValidator } from 'fast-xml-parser';
-import { writeTextFilePreservingBomAndEol } from './XmlUtils';
+import { hasRealChange, writeTextFilePreservingBomAndEol } from './XmlUtils';
 import { resolveTemplateContentPath } from './dcs/dcsShared';
 import { buildSchemaXml } from './dcs/schemaBuilders';
 import { applyEdit } from './dcs/editOperations';
@@ -251,17 +251,20 @@ export class DataCompositionSchemaService {
     for (const value of values) {
       const before = xml;
       xml = applyEdit(xml, options.operation, value, options, warnings);
-      if (xml !== before) {
+      // Значения (например, текст запроса) могут прийти в CRLF при LF внутри файла и
+      // наоборот: отличие только в EOL не является применённой правкой.
+      if (hasRealChange(before, xml)) {
         lines.push(`${options.operation}: ${value}`);
       }
     }
 
-    if (xml !== original) {
+    const changed = hasRealChange(original, xml);
+    if (changed) {
       writeTextFilePreservingBomAndEol(templatePath, original, xml);
     }
     return {
       templatePath,
-      changedFiles: xml === original ? [] : [templatePath],
+      changedFiles: changed ? [templatePath] : [],
       warnings,
       lines,
     };
