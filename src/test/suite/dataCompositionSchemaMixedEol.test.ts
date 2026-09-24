@@ -98,11 +98,11 @@ function findIndexOrThrow(haystack: string, needle: string, fromIndex = 0): numb
 }
 
 /**
- * Байтовый эталон add-parameter: строка ПОЛНОСТЬЮ, идентичная golden-тесту
- * (dataCompositionSchemaGolden.test.ts, шаг 3 "add-parameter") — insertBeforeClose
- * вставляет CRLF-блок параметра прямо перед `</DataCompositionSchema>`, ничего
- * больше в документе не трогая. Значение/блок намеренно совпадают с golden-тестом:
- * формат генерируется builder'ом (dcs/schemaBuilders.ts), не зависит от фикстуры.
+ * Байтовый эталон add-parameter: блок совпадает с golden-тестом
+ * (dataCompositionSchemaGolden.test.ts, шаг 3 "add-parameter") — CRLF-блок параметра
+ * встаёт перед первым `<settingsVariant>` (порядок корня схемы, iljyxa/v8vscedit#31; шаблонов
+ * в фикстурах нет), ничего больше в документе не трогая. Формат блока генерируется
+ * builder'ом (dcs/schemaBuilders.ts) и от фикстуры не зависит.
  */
 const ADD_PARAMETER_VALUE = 'ПериодАнализа [Период анализа]: StandardPeriod';
 const ADD_PARAMETER_BLOCK =
@@ -117,9 +117,8 @@ const ADD_PARAMETER_BLOCK =
   + '\t</parameter>' + '\r\n';
 
 function expectedAfterAddParameter(original: string): string {
-  const closeTag = '</DataCompositionSchema>';
-  assert.ok(original.endsWith(closeTag), 'фикстура обязана оканчиваться </DataCompositionSchema> без хвостовых байт');
-  return original.slice(0, original.length - closeTag.length) + ADD_PARAMETER_BLOCK + closeTag;
+  const variantIndex = findIndexOrThrow(original, '\t<settingsVariant>');
+  return original.slice(0, variantIndex) + ADD_PARAMETER_BLOCK + original.slice(variantIndex);
 }
 
 suite('DataCompositionSchemaService.edit — сохранение смешанного EOL на реальных выгрузках 1С', () => {
@@ -130,7 +129,7 @@ suite('DataCompositionSchemaService.edit — сохранение смешанн
         assert.strictEqual(countBareLineFeeds(original), fx.bareLfCount);
       });
 
-      test('add-parameter: точный байтовый эталон (исходник + CRLF-блок параметра перед </DataCompositionSchema>); <query> и число одиночных LF не меняются', () => {
+      test('add-parameter: точный байтовый эталон (исходник + CRLF-блок параметра перед первым settingsVariant); <query> и число одиночных LF не меняются', () => {
         const { templatePath, original } = copyFixtureToTemp(fx);
         const service = new DataCompositionSchemaService();
         const queriesBefore = extractQueryBlocks(original);
