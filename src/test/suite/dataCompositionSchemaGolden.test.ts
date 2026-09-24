@@ -315,7 +315,7 @@ suite('DataCompositionSchemaService — байт-golden характеризац
     // CRLF-файла. writeTextFilePreservingBomAndEol приводит к CRLF ВСЕ переводы строк,
     // поэтому после первой же правки <query> в эталоне становится CRLF. Это фиксация
     // ТЕКУЩЕГО поведения (лишний дифф текста запроса при любой правке схемы), а не
-    // желаемый контракт — дефект вынесен в отдельную задачу.
+    // желаемый контракт — дефект iljyxa/v8vscedit#18.
     const fixture = path.resolve(
       __dirname,
       '../../../example/2.21/src/cf/Reports/ПраваДоступа/Templates/МакетПараметров/Ext/Template.xml'
