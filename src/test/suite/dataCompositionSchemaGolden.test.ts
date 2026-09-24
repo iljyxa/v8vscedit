@@ -666,90 +666,13 @@ suite('DataCompositionSchemaService — байт-golden характеризац
     // затрагиваются только findDirectElementRanges(rootInner, 'parameter')).
     assert.ok(afterRename.includes('<dcscor:parameter>ПодробныеСведенияОПравахДоступа</dcscor:parameter>'));
 
-    // Шаг 5: reorder-parameters — переставляет местами блоки <parameter> целиком
-    // (порядок "ПериодАнализа, ПоказыватьПодробности"), остальной документ (включая
-    // settingsVariant между dataSet и параметрами) остаётся на прежнем месте.
-    const editReorder = service.edit({
-      templatePath,
-      operation: 'reorder-parameters',
-      value: 'ПериодАнализа, ПоказыватьПодробности',
-    });
-    assert.strictEqual(editReorder.warnings.length, 0);
-
-    const afterReorder = fs.readFileSync(templatePath, 'utf-8');
-    const expectedAfterReorder =
-      '﻿<?xml version="1.0" encoding="UTF-8"?>' + '\r\n'
-      + '<DataCompositionSchema xmlns="http://v8.1c.ru/8.1/data-composition-system/schema" xmlns:dcscom="http://v8.1c.ru/8.1/data-composition-system/common" xmlns:dcscor="http://v8.1c.ru/8.1/data-composition-system/core" xmlns:dcsset="http://v8.1c.ru/8.1/data-composition-system/settings" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:v8ui="http://v8.1c.ru/8.1/data/ui" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' + '\r\n'
-      + '\t<dataSource>' + '\r\n'
-      + '\t\t<name>ИсточникДанных1</name>' + '\r\n'
-      + '\t\t<dataSourceType>Local</dataSourceType>' + '\r\n'
-      + '\t</dataSource>' + '\r\n'
-      + '\t<dataSet xsi:type="DataSetQuery">' + '\r\n'
-      + '\t\t<name>НаборДанных1</name>' + '\r\n'
-      + '\t\t\t\t<field xsi:type="DataSetFieldField">' + '\r\n'
-      + '\t\t\t<dataPath>Пользователь</dataPath>' + '\r\n'
-      + '\t\t\t<field>Пользователь</field>' + '\r\n'
-      + '\t\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
-      + '\t\t\t\t<v8:item><v8:lang>ru</v8:lang><v8:content>Пользователь(ФИО)</v8:content></v8:item>' + '\r\n'
-      + '\t\t\t</title>' + '\r\n'
-      + '\t\t\t<valueType>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Пользователи</v8:Type>' + '\r\n'
-      + '\t\t\t</valueType>' + '\r\n'
-      + '\t\t</field>' + '\r\n'
-      + '\t\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
-      + '\t\t\t\t<v8:item>' + '\r\n'
-      + '\t\t\t\t\t<v8:lang>ru</v8:lang>' + '\r\n'
-      + '\t\t\t\t\t<v8:content>Пользователь</v8:content>' + '\r\n'
-      + '\t\t\t\t</v8:item>' + '\r\n'
-      + '\t\t\t</title>' + '\r\n'
-      + '\t\t\t<valueType>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Пользователи</v8:Type>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Контрагенты</v8:Type>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Организации</v8:Type>' + '\r\n'
-      + '\t\t\t</valueType>' + '\r\n'
-      + '\t\t</field>' + '\r\n'
-      + '\t\t<dataSource>ИсточникДанных1</dataSource>' + '\r\n'
-      + '\t\t<query>ВЫБРАТЬ\n\tПользователи.Ссылка КАК Пользователь\nИЗ\n\tСправочник.Пользователи КАК Пользователи\n\nОБЪЕДИНИТЬ ВСЕ\n\nВЫБРАТЬ\n\tКонтрагенты.Ссылка\nИЗ\n\tСправочник.Контрагенты КАК Контрагенты\n\nОБЪЕДИНИТЬ ВСЕ\n\nВЫБРАТЬ\n\tОрганизации.Ссылка\nИЗ\n\tСправочник.Организации КАК Организации</query>' + '\r\n'
-      + '\t\t<field xsi:type="DataSetFieldField">' + '\r\n'
-      + '\t\t\t<dataPath>Роль</dataPath>' + '\r\n'
-      + '\t\t\t<field>Роль</field>' + '\r\n'
-      + '\t\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
-      + '\t\t\t\t<v8:item><v8:lang>ru</v8:lang><v8:content>Роль</v8:content></v8:item>' + '\r\n'
-      + '\t\t\t</title>' + '\r\n'
-      + '\t\t\t<valueType>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Роли</v8:Type>' + '\r\n'
-      + '\t\t\t</valueType>' + '\r\n'
-      + '\t\t</field>' + '\r\n'
-      + '</dataSet>' + '\r\n'
-      + '\t' + '\r\n'
-      + '\t<settingsVariant>' + '\r\n'
-      + '\t\t<dcsset:name>ПраваДоступа</dcsset:name>' + '\r\n'
-      + '\t\t<dcsset:presentation xsi:type="v8:LocalStringType">' + '\r\n'
-      + '\t\t\t<v8:item>' + '\r\n'
-      + '\t\t\t\t<v8:lang>ru</v8:lang>' + '\r\n'
-      + '\t\t\t\t<v8:content>ПраваДоступа</v8:content>' + '\r\n'
-      + '\t\t\t</v8:item>' + '\r\n'
-      + '\t\t</dcsset:presentation>' + '\r\n'
-      + '\t\t<dcsset:settings xmlns:pal="http://v8.1c.ru/8.1/data/ui/colors/palette" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows">' + '\r\n'
-      + '\t\t\t<dcsset:filter>' + '\r\n'
-      + '\t\t\t\t<dcsset:item xsi:type="dcsset:FilterItemComparison">' + '\r\n'
-      + '\t\t\t\t\t<dcsset:left xsi:type="dcscor:Field">Пользователь</dcsset:left>' + '\r\n'
-      + '\t\t\t\t\t<dcsset:comparisonType>Equal</dcsset:comparisonType>' + '\r\n'
-      + '\t\t\t\t\t<dcsset:viewMode>Inaccessible</dcsset:viewMode>' + '\r\n'
-      + '\t\t\t\t</dcsset:item>' + '\r\n'
-      + '\t\t\t</dcsset:filter>' + '\r\n'
-      + '\t\t\t<dcsset:dataParameters>' + '\r\n'
-      + '\t\t\t\t<dcscor:item xsi:type="dcsset:SettingsParameterValue">' + '\r\n'
-      + '\t\t\t\t\t<dcscor:use>false</dcscor:use>' + '\r\n'
-      + '\t\t\t\t\t<dcscor:parameter>ПодробныеСведенияОПравахДоступа</dcscor:parameter>' + '\r\n'
-      + '\t\t\t\t\t<dcscor:value xsi:type="xs:boolean">false</dcscor:value>' + '\r\n'
-      + '\t\t\t\t\t<dcsset:userSettingID>7a4419ba-878e-4056-8b60-9ffd5a8cd15d</dcsset:userSettingID>' + '\r\n'
-      + '\t\t\t\t</dcscor:item>' + '\r\n'
-      + '\t\t\t</dcsset:dataParameters>' + '\r\n'
-      + '\t\t</dcsset:settings>' + '\r\n'
-      + '\t</settingsVariant>' + '\r\n'
-      + '\t' + '\r\n'
-      + '<parameter>' + '\r\n'
+    // Шаг 5: reorder-parameters — переставляет блоки <parameter> на их собственных местах
+    // (iljyxa/v8vscedit#29): i-й по позиции параметр заменяется i-м в новом порядке. Исходный
+    // ПоказыватьПодробности стоит до settingsVariant, добавленный на шаге 3 ПериодАнализа — после;
+    // после перестановки на этих местах оказываются ПериодАнализа и ПоказыватьПодробности
+    // соответственно, разделители и остальной документ не меняются ни на символ.
+    const periodBlock =
+      '<parameter>' + '\r\n'
       + '\t\t<name>ПериодАнализа</name>' + '\r\n'
       + '\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
       + '\t\t\t<v8:item><v8:lang>ru</v8:lang><v8:content>Период анализа</v8:content></v8:item>' + '\r\n'
@@ -757,8 +680,9 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t<valueType>' + '\r\n'
       + '\t\t\t<v8:Type>v8:StandardPeriod</v8:Type>' + '\r\n'
       + '\t\t</valueType>' + '\r\n'
-      + '\t</parameter>' + '\r\n'
-      + '<parameter>' + '\r\n'
+      + '\t</parameter>';
+    const showDetailsBlock =
+      '<parameter>' + '\r\n'
       + '\t\t<name>ПоказыватьПодробности</name>' + '\r\n'
       + '\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
       + '\t\t\t<v8:item>' + '\r\n'
@@ -772,8 +696,26 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t<value xsi:type="xs:boolean">false</value>' + '\r\n'
       + '\t\t<useRestriction>false</useRestriction>' + '\r\n'
       + '\t\t<use>Always</use>' + '\r\n'
-      + '\t</parameter>' + '\r\n'
-      + '</DataCompositionSchema>';
+      + '\t</parameter>';
+    const settingsVariantIndex = afterRename.indexOf('\t<settingsVariant>');
+    assert.ok(afterRename.indexOf(showDetailsBlock) < settingsVariantIndex, 'до перестановки ПоказыватьПодробности стоит до settingsVariant');
+    assert.ok(afterRename.indexOf(periodBlock) > settingsVariantIndex, 'до перестановки ПериодАнализа стоит после settingsVariant');
+
+    const editReorder = service.edit({
+      templatePath,
+      operation: 'reorder-parameters',
+      value: 'ПериодАнализа, ПоказыватьПодробности',
+    });
+    assert.strictEqual(editReorder.warnings.length, 0);
+    assert.strictEqual(editReorder.changedFiles.length, 1);
+
+    const afterReorder = fs.readFileSync(templatePath, 'utf-8');
+    const expectedAfterReorder =
+      afterRename.slice(0, afterRename.indexOf(showDetailsBlock))
+      + periodBlock
+      + afterRename.slice(afterRename.indexOf(showDetailsBlock) + showDetailsBlock.length, afterRename.indexOf(periodBlock))
+      + showDetailsBlock
+      + afterRename.slice(afterRename.indexOf(periodBlock) + periodBlock.length);
     assert.strictEqual(afterReorder, expectedAfterReorder);
   });
 
