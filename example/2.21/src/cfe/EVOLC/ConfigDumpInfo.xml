@@ -1,0 +1,10 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<ConfigDumpInfo xmlns="http://v8.1c.ru/8.3/xcf/dumpinfo" xmlns:xen="http://v8.1c.ru/8.3/xcf/enums" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" format="Hierarchical" version="2.21">
+	<ConfigVersions>
+		<Metadata name="Catalog.ев_РабочийПроцесс" id="721b0f27-ccf2-477f-8c22-9b6e4be5c2dc" configVersion="d0b55ee1523f61d9e47f45f0144f4317a1ae59af"/>
+		<Metadata name="Catalog.ев_РабочийПроцесс.ObjectModule" id="721b0f27-ccf2-477f-8c22-9b6e4be5c2dc.0" configVersion="73f6f94217a227e4dc0de524fdd55080b3607dae"/>
+		<Metadata name="Configuration.EVOLC" id="7a7bf1b9-1eed-4ad9-900d-dcf993f26869" configVersion="01beff0a1863516d6e2bc49aa6ae80b98a0364b7"/>
+		<Metadata name="Language.Русский" id="4207b87d-c258-41e6-aa0f-d99e151a9784" configVersion="7664929c60022d0dc8ba57afc2404d6512381038"/>
+		<Metadata name="Role.ев_ОсновнаяРоль" id="5c474f40-3d78-4082-9f14-3ae22e51ea2b" configVersion="a723f3a7cb0e3186281331e92bf9c5319902582e"/>
+	</ConfigVersions>
+</ConfigDumpInfo>
