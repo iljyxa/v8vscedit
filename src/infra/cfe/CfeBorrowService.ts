@@ -321,7 +321,11 @@ export class CfeBorrowService {
       }
     }
 
-    this.registerFormInParentObject(extDir, folder, objectName, formName);
+    // XML родителя уже в files, если родитель заимствован этим же вызовом.
+    const objFile = path.join(extDir, folder, `${objectName}.xml`);
+    if (this.registerChildInParentObject(objFile, 'Form', formName) && !files.includes(objFile)) {
+      files.push(objFile);
+    }
 
     return { alreadyBorrowed: false, files };
   }
@@ -728,19 +732,6 @@ export class CfeBorrowService {
       `\t</BaseForm>`,
       `</Form>`,
     ].join('\n');
-  }
-
-  /**
-   * Добавляет запись о форме в главный `<ChildObjects>` XML-файла родительского объекта в расширении.
-   * Возвращает true, если файл изменён.
-   */
-  private registerFormInParentObject(
-    extDir: string,
-    folder: string,
-    objectName: string,
-    formName: string
-  ): boolean {
-    return this.registerChildInParentObject(path.join(extDir, folder, `${objectName}.xml`), 'Form', formName);
   }
 
   private newGuid(): string {
