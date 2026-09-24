@@ -23,6 +23,19 @@ function git(repo: string, args: string[]): string {
   return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8' });
 }
 
+/**
+ * Диапазон блока `<Attribute>` по имени, начиная с позиции `from` (для колонки —
+ * с начала её табличной части). Ищем по имени, а не по uuid: фикстура — выгрузка
+ * платформы, uuid в ней задаёт Конфигуратор.
+ */
+function attributeRange(xml: string, name: string, from = 0): { start: number; end: number } {
+  const pattern = new RegExp(`<Attribute uuid="[^"]+">\\s*<Properties>\\s*<Name>${name}</Name>`, 'g');
+  pattern.lastIndex = Math.max(from, 0);
+  const match = pattern.exec(xml);
+  assert.ok(match, `в фикстуре нет реквизита ${name}`);
+  return { start: match.index, end: xml.indexOf('</Attribute>', match.index) + '</Attribute>'.length };
+}
+
 function tmpRepo(prefix: string): string {
   // realpathSync: см. gitPorcelainReader.test.ts — иначе /tmp на macOS разойдётся
   // с тем, что вернёт `git rev-parse --show-toplevel`.
@@ -143,16 +156,14 @@ suite('GitMetadataStatusService — дополнительное покрыти�
     const { repo, xmlPath } = buildBaselineRepo();
     try {
       const original = fs.readFileSync(xmlPath, 'utf-8');
-      const attributeStart = original.indexOf('<Attribute uuid="db75f176-baf0-4b29-a8f2-be36560f7cc7">');
-      const attributeEnd = original.indexOf('</Attribute>', attributeStart) + '</Attribute>'.length;
-      assert.ok(attributeStart !== -1 && attributeEnd > attributeStart);
+      const { start: attributeStart, end: attributeEnd } = attributeRange(original, 'Описание');
       const attributeBlock = original.slice(attributeStart, attributeEnd);
 
       // Дублируем реальный блок реквизита под новым именем/uuid — тот же
       // валидный XML-фрагмент 1С, просто с изменённым <Name> (не выдуманная схема).
       const duplicatedBlock = attributeBlock
         .replace('<Name>Описание</Name>', '<Name>ОписаниеДоп</Name>')
-        .replace('db75f176-baf0-4b29-a8f2-be36560f7cc7', 'db75f176-baf0-4b29-a8f2-be36560f7cc8');
+        .replace(/uuid="[^"]+"/, 'uuid="db75f176-baf0-4b29-a8f2-be36560f7cc8"');
       const withNewAttribute = original.replace('</ChildObjects>', `${duplicatedBlock}\n\t\t\t</ChildObjects>`);
       fs.writeFileSync(xmlPath, withNewAttribute, 'utf-8');
 
@@ -168,9 +179,7 @@ suite('GitMetadataStatusService — дополнительное покрыти�
     const { repo, xmlPath } = buildBaselineRepo();
     try {
       const original = fs.readFileSync(xmlPath, 'utf-8');
-      const attributeStart = original.indexOf('<Attribute uuid="db75f176-baf0-4b29-a8f2-be36560f7cc7">');
-      const attributeEnd = original.indexOf('</Attribute>', attributeStart) + '</Attribute>'.length;
-      assert.ok(attributeStart !== -1 && attributeEnd > attributeStart);
+      const { start: attributeStart, end: attributeEnd } = attributeRange(original, 'Описание');
       const withoutAttribute = original.slice(0, attributeStart) + original.slice(attributeEnd);
       fs.writeFileSync(xmlPath, withoutAttribute, 'utf-8');
 
@@ -282,9 +291,11 @@ suite('GitMetadataStatusService — дополнительное покрыти�
       // `<MultiLine>false</MultiLine>` встречается в файле несколько раз (у разных
       // реквизитов/колонок) — правим ИМЕННО в блоке колонки «СостояниеЗадачи»,
       // а не первое попавшееся вхождение (иначе правка попадёт мимо запрошенной части).
-      const columnStart = original.indexOf('<Attribute uuid="03a93493-d9b7-45c7-817d-2ebad4e9ddef">');
-      const columnEnd = original.indexOf('</Attribute>', columnStart) + '</Attribute>'.length;
-      assert.ok(columnStart !== -1 && columnEnd > columnStart);
+      const { start: columnStart, end: columnEnd } = attributeRange(
+        original,
+        'СостояниеЗадачи',
+        original.indexOf('<Name>ПравилаКолонки</Name>')
+      );
       const columnBlock = original.slice(columnStart, columnEnd);
       assert.ok(columnBlock.includes('<Name>СостояниеЗадачи</Name>'));
       assert.ok(columnBlock.includes('<MultiLine>false</MultiLine>'));
@@ -324,8 +335,8 @@ suite('GitMetadataStatusService — дополнительное покрыти�
       git(repo, ['commit', '-q', '-m', 'baseline']);
 
       const original = fs.readFileSync(xmlPath, 'utf-8');
-      assert.ok(original.includes('<Handler>TelegramPost</Handler>'));
-      fs.writeFileSync(xmlPath, original.replace('<Handler>TelegramPost</Handler>', '<Handler>TelegramPostV2</Handler>'), 'utf-8');
+      assert.ok(original.includes('<Handler>telegramPOST</Handler>'));
+      fs.writeFileSync(xmlPath, original.replace('<Handler>telegramPOST</Handler>', '<Handler>telegramPOSTV2</Handler>'), 'utf-8');
 
       const service = new GitMetadataStatusService(repo);
       const status = service.getStatus({

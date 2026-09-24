@@ -8,6 +8,7 @@ import {
   extractRootObjectPropertiesInnerXml,
   getRootPropertyKeyOrder,
 } from '../../ui/views/properties/PropertyBuilder';
+import { extractChildMetaElementXml } from '../../infra/xml/XmlUtils';
 import type { NodeKind } from '../../ui/tree/TreeNode';
 import type { EnumPropertyValue, MetadataTypeValue } from '../../ui/views/properties/_types';
 
@@ -473,7 +474,6 @@ suite('PropertyBuilder — характеризация перед декомп�
         { key: 'PredefinedDataUpdate', kind: 'enum', section: 'Прочее' },
         { key: 'EditType', kind: 'enum', section: 'Данные' },
         { key: 'IncludeHelpInContents', kind: 'boolean', section: 'Прочее' },
-        { key: 'StandardAttributes', kind: 'string', section: 'Прочее' },
         { key: 'ChoiceMode', kind: 'enum', section: 'Прочее' },
       ]);
 
@@ -544,7 +544,6 @@ suite('PropertyBuilder — характеризация перед декомп�
         { key: 'UpdateDataHistoryImmediatelyAfterWrite', kind: 'boolean', section: 'Прочее' },
         { key: 'ExecuteAfterWriteDataHistoryVersionProcessing', kind: 'boolean', section: 'Прочее' },
         { key: 'IncludeHelpInContents', kind: 'boolean', section: 'Прочее' },
-        { key: 'StandardAttributes', kind: 'string', section: 'Прочее' },
       ]);
     });
 
@@ -580,7 +579,6 @@ suite('PropertyBuilder — характеризация перед декомп�
         { key: 'DataHistory', kind: 'enum', section: null },
         { key: 'UpdateDataHistoryImmediatelyAfterWrite', kind: 'boolean', section: null },
         { key: 'ExecuteAfterWriteDataHistoryVersionProcessing', kind: 'boolean', section: null },
-        { key: 'StandardAttributes', kind: 'string', section: null },
       ]);
     });
   });
@@ -628,10 +626,11 @@ suite('PropertyBuilder — характеризация перед декомп�
       // заголовки полей типизированного реквизита.
       const xmlPath = path.join(EXAMPLE_CF, 'Catalogs', 'Валюты.xml');
       const xml = fs.readFileSync(xmlPath, 'utf-8');
-      const match = /<Attribute uuid="4c8eec52-70df-4488-9517-8476b2d75189">[\s\S]*?<\/Attribute>/.exec(xml);
-      assert.ok(match, 'фикстура должна содержать реквизит НаименованиеОсновнойВалюты');
+      // По имени, а не по uuid: фикстура — выгрузка платформы, uuid в ней задаёт Конфигуратор.
+      const attributeXml = extractChildMetaElementXml(xml, 'Attribute', 'НаименованиеОсновнойВалюты');
+      assert.ok(attributeXml, 'фикстура должна содержать реквизит НаименованиеОсновнойВалюты');
 
-      const props = buildTypedFieldProperties(match[0]);
+      const props = buildTypedFieldProperties(attributeXml);
       const keys = props.map((item) => item.key);
 
       assert.deepStrictEqual(keys, [
