@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { writeTextFilePreservingBomAndEol } from '../xml/XmlUtils';
+import { hasRealChange, writeTextFilePreservingBomAndEol } from '../xml/XmlUtils';
 import {
   DEFAULT_FORMAT_VERSION,
   KNOWN_RIGHTS,
@@ -95,7 +95,8 @@ export class RoleRightsEditService {
       formatVersion: state.formatVersion,
     });
 
-    if (nextXml === original) {
+    // Сериализатор пишет `\n`, а выгрузка платформы — CRLF: отличие только в EOL не изменение.
+    if (!hasRealChange(original, nextXml)) {
       return {
         success: true,
         changed: false,

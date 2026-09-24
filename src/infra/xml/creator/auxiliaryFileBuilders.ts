@@ -60,7 +60,9 @@ export function buildEmptyRightsXml(formatVersion: string): string {
   // и атрибут version, что и `RoleRightsXml.serializeRightsXml`, чтобы платформа
   // 1С приняла файл как роль формата, совпадающего с Configuration.xml. Без
   // явной версии 1С трактует файл как 2.18 и отказывается загружать вместе
-  // с конфигурацией других версий.
+  // с конфигурацией других версий. Как и выгрузка платформы — без перевода строки
+  // после </Rights>: role-edit пересериализует файл и иначе переписывал бы роль,
+  // созданную расширением, при правке без изменений.
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     `<Rights xmlns="http://v8.1c.ru/8.2/roles" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="Rights" version="${formatVersion}">`,
@@ -68,7 +70,6 @@ export function buildEmptyRightsXml(formatVersion: string): string {
     '\t<setForAttributesByDefault>true</setForAttributesByDefault>',
     '\t<independentRightsOfChildObjects>false</independentRightsOfChildObjects>',
     '</Rights>',
-    '',
   ].join('\n');
 }
 
