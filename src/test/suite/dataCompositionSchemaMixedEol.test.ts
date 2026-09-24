@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { DataCompositionSchemaService } from '../../infra/xml/DataCompositionSchemaService';
+import { unescapeXml } from '../../infra/xml/XmlUtils';
 
 /**
  * Интеграционные тесты DataCompositionSchemaService.edit на копиях 6 реальных смешанных
@@ -256,6 +257,32 @@ suite('DataCompositionSchemaService.edit — сохранение смешанн
           after.includes(`${openTag}ВЫБРАТЬ\n\tПользователи.Ссылка КАК Пользователь\nИЗ\n${prefixMarker}${closeTag}`),
           'первые строки нового запроса обязаны остаться на голом LF, последняя — стать CRLF'
         );
+      });
+    }
+  });
+
+  // Issue #24: текст запроса, пришедший с CRLF (Windows-клиент, буфер обмена), совпадает с
+  // текущим по содержимому. Запись и так не меняет байты (preserveBomAndEol), но файл не
+  // должен попадать в changedFiles — иначе post-mutation путь помечает конфигурацию
+  // изменённой без реального изменения.
+  suite('set-query тем же текстом с CRLF — не изменение (hasRealChange)', () => {
+    for (const fx of FIXTURES) {
+      test(`${fx.version}/${fx.report}: changedFiles и lines пусты, файл не переписан`, () => {
+        const { templatePath, original } = copyFixtureToTemp(fx);
+        const service = new DataCompositionSchemaService();
+        const nameIdx = findIndexOrThrow(original, `<name>${fx.addFieldDataSet}</name>`);
+        const openIdx = findIndexOrThrow(original, '<query>', nameIdx) + '<query>'.length;
+        const closeIdx = findIndexOrThrow(original, '</query>', openIdx);
+        const currentQuery = unescapeXml(original.slice(openIdx, closeIdx));
+        const value = currentQuery.replace(/\r?\n/g, '\r\n');
+        assert.notStrictEqual(value, currentQuery, 'запрос фикстуры обязан содержать голые LF, иначе тест ничего не проверяет');
+
+        const result = service.edit({ templatePath, operation: 'set-query', value, dataSet: fx.addFieldDataSet });
+
+        assert.deepStrictEqual(result.changedFiles, []);
+        assert.deepStrictEqual(result.lines, []);
+        assert.deepStrictEqual(result.warnings, []);
+        assert.strictEqual(fs.readFileSync(templatePath, 'utf-8'), original);
       });
     }
   });
