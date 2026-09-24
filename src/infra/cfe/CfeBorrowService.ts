@@ -9,6 +9,7 @@ import {
   extractChildMetaElementXml,
   extractNestingAwareBlock,
   findChildElementsFullXmlInBlock,
+  writeTextFilePreservingBomAndEol,
 } from '../xml/XmlUtils';
 
 /** Типы, для которых XML-оболочка заимствованного объекта содержит пустой `<ChildObjects/>` */
@@ -30,6 +31,15 @@ const STRUCTURED_CHILD_TAGS = new Set<string>([
   'Attribute', 'AddressingAttribute', 'Dimension', 'Resource',
   'EnumValue', 'TabularSection', 'Command',
 ]);
+
+/**
+ * Вставляет запись последним элементом `<ChildObjects>`. Запись несёт собственный отступ, поэтому
+ * отступ закрывающего тега переносится на новую строку, а не остаётся перед записью (иначе запись
+ * получила бы его вдобавок к своему).
+ */
+function insertBeforeChildObjectsClose(xml: string, entry: string): string {
+  return xml.replace(/([ \t]*)<\/ChildObjects>/, (_match, indent: string) => `${entry}\n${indent}</ChildObjects>`);
+}
 
 /**
  * Описание GeneratedType для блока InternalInfo.
@@ -388,7 +398,8 @@ export class CfeBorrowService {
       return false;
     }
 
-    let xml = fs.readFileSync(objFile, 'utf-8');
+    const original = fs.readFileSync(objFile, 'utf-8');
+    let xml = original;
 
     if (extractChildMetaElementXml(xml, childTag, childName)) {
       return false;
@@ -397,7 +408,7 @@ export class CfeBorrowService {
     const textChildRe = new RegExp(`\\s*<${childTag}>${escapeRegExp(childName)}</${childTag}>`);
     if (childXml && textChildRe.test(xml)) {
       xml = xml.replace(textChildRe, `\n${childXml}`);
-      fs.writeFileSync(objFile, xml, 'utf-8');
+      writeTextFilePreservingBomAndEol(objFile, original, xml);
       return true;
     }
 
@@ -410,12 +421,12 @@ export class CfeBorrowService {
     if (/<ChildObjects\s*\/>/.test(xml)) {
       xml = xml.replace(/<ChildObjects\s*\/>/, `<ChildObjects>\n${entry}\n\t\t</ChildObjects>`);
     } else if (xml.includes('</ChildObjects>')) {
-      xml = xml.replace('</ChildObjects>', `${entry}\n\t\t</ChildObjects>`);
+      xml = insertBeforeChildObjectsClose(xml, entry);
     } else {
       return false;
     }
 
-    fs.writeFileSync(objFile, xml, 'utf-8');
+    writeTextFilePreservingBomAndEol(objFile, original, xml);
     return true;
   }
 
@@ -759,7 +770,8 @@ export class CfeBorrowService {
     if (!fs.existsSync(objFile)) {
       return;
     }
-    let xml = fs.readFileSync(objFile, 'utf-8');
+    const original = fs.readFileSync(objFile, 'utf-8');
+    let xml = original;
 
     // Проверяем, не зарегистрирована ли форма
     const alreadyRegistered = new RegExp(`<Form>${escapeRegExp(formName)}</Form>`).test(xml);
@@ -772,10 +784,10 @@ export class CfeBorrowService {
     if (/<ChildObjects\s*\/>/.test(xml)) {
       xml = xml.replace(/<ChildObjects\s*\/>/, `<ChildObjects>\n${formEntry}\n\t\t</ChildObjects>`);
     } else {
-      xml = xml.replace('</ChildObjects>', `${formEntry}\n\t\t</ChildObjects>`);
+      xml = insertBeforeChildObjectsClose(xml, formEntry);
     }
 
-    fs.writeFileSync(objFile, xml, 'utf-8');
+    writeTextFilePreservingBomAndEol(objFile, original, xml);
   }
 
   private newGuid(): string {
