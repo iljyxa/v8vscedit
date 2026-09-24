@@ -15,15 +15,26 @@
 					<v8:content>Пользователь</v8:content>
 				</v8:item>
 			</title>
-			<valueType>
-				<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ВнешниеПользователи</v8:Type>
-				<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ГруппыВнешнихПользователей</v8:Type>
-				<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ГруппыПользователей</v8:Type>
-				<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Пользователи</v8:Type>
-			</valueType>
 		</field>
 		<dataSource>ИсточникДанных1</dataSource>
-		<query>ВЫБРАТЬ НЕОПРЕДЕЛЕНО КАК Пользователь</query>
+		<query>ВЫБРАТЬ
+	Пользователи.Ссылка КАК Пользователь
+ИЗ
+	Справочник.Пользователи КАК Пользователи
+
+ОБЪЕДИНИТЬ ВСЕ
+
+ВЫБРАТЬ
+	Контрагенты.Ссылка
+ИЗ
+	Справочник.Контрагенты КАК Контрагенты
+
+ОБЪЕДИНИТЬ ВСЕ
+
+ВЫБРАТЬ
+	Организации.Ссылка
+ИЗ
+	Справочник.Организации КАК Организации</query>
 	</dataSet>
 	<parameter>
 		<name>ПодробныеСведенияОПравахДоступа</name>
@@ -45,7 +56,7 @@
 		<dcsset:presentation xsi:type="v8:LocalStringType">
 			<v8:item>
 				<v8:lang>ru</v8:lang>
-				<v8:content>Права доступа</v8:content>
+				<v8:content>ПраваДоступа</v8:content>
 			</v8:item>
 		</dcsset:presentation>
 		<dcsset:settings xmlns:pal="http://v8.1c.ru/8.1/data/ui/colors/palette" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows">
@@ -61,7 +72,7 @@
 					<dcscor:use>false</dcscor:use>
 					<dcscor:parameter>ПодробныеСведенияОПравахДоступа</dcscor:parameter>
 					<dcscor:value xsi:type="xs:boolean">false</dcscor:value>
-					<dcsset:userSettingID>b61802a2-20e1-457e-ad65-c61886a04ff8</dcsset:userSettingID>
+					<dcsset:userSettingID>7a4419ba-878e-4056-8b60-9ffd5a8cd15d</dcsset:userSettingID>
 				</dcscor:item>
 			</dcsset:dataParameters>
 		</dcsset:settings>
