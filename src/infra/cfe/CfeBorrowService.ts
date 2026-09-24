@@ -4,8 +4,10 @@ import * as path from 'path';
 import { META_TYPES, type MetaKind, getMetaFolder } from '../../domain/MetaTypes';
 import { ConfigurationXmlEditor } from '../xml/ConfigurationXmlEditor';
 import {
-  escapeRegExp,
-  escapeXmlText,
+  MAIN_CHILD_OBJECTS_ENTRY_INDENT,
+  registerChildInMainChildObjects,
+} from '../xml/MainChildObjectsEditor';
+import {
   extractChildMetaElementXml,
   extractNestingAwareBlock,
   findChildElementsFullXmlInBlock,
@@ -31,15 +33,6 @@ const STRUCTURED_CHILD_TAGS = new Set<string>([
   'Attribute', 'AddressingAttribute', 'Dimension', 'Resource',
   'EnumValue', 'TabularSection', 'Command',
 ]);
-
-/**
- * Вставляет запись последним элементом `<ChildObjects>`. Запись несёт собственный отступ, поэтому
- * отступ закрывающего тега переносится на новую строку, а не остаётся перед записью (иначе запись
- * получила бы его вдобавок к своему).
- */
-function insertBeforeChildObjectsClose(xml: string, entry: string): string {
-  return xml.replace(/([ \t]*)<\/ChildObjects>/, (_match, indent: string) => `${entry}\n${indent}</ChildObjects>`);
-}
 
 /**
  * Описание GeneratedType для блока InternalInfo.
@@ -385,7 +378,7 @@ export class CfeBorrowService {
   }
 
   /**
-   * Добавляет `<childTag>childName</childTag>` в блок ChildObjects XML-файла объекта.
+   * Добавляет `<childTag>childName</childTag>` (или готовый блок `childXml`) в главный `<ChildObjects>` XML-файла объекта.
    * Возвращает true, если запись была добавлена, false — если уже присутствует или файл недоступен.
    */
   private registerChildInParentObject(
@@ -399,34 +392,12 @@ export class CfeBorrowService {
     }
 
     const original = fs.readFileSync(objFile, 'utf-8');
-    let xml = original;
-
-    if (extractChildMetaElementXml(xml, childTag, childName)) {
+    const next = registerChildInMainChildObjects(original, childTag, childName, childXml);
+    if (next === undefined) {
       return false;
     }
 
-    const textChildRe = new RegExp(`\\s*<${childTag}>${escapeRegExp(childName)}</${childTag}>`);
-    if (childXml && textChildRe.test(xml)) {
-      xml = xml.replace(textChildRe, `\n${childXml}`);
-      writeTextFilePreservingBomAndEol(objFile, original, xml);
-      return true;
-    }
-
-    if (textChildRe.test(xml)) {
-      return false;
-    }
-
-    const entry = childXml ?? `\t\t\t<${childTag}>${escapeXmlText(childName)}</${childTag}>`;
-
-    if (/<ChildObjects\s*\/>/.test(xml)) {
-      xml = xml.replace(/<ChildObjects\s*\/>/, `<ChildObjects>\n${entry}\n\t\t</ChildObjects>`);
-    } else if (xml.includes('</ChildObjects>')) {
-      xml = insertBeforeChildObjectsClose(xml, entry);
-    } else {
-      return false;
-    }
-
-    writeTextFilePreservingBomAndEol(objFile, original, xml);
+    writeTextFilePreservingBomAndEol(objFile, original, next);
     return true;
   }
 
@@ -452,7 +423,7 @@ export class CfeBorrowService {
       throw new Error(`Дочерний объект не найден в исходном XML: ${childTag}.${childName}`);
     }
 
-    return this.toBorrowedChildXml(sourceChildXml, childTag, '\t\t\t');
+    return this.toBorrowedChildXml(sourceChildXml, childTag, MAIN_CHILD_OBJECTS_ENTRY_INDENT);
   }
 
   private toBorrowedChildXml(sourceChildXml: string, childTag: string, baseIndent: string): string {
@@ -759,35 +730,17 @@ export class CfeBorrowService {
     ].join('\n');
   }
 
-  /** Добавляет запись о форме в ChildObjects XML-файла родительского объекта в расширении */
+  /**
+   * Добавляет запись о форме в главный `<ChildObjects>` XML-файла родительского объекта в расширении.
+   * Возвращает true, если файл изменён.
+   */
   private registerFormInParentObject(
     extDir: string,
     folder: string,
     objectName: string,
     formName: string
-  ): void {
-    const objFile = path.join(extDir, folder, `${objectName}.xml`);
-    if (!fs.existsSync(objFile)) {
-      return;
-    }
-    const original = fs.readFileSync(objFile, 'utf-8');
-    let xml = original;
-
-    // Проверяем, не зарегистрирована ли форма
-    const alreadyRegistered = new RegExp(`<Form>${escapeRegExp(formName)}</Form>`).test(xml);
-    if (alreadyRegistered) {
-      return;
-    }
-
-    const formEntry = `\t\t\t<Form>${formName}</Form>`;
-
-    if (/<ChildObjects\s*\/>/.test(xml)) {
-      xml = xml.replace(/<ChildObjects\s*\/>/, `<ChildObjects>\n${formEntry}\n\t\t</ChildObjects>`);
-    } else {
-      xml = insertBeforeChildObjectsClose(xml, formEntry);
-    }
-
-    writeTextFilePreservingBomAndEol(objFile, original, xml);
+  ): boolean {
+    return this.registerChildInParentObject(path.join(extDir, folder, `${objectName}.xml`), 'Form', formName);
   }
 
   private newGuid(): string {
