@@ -95,6 +95,13 @@ interface ObjectInfo {
 
 Это позволяет корректно разграничить `<ChildObjects>` объекта и `<ChildObjects>` табличных частей.
 
+Тот же принцип обязателен и при **записи**: регистрация дочернего элемента в `<ChildObjects>`
+объекта (доимствование реквизита/формы/макета/команды в расширение, `CfeBorrowService`) идёт через
+`registerChildInMainChildObjects` (`infra/xml/MainChildObjectsEditor.ts`). Функция находит главный
+блок через `findNestingAwareElementRange`, проверяет «уже зарегистрирован» только среди его прямых
+детей и собирает результат срезами строки — поиск первого `<ChildObjects/>`/`</ChildObjects>` по
+всему файлу попадал бы во вложенный блок уже заимствованной ТЧ.
+
 ### Парсинг колонок табличной части
 
 После извлечения блока верхнего `<ChildObjects>` для каждой `<TabularSection>` вызывается `extractNestingAwareBlock` для извлечения её вложенного `<ChildObjects>` — это и есть колонки ТЧ.
