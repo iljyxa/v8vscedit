@@ -308,8 +308,14 @@ suite('DataCompositionSchemaService — байт-golden характеризац
     // writeTextFilePreservingBomAndEol — часть контракта, который обязан пережить
     // дробление сервиса. Фикстура компактна (84 строки), но содержит multi-valueType
     // поле "Пользователь" (3 альтернативных <v8:Type>), namespace-префиксованный
-        // settingsVariant (dcsset:) и <parameter> с value/useRestriction/use — то есть
+    // settingsVariant (dcsset:) и <parameter> с value/useRestriction/use — то есть
     // задевает основные ветки replaceFieldBlock/replaceParameterBlock/renameParameter.
+    //
+    // Смешанные переводы строк: платформа пишет текст <query> с голыми LF внутри
+    // CRLF-файла. writeTextFilePreservingBomAndEol приводит к CRLF ВСЕ переводы строк,
+    // поэтому после первой же правки <query> в эталоне становится CRLF. Это фиксация
+    // ТЕКУЩЕГО поведения (лишний дифф текста запроса при любой правке схемы), а не
+    // желаемый контракт — дефект вынесен в отдельную задачу.
     const fixture = path.resolve(
       __dirname,
       '../../../example/2.21/src/cf/Reports/ПраваДоступа/Templates/МакетПараметров/Ext/Template.xml'
@@ -848,6 +854,9 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       '  ПодробныеСведенияОПравахДоступа: boolean',
       '',
       '--- Variants ---',
+      // settingsVariant в этой реальной выгрузке использует namespace-префикс
+      // dcsset:name/dcsset:settings — parseSchema ищет НЕпрефиксованные <name>/<selection>,
+      // поэтому name и selection варианта закономерно пустые (задокументированное поведение).
       '  : selection=Auto',
     ];
     assert.deepStrictEqual(info.lines, expectedLines);

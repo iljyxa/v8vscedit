@@ -29,8 +29,11 @@ function git(repo: string, args: string[]): string {
  * платформы, uuid в ней задаёт Конфигуратор.
  */
 function attributeRange(xml: string, name: string, from = 0): { start: number; end: number } {
+  // Отрицательный from — не найденная секция: молча искать с начала файла нельзя,
+  // одноимённый реквизит самого объекта подменил бы колонку.
+  assert.ok(from >= 0, `в фикстуре нет контейнера для реквизита ${name}`);
   const pattern = new RegExp(`<Attribute uuid="[^"]+">\\s*<Properties>\\s*<Name>${name}</Name>`, 'g');
-  pattern.lastIndex = Math.max(from, 0);
+  pattern.lastIndex = from;
   const match = pattern.exec(xml);
   assert.ok(match, `в фикстуре нет реквизита ${name}`);
   return { start: match.index, end: xml.indexOf('</Attribute>', match.index) + '</Attribute>'.length };
