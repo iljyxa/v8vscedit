@@ -13,7 +13,10 @@
 //      Ext/ParentConfigurations/<Имя>.cf;
 //   4. база C ← правленый XML → итоговый .cf; повторная выгрузка C сверяется с желаемыми правилами
 //      (платформа при импорте проверяет .bin, так что это и есть проверка корректности);
-//   5. (--export) выгрузка итогового .cf в XML: платформа 8.5 → формат 2.21, 8.3.27 → формат 2.20.
+//   5. (--extension) расширение (каталог XML-выгрузки или .cfe) загружается в базу C поверх итоговой
+//      конфигурации — платформа проверяет, что оно применимо, — и сохраняется в <Имя>.cfe;
+//   6. (--export) выгрузка итогового .cf (и расширения) в XML: платформа 8.5 → формат 2.21,
+//      8.3.27 → формат 2.20. Расширение в 8.3.27 переносится через .cfe: XML формата 2.21 она не читает.
 //
 // Формат ParentConfigurations.bin (установлен экспериментом: платформа соблюдает правила при
 // импорте XML — редактирование объекта с правилом 0 отбивается «редактирование … запрещено»):
@@ -24,9 +27,11 @@
 //
 // Использование:
 //   node example/tools/build-supported-cf.mjs --source <исходный.cf> --out <каталог> \
-//     [--rules example/tools/support-rules.json] [--vendor <файл поставки.cf>] [--export]
+//     [--rules example/tools/support-rules.json] [--vendor <файл поставки.cf>] \
+//     [--extension <каталог XML расширения | файл.cfe> [--extension-name <Имя>]] [--export]
 // --vendor — готовый файл поставки вместо создания нового (для повторяемой пересборки: например
 // Ext/ParentConfigurations/<Имя>.cf из текущей фикстуры). Задавать только если исходник не менялся.
+// --extension-name нужен только для .cfe; у каталога XML имя берётся из его Configuration.xml.
 // Платформы: V8_PLATFORM_DIR (по умолчанию /opt/1cv8/x86_64/8.5.1.1529) и V8_PLATFORM_DIR_220
 // (по умолчанию /opt/1cv8/x86_64/8.3.27.2342, нужна только для --export формата 2.20).
 // Без дисплея Конфигуратор запускается через xvfb-run.
@@ -111,11 +116,38 @@ function main() {
   verify(path.join(checkDir, 'Ext', 'ParentConfigurations.bin'), desired, rules.allowChanges);
   console.log(`Готово: ${resultCf}`);
 
+  const extension = args.extension ? loadExtension(baseC, outDir) : undefined;
+
   if (args.export) {
-    step('5. Выгрузка в XML: 2.21 (8.5) и 2.20 (8.3.27)');
-    exportXml(platformDir, work, 'X221', resultCf, path.join(outDir, 'xml-2.21'));
-    exportXml(platformDir220, work, 'X220', resultCf, path.join(outDir, 'xml-2.20'));
+    step('6. Выгрузка в XML: 2.21 (8.5) и 2.20 (8.3.27)');
+    exportXml(platformDir, work, 'X221', resultCf, path.join(outDir, 'xml-2.21'), extension);
+    exportXml(platformDir220, work, 'X220', resultCf, path.join(outDir, 'xml-2.20'), extension);
   }
+}
+
+/** Загружает расширение поверх итоговой конфигурации и сохраняет его в <Имя>.cfe. */
+function loadExtension(base, outDir) {
+  step('5. Расширение поверх итоговой конфигурации');
+  const source = path.resolve(args.extension);
+  const isXmlDir = existsSync(path.join(source, 'Configuration.xml'));
+  const name = isXmlDir ? readExtensionName(path.join(source, 'Configuration.xml')) : args['extension-name'];
+  if (!name) {
+    fail('для .cfe задайте --extension-name');
+  }
+  const option = `--extension=${name}`;
+  ibcmd(base, 'infobase', 'config', isXmlDir ? 'import' : 'load', option, source);
+  const cfe = path.join(outDir, `${name}.cfe`);
+  ibcmd(base, 'infobase', 'config', 'save', option, cfe);
+  console.log(`Расширение: ${cfe}`);
+  return { name, cfe };
+}
+
+function readExtensionName(configurationXml) {
+  const match = /<Configuration uuid="[^"]+">[\s\S]*?<Name>([^<]+)<\/Name>/.exec(readFileSync(configurationXml, 'utf-8'));
+  if (!match) {
+    fail(`не найдено имя расширения в ${configurationXml}`);
+  }
+  return match[1];
 }
 
 function parseArgs(argv) {
@@ -243,12 +275,20 @@ function printRuleSummary(desired, names) {
   }
 }
 
-function exportXml(dir, work, name, cfPath, target) {
+function exportXml(dir, work, name, cfPath, target, extension) {
   const base = createBase(work, name, dir);
   ibcmd(base, 'infobase', 'config', 'load', cfPath);
   rmSync(target, { recursive: true, force: true });
   ibcmd(base, 'infobase', 'config', 'export', target);
   console.log(`XML: ${target}`);
+  if (extension) {
+    const option = `--extension=${extension.name}`;
+    const extensionTarget = path.join(`${target}-cfe`, extension.name);
+    ibcmd(base, 'infobase', 'config', 'load', option, extension.cfe);
+    rmSync(extensionTarget, { recursive: true, force: true });
+    ibcmd(base, 'infobase', 'config', 'export', option, extensionTarget);
+    console.log(`XML расширения: ${extensionTarget}`);
+  }
 }
 
 function createBase(work, name, dir = platformDir) {
