@@ -43,6 +43,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const RULE_CODES = { locked: '0', editable: '1', removed: '2' };
+const VALUE_OPTIONS = ['source', 'out', 'rules', 'vendor', 'extension', 'extension-name'];
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const HEADER_RE = new RegExp(`^\\{6,(\\d+),(\\d+),(${UUID}),(\\d+),(${UUID}),"[^"]*","[^"]*","([^"]*)",`);
 const RECORD_RE = new RegExp(`(^|,)(\\d+),(\\d+),(${UUID}),\\4(?=,)`, 'g');
@@ -154,6 +155,10 @@ function parseArgs(argv) {
   const result = {};
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i].replace(/^--/, '');
+    // Опечатка вида --vendr молча отключила бы повторяемую пересборку — неизвестный ключ — ошибка.
+    if (key !== 'export' && !VALUE_OPTIONS.includes(key)) {
+      fail(`неизвестный параметр ${argv[i]}`);
+    }
     if (key === 'export') {
       result.export = true;
     } else {
@@ -329,7 +334,8 @@ function run(exe, argv, logPath) {
   const log = logPath && existsSync(logPath) ? readFileSync(logPath, 'utf-8').replace(/^﻿/, '').trim() : '';
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim();
   // Конфигуратор в пакетном режиме завершается с кодом 0 и при отказе (например, «требуется обновить
-  // конфигурацию базы данных») — успех видно только по тексту лога /Out.
+  // конфигурацию базы данных») — успех видно только по тексту лога /Out. Проверка рассчитана на
+  // русскую локализацию платформы: на другой локали скрипт остановится с ошибкой, а не пропустит сбой.
   const designerFailed = logPath !== undefined && !/успешно/i.test(log);
   if (result.error || result.status !== 0 || /\[ERROR\]/.test(output) || designerFailed) {
     fail(`${path.basename(exe)} ${argv.join(' ')}\n${log || output || String(result.error)}`);
