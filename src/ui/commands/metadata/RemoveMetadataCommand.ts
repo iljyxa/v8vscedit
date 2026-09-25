@@ -5,6 +5,7 @@ import { buildMetadataCacheScopeKey, saveMetadataCacheForEntry } from '../../../
 import { getObjectLocationFromXml } from '../../../infra/fs/ObjectLocation';
 import { SupportMode } from '../../../infra/support/SupportInfoService';
 import { parseConfigXml } from '../../../infra/xml';
+import { supportLockedReasonOf } from '../../support/supportLockReason';
 import type { MetadataNode } from '../../tree/TreeNode';
 import type { CommandServices } from '../_shared';
 
@@ -19,7 +20,7 @@ export function registerRemoveMetadataCommand(
   );
 }
 
-async function removeMetadata(node: MetadataNode | undefined, services: CommandServices): Promise<void> {
+export async function removeMetadata(node: MetadataNode | undefined, services: CommandServices): Promise<void> {
   if (!node?.xmlPath || !node.canRemoveMetadata) {
     await vscode.window.showErrorMessage('Для выбранного узла нельзя удалить метаданные.');
     return;
@@ -27,7 +28,8 @@ async function removeMetadata(node: MetadataNode | undefined, services: CommandS
 
   const supportXmlPath = node.metaContext?.ownerObjectXmlPath ?? node.xmlPath;
   if (services.supportService?.getSupportMode(supportXmlPath) === SupportMode.Locked) {
-    await vscode.window.showErrorMessage('Удаление запрещено: объект находится на поддержке с запретом редактирования.');
+    const reason = supportLockedReasonOf(services.supportService.hasChangesForbidden(supportXmlPath));
+    await vscode.window.showErrorMessage(`Удаление запрещено: ${reason}.`);
     return;
   }
 
