@@ -71,4 +71,61 @@ suite('SubsystemToolsService и CommandInterfaceService', () => {
     const validation = ciService.validate({ ciPath: subsystemHome, detailed: true });
     assert.strictEqual(validation.errors, 0);
   });
+
+  // Issue #24: повтор той же правки — не изменение. Раньше каждый повтор дописывал лишний
+  // `\t` перед секцией (правка не была идемпотентной даже на LF), а на CRLF-файле секции,
+  // собранные с `\n`, давали побайтовое отличие только в EOL — файл попадал в changedFiles.
+  suite('CommandInterfaceService.edit — идемпотентность повтора', () => {
+    const OPERATIONS = [
+      { operation: 'hide', value: ['Catalog.Товары.StandardCommand.Create'] },
+      { operation: 'place', value: { command: 'Catalog.Товары.StandardCommand.Create', group: 'NavigationPanelImportant' } },
+      { operation: 'order', value: { group: 'NavigationPanelImportant', commands: ['Catalog.Товары.StandardCommand.Create'] } },
+      { operation: 'subsystem-order', value: ['Subsystem.Продажи'] },
+      { operation: 'group-order', value: ['NavigationPanelImportant'] },
+    ] as const;
+
+    function createSubsystemHome(): string {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-ci-idempotent-'));
+      new ConfigurationScaffoldService().createConfiguration({ name: 'Конфигурация', outputDir: root });
+      const subsystem = new SubsystemToolsService().compile({
+        outputDir: root,
+        definition: { name: 'Продажи', synonym: 'Продажи' },
+      });
+      return path.join(path.dirname(subsystem.subsystemPath), 'Продажи');
+    }
+
+    test('секции вставляются с одним отступом, как в выгрузке платформы', () => {
+      const ciService = new CommandInterfaceService();
+      const result = ciService.edit({ ciPath: createSubsystemHome(), createIfMissing: true, operations: OPERATIONS });
+
+      const xml = fs.readFileSync(result.ciPath, 'utf-8');
+      for (const section of ['CommandsVisibility', 'CommandsPlacement', 'CommandsOrder', 'SubsystemsOrder', 'GroupsOrder']) {
+        assert.ok(xml.includes(`\n\t<${section}>\n\t\t<`), `секция ${section} обязана стоять на одном \\t`);
+        assert.ok(xml.includes(`\n\t</${section}>\n`), `закрытие ${section} обязано стоять на одном \\t`);
+      }
+    });
+
+    for (const eol of ['\n', '\r\n'] as const) {
+      test(`повтор тех же операций на ${eol === '\n' ? 'LF' : 'CRLF'}-файле: changedFiles пуст, байты не меняются`, () => {
+        const ciService = new CommandInterfaceService();
+        const home = createSubsystemHome();
+        const first = ciService.edit({ ciPath: home, createIfMissing: true, operations: OPERATIONS });
+        const original = fs.readFileSync(first.ciPath, 'utf-8').replace(/\r?\n/g, eol);
+        fs.writeFileSync(first.ciPath, original, 'utf-8');
+
+        const repeat = ciService.edit({ ciPath: home, operations: OPERATIONS });
+
+        assert.deepStrictEqual(repeat.changedFiles, []);
+        assert.strictEqual(fs.readFileSync(first.ciPath, 'utf-8'), original);
+      });
+    }
+
+    test('createIfMissing без операций: созданный файл попадает в changedFiles', () => {
+      const ciService = new CommandInterfaceService();
+      const result = ciService.edit({ ciPath: createSubsystemHome(), createIfMissing: true, operations: [] });
+
+      assert.ok(fs.existsSync(result.ciPath));
+      assert.deepStrictEqual(result.changedFiles, [result.ciPath]);
+    });
+  });
 });

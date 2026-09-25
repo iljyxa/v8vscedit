@@ -12,6 +12,7 @@ import {
   editFirstVariantSettings,
   extractBlock,
   insertBeforeClose,
+  insertIntoSchemaRoot,
   matchBlocks,
   readText,
   removeElementByChildText,
@@ -36,23 +37,23 @@ export function applyEdit(xml: string, operation: SkdEditOperation, value: strin
     case 'add-field':
       return editFirstDataSet(xml, options.dataSet, (block) => insertBeforeClose(block, 'dataSet', buildFieldXml(value, '\t\t')));
     case 'add-total':
-      return insertBeforeClose(xml, 'DataCompositionSchema', buildTotalFieldXml(value));
+      return insertIntoSchemaRoot(xml, 'totalField', buildTotalFieldXml(value));
     case 'add-calculated-field':
-      return insertBeforeClose(xml, 'DataCompositionSchema', buildCalculatedFieldXml(value));
+      return insertIntoSchemaRoot(xml, 'calculatedField', buildCalculatedFieldXml(value));
     case 'add-parameter':
-      return insertBeforeClose(xml, 'DataCompositionSchema', buildParameterXmlWithAutoDates(value).join('\n'));
+      return insertIntoSchemaRoot(xml, 'parameter', buildParameterXmlWithAutoDates(value).join('\n'));
     case 'add-dataSet': {
       const [name, query] = value.includes(':') ? value.split(/:(.+)/) : [`НаборДанных${String(countTags(xml, 'dataSet') + 1)}`, value];
-      return insertBeforeClose(xml, 'DataCompositionSchema', buildDataSetXml({ name: name.trim(), query: query.trim(), fields: [] }, readText(matchBlocks(xml, 'dataSource')[0] ?? '', 'name') || 'ИсточникДанных1'));
+      return insertIntoSchemaRoot(xml, 'dataSet', buildDataSetXml({ name: name.trim(), query: query.trim(), fields: [] }, readText(matchBlocks(xml, 'dataSource')[0] ?? '', 'name') || 'ИсточникДанных1'));
     }
     case 'add-variant':
       return insertBeforeClose(xml, 'DataCompositionSchema', buildVariantXml(parseVariant(value), []));
     case 'add-dataSetLink':
-      return insertBeforeClose(xml, 'DataCompositionSchema', buildDataSetLinkXml(value));
+      return insertIntoSchemaRoot(xml, 'dataSetLink', buildDataSetLinkXml(value));
     case 'add-conditionalAppearance':
       return editFirstVariantSettings(xml, options.variant, (settings) => appendIntoSection(settings, 'conditionalAppearance', buildConditionalAppearanceItemXml(value)));
     case 'add-drilldown':
-      return insertBeforeClose(xml, 'DataCompositionSchema', buildDrilldownTemplateXml(value));
+      return insertIntoSchemaRoot(xml, 'template', buildDrilldownTemplateXml(value));
     case 'set-query':
       return editFirstDataSet(xml, options.dataSet, (block) => replaceOrInsert(block, 'query', escapeXmlText(value), 'dataSet'));
     case 'patch-query':
@@ -181,13 +182,24 @@ export function replaceParameterBlock(xml: string, value: string, warnings: stri
     return xml;
   }
   const replacement = buildParameterXml(parsed);
-  for (const block of matchBlocks(xml, 'parameter')) {
-    if (readText(block, 'name') === parsed.name) {
-      return xml.replace(block, () => replacement);
+  // Только прямые <parameter> корня: регулярка по всему документу начинала блок с
+  // самозакрывающегося вложенного <parameter/> (например, в dataSetLink) и тянула его до
+  // </parameter> следующего параметра схемы — замена съедала закрывающий тег связи.
+  const rootRange = findNestingAwareElementRange(xml, 'DataCompositionSchema');
+  if (!rootRange) {
+    warnings.push('modify-parameter: не найден корень DataCompositionSchema.');
+    return xml;
+  }
+  const rootInner = xml.slice(rootRange.openEnd, rootRange.closeStart);
+  for (const range of findDirectElementRanges(rootInner, 'parameter')) {
+    if (readText(rootInner.slice(range.start, range.end), 'name') === parsed.name) {
+      // Отступ перед блоком остаётся из исходника, поэтому у замены он срезается.
+      const start = rootRange.openEnd + range.start;
+      return xml.slice(0, start) + replacement.trimStart() + xml.slice(rootRange.openEnd + range.end);
     }
   }
   warnings.push(`Параметр не найден, добавлен новый: ${parsed.name}.`);
-  return insertBeforeClose(xml, 'DataCompositionSchema', replacement);
+  return insertIntoSchemaRoot(xml, 'parameter', replacement);
 }
 
 export function modifyFirstItemInSection(xml: string, sectionTag: string, sectionXml: string): string {
@@ -214,24 +226,47 @@ export function removeSectionItemByText(xml: string, sectionTag: string, childTa
   return xml.replace(section, () => nextSection);
 }
 
+/**
+ * Переставляет параметры схемы на их собственных местах: i-й по позиции прямой
+ * `<parameter>` корня заменяется i-м блоком в новом порядке. Разделители между блоками и
+ * место параметров относительно `settingsVariant` сохраняются (порядок элементов корня —
+ * xs:sequence схемы СКД), а перестановка в текущем порядке возвращает исходный текст.
+ * Вложенные `<parameter>` (например, в `dataSetLink`) параметрами схемы не являются.
+ */
 export function reorderParameters(xml: string, value: string, warnings: string[]): string {
   const order = value.split(',').map((item) => item.trim()).filter(Boolean);
   if (order.length === 0) {
     warnings.push('reorder-parameters получил пустой список.');
     return xml;
   }
-  const blocks = matchBlocks(xml, 'parameter');
-  const byName = new Map(blocks.map((block) => [readText(block, 'name'), block]));
-  const sorted = [
-    ...order.map((name) => byName.get(name)).filter((block): block is string => Boolean(block)),
-    ...blocks.filter((block) => !order.includes(readText(block, 'name'))),
-  ];
-  let next = xml;
-  for (const block of blocks) {
-    next = next.replace(block, '');
+  const rootRange = findNestingAwareElementRange(xml, 'DataCompositionSchema');
+  if (!rootRange) {
+    warnings.push('reorder-parameters: не найден корень DataCompositionSchema.');
+    return xml;
   }
-  const sortedXml = sorted.join('\n');
-  return next.replace('</DataCompositionSchema>', () => `${sortedXml}\n</DataCompositionSchema>`);
+  const rootInner = xml.slice(rootRange.openEnd, rootRange.closeStart);
+  const ranges = findDirectElementRanges(rootInner, 'parameter');
+  const remaining = ranges.map((range) => {
+    const block = rootInner.slice(range.start, range.end);
+    return { name: readText(block, 'name'), block };
+  });
+  const sorted: string[] = [];
+  for (const name of order) {
+    const index = remaining.findIndex((item) => item.name === name);
+    if (index === -1) {
+      const repeated = sorted.some((block) => readText(block, 'name') === name);
+      warnings.push(`reorder-parameters: ${repeated ? 'параметр указан повторно' : 'параметр не найден'}: ${name}.`);
+      continue;
+    }
+    sorted.push(remaining.splice(index, 1)[0].block);
+  }
+  sorted.push(...remaining.map((item) => item.block));
+  let inner = rootInner;
+  // С конца, чтобы подстановка не смещала ещё не обработанные диапазоны.
+  for (let i = ranges.length - 1; i >= 0; i--) {
+    inner = inner.slice(0, ranges[i].start) + sorted[i] + inner.slice(ranges[i].end);
+  }
+  return xml.slice(0, rootRange.openEnd) + inner + xml.slice(rootRange.closeStart);
 }
 
 /**

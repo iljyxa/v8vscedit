@@ -13,6 +13,7 @@ import { resolveWebviewLocalResourceRoots } from '../webview/webviewResourceRoot
 import { isWebviewCommandAllowed } from '../webview/webviewCommandGuard';
 import type { MetadataTreeProvider } from '../../tree/MetadataTreeProvider';
 import type { MetadataNode } from '../../tree/TreeNode';
+import { supportIndicatorOf, supportModeDtoOf, type SupportModeDto } from '../../support/supportLockReason';
 
 // ── DTO-типы (зеркалят src-ui/shared/types) ──
 
@@ -43,7 +44,7 @@ interface TreeNodeDto {
   readonly icon?: IconDto;
   readonly kind?: string;
   readonly ownership?: 'own' | 'borrowed' | 'unknown';
-  readonly supportMode?: 'none' | 'editable' | 'locked';
+  readonly supportMode?: SupportModeDto;
   readonly hasChildren: boolean;
   readonly loaded: boolean;
   readonly children?: TreeNodeDto[];
@@ -477,7 +478,7 @@ export class UniversalPanelViewProvider implements vscode.WebviewViewProvider, v
       icon: this.buildIcon(node),
       kind: node.nodeKind,
       ownership: this.ownership(node),
-      supportMode: this.supportMode(ctxValue),
+      supportMode: supportModeDtoOf(ctxValue),
       hasChildren,
       loaded,
       children,
@@ -515,12 +516,6 @@ export class UniversalPanelViewProvider implements vscode.WebviewViewProvider, v
     return 'unknown';
   }
 
-  private supportMode(ctx: string): 'none' | 'editable' | 'locked' {
-    if (ctx.includes('-support2')) {return 'locked';}
-    if (ctx.includes('-support1')) {return 'editable';}
-    return 'none';
-  }
-
   /** Действия узла повторяют меню старой HTML-панели из main. */
   private buildActions(node: MetadataNode): TreeNodeActionDto[] {
     const raw = this.getNodeActions(node);
@@ -547,12 +542,9 @@ export class UniversalPanelViewProvider implements vscode.WebviewViewProvider, v
   private buildStateIcons(node: MetadataNode): TreeNodeStateIconDto[] {
     const contextValue = node.contextValue ?? '';
     const result: TreeNodeStateIconDto[] = [];
-    if (contextValue.includes('-support2')) {
-      result.push(this.themeStateIcon('support-locked', 'На поддержке, редактирование запрещено'));
-    } else if (contextValue.includes('-support1')) {
-      result.push(this.themeStateIcon('support-editable', 'На поддержке, редактирование разрешено'));
-    } else if (contextValue.includes('-support0')) {
-      result.push(this.themeStateIcon('support-none', 'Не на поддержке'));
+    const supportIndicator = supportIndicatorOf(contextValue);
+    if (supportIndicator) {
+      result.push(this.themeStateIcon(supportIndicator.icon, supportIndicator.title));
     }
 
     if (contextValue.includes('-repoLocked')) {

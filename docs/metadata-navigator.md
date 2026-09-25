@@ -184,6 +184,33 @@ MCP-инструментов `v8vscedit_add_url_template`/`v8vscedit_add_method`
 
 `resolveObjectXmlPath(configRoot, objectType, objectName)` находит XML объекта: сначала пробует глубокую структуру, затем плоскую.
 
+Сам поиск «глубокая форма → плоская форма» — не логика `MetaPathResolver`, а отдельная функция
+`findObjectXmlInFolder(configRoot, folderName, objectName)` в `infra/fs/ObjectLocation.ts`: сначала
+`<configRoot>/<folderName>/<objectName>/<objectName>.xml`, при отсутствии —
+`<configRoot>/<folderName>/<objectName>.xml`, иначе `null`. Имя папки категории вычисляет вызывающий
+код (обычно `getMetaFolder(kind)` из `META_TYPES`), у самой функции своего словаря «тип → папка» нет —
+поэтому ей может пользоваться и код, не привязанный к реестру типов. Её вызывают:
+`MetaPathResolver.resolveXml` (резолвинг XML объекта по типу и имени), `RepositoryService.
+resolveOwnerObjectXmlPath` (поиск владельца для проверки захвата хранилища), `SupportInfoService.
+resolveObjectXmlForBsl` (поиск владельца для режима поддержки BSL-модуля, см.
+[bsl-language-support.md](./bsl-language-support.md#определение-режима-поддержки-bsl-модуля)),
+`MetadataCache` и `SubsystemXmlService` (XML корневых подсистем в `Subsystems/` и вложенных — в
+`Subsystems/` «дома» родителя) и `ConfigurationValidationService` (проверка, что у каждого объекта
+из `ChildObjects` есть XML; здесь важен только факт наличия, поэтому приоритет раскладок на результат
+не влияет).
+
+## Известные ограничения
+
+Поиск XML объекта «глубокая форма → плоская форма» ещё не везде сведён к `findObjectXmlInFolder`.
+Собственные копии этой логики остаются в `infra/cfe/CfeBorrowService.ts` (`resolveSourceXml`),
+`infra/xml/SubsystemToolsService.ts` (проверка и чтение дочерних подсистем; при чтении, если нет
+глубокой формы, берётся плоская без проверки её существования), `infra/xml/MetadataXmlRemover.ts`
+(проверка наличия XML), `infra/cache/MetadataCache.ts` (XML макета в `Templates/`) и
+`ui/tree/nodeBuilders/*`. Отдельно — `infra/xml/ExchangePlanContentService.ts`
+(`resolveExchangePlanXml`): он проверяет раскладки в обратном порядке, сначала плоскую, поэтому при
+одновременном наличии обоих файлов его результат расходится с `findObjectXmlInFolder`. При изменении
+порядка/правил поиска в `findObjectXmlInFolder` эти места нужно проверять отдельно.
+
 ## Иконки (nodes/presentation/)
 
 `getIconUris(nodeKind, ownershipTag, extensionUri)` возвращает пару URI для светлой и тёмной темы. Для заимствованных объектов (`BORROWED`) добавляет суффикс `-borrowed` к имени иконки.

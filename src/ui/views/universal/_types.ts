@@ -4,6 +4,8 @@
  * так как src/ui/ и src-ui/ живут в разных tsconfig-проектах.
  */
 
+import type { SupportModeDto } from '../../support/supportLockReason';
+
 /** Признак принадлежности объекта к основной конфигурации или расширению */
 export type OwnershipKind = 'own' | 'borrowed' | 'unknown';
 
@@ -32,8 +34,8 @@ export interface TreeNodeDto {
   readonly icon?: IconDto;
   readonly kind?: string;
   readonly ownership?: OwnershipKind;
-  /** Режим поддержки: none / editable / locked */
-  readonly supportMode?: 'none' | 'editable' | 'locked';
+  /** Режим поддержки: none / editable / locked / removed (снят с поддержки) */
+  readonly supportMode?: SupportModeDto;
   readonly hasChildren: boolean;
   readonly loaded: boolean;
   readonly children?: TreeNodeDto[];

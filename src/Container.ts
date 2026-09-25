@@ -5,6 +5,7 @@ import type { ConfigEntry } from './domain/Configuration';
 import { findConfigurations } from './infra/fs/ConfigLocator';
 import { type ChangedConfiguration, ConfigurationChangeDetector } from './infra/fs/ConfigurationChangeDetector';
 import { ConfigurationCleanWindow } from './infra/fs/ConfigurationCleanWindow';
+import { ConfigurationOperationGuard } from './infra/process/ConfigurationOperationGuard';
 import { MetadataTreeProvider } from './ui/tree/MetadataTreeProvider';
 import { registerCommands } from './ui/commands/CommandRegistry';
 import type { CommandServices } from './ui/commands/_shared';
@@ -45,11 +46,9 @@ import { MetadataChangesViewProvider } from './ui/views/changes/MetadataChangesV
 import { OnecGitContentProvider, ONEC_GIT_SCHEME } from './ui/git/OnecGitContentProvider';
 import { AiSkillsInstaller } from './infra/skills/AiSkillsInstaller';
 import { StandaloneServerService } from './infra/standalone';
-import { SupportDecorationProvider } from './ui/tree/decorations/SupportDecorationProvider';
 import { GitMetadataDecorationProvider } from './ui/tree/decorations/GitMetadataDecorationProvider';
 import { LspManager } from './lsp/LspManager';
 import { BslReadonlyGuard } from './ui/readonly/BslReadonlyGuard';
-import { registerSupportIndicatorCommands } from './ui/support/SupportIndicatorCommands';
 import { registerSupportWatcher } from './ui/support/SupportWatcher';
 import { RepositoryCommitViewProvider } from './ui/views/RepositoryCommitViewProvider';
 import { RepositoryConnectionViewProvider } from './ui/views/RepositoryConnectionViewProvider';
@@ -84,8 +83,8 @@ import type { GitApiLike, GitExtensionLike } from './ui/git/gitExtensionApi';
  */
 export class Container {
   readonly outputChannel: vscode.OutputChannel;
+  readonly configurationOperationGuard: ConfigurationOperationGuard;
   readonly supportService: SupportInfoService;
-  readonly decorationProvider: SupportDecorationProvider;
   readonly treeProvider: MetadataTreeProvider;
   readonly subsystemEditorViewProvider: SubsystemEditorViewProvider;
   readonly projectSecretStorage: ProjectSecretStorage;
@@ -156,6 +155,10 @@ export class Container {
   ) {
     this.outputChannel = vscode.window.createOutputChannel('1С Редактор');
     context.subscriptions.push(this.outputChannel);
+    this.configurationOperationGuard = new ConfigurationOperationGuard((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.outputChannel.appendLine(`[guard][error] ${message}`);
+    });
     // Отложенный пересчёт состояния живёт дольше окна тишины: если расширение
     // выгрузят в это время, обратный вызов дёрнул бы уже мёртвые сервисы.
     context.subscriptions.push({
@@ -186,10 +189,7 @@ export class Container {
     this.changesConfigRoots = findConfigurations(workspaceFolder.uri.fsPath);
     this.onecGitContentProvider = new OnecGitContentProvider();
 
-    this.decorationProvider = new SupportDecorationProvider();
     context.subscriptions.push(
-      vscode.window.registerFileDecorationProvider(this.decorationProvider),
-      this.decorationProvider,
       vscode.window.registerFileDecorationProvider(this.gitMetadataDecorationProvider),
       this.gitMetadataDecorationProvider
     );
@@ -355,6 +355,7 @@ export class Container {
     c.wireGitDecorationWatcher();
     void c.wireGitStateWatcher();
     c.wireMetadataChangesView();
+    c.wireConfigurationOperationContext();
     c.wireCommands();
     c.wireReadonlyGuard();
     c.reloadEntries();
@@ -431,14 +432,32 @@ export class Container {
       this.workspaceFolder,
       this.context,
       this.supportService,
-      this.decorationProvider,
       () => this.treeProvider.refresh()
     );
   }
 
+  /**
+   * Контекст enablement команд импорта/обновления выставляется только отсюда:
+   * guard общий для всех путей (включая синхронизацию с хранилищем), поэтому
+   * команды гаснут, какая бы из операций его ни заняла.
+   */
+  private wireConfigurationOperationContext(): void {
+    const subscription = this.configurationOperationGuard.onDidChangeBusy((busy) => {
+      // Отказ setContext асинхронный — onListenerError guard'а его не увидит,
+      // поэтому логируем здесь, иначе рассинхрон enablement остался бы немым.
+      vscode.commands.executeCommand('setContext', 'v8vscedit.isUpdatingConfigurations', busy).then(
+        undefined,
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          this.outputChannel.appendLine(`[guard][error] setContext: ${message}`);
+        }
+      );
+    });
+    this.context.subscriptions.push(subscription);
+  }
+
   private wireCommands(): void {
     registerCommands(this.context, this.buildCommandServices());
-    registerSupportIndicatorCommands(this.context);
   }
 
   private buildCommandServices(): CommandServices {
@@ -504,6 +523,7 @@ export class Container {
       setTreeMessage: () => undefined,
       setTreeProcessingState: (state) => this.setTreeProcessingState(state),
       refreshActionsView: () => this.refreshActionsView(),
+      configurationOperationGuard: this.configurationOperationGuard,
     };
   }
 

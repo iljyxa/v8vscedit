@@ -1,0 +1,10 @@
+{
+  "allowChanges": true,
+  "default": "locked",
+  "objects": {
+    "Configuration": "editable",
+    "Document.ПриходТовара": "editable",
+    "AccumulationRegister.ТоварыНаСкладах": "editable",
+    "Catalog.Контрагенты": "removed"
+  }
+}

@@ -1,0 +1,14 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<ConfigDumpInfo xmlns="http://v8.1c.ru/8.3/xcf/dumpinfo" xmlns:xen="http://v8.1c.ru/8.3/xcf/enums" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" format="Hierarchical" version="2.21">
+	<ConfigVersions>
+		<Metadata name="Catalog.Контрагенты" id="fabba67b-9e02-41f8-9f89-98ddc517333d" configVersion="47d663148923196572eaf4aa94cb8209e26fc289">
+			<Metadata name="Catalog.Контрагенты.Attribute.КПП" id="a35fc3d7-db7a-4bc3-b662-a94b776f5ec8"/>
+		</Metadata>
+		<Metadata name="Catalog.Номенклатура" id="e22c711b-d5d3-493a-9a2c-a5cb9bd1c204" configVersion="562d3d0fa5961c7efbffe8f7d037bbb561e129a6"/>
+		<Metadata name="Catalog.ев_РабочийПроцесс" id="721b0f27-ccf2-477f-8c22-9b6e4be5c2dc" configVersion="d0b55ee1523f61d9e47f45f0144f4317a1ae59af"/>
+		<Metadata name="Catalog.ев_РабочийПроцесс.ObjectModule" id="721b0f27-ccf2-477f-8c22-9b6e4be5c2dc.0" configVersion="f81167b48aad87943e518ffa8bb5bf9fef65b050"/>
+		<Metadata name="Configuration.EVOLC" id="7a7bf1b9-1eed-4ad9-900d-dcf993f26869" configVersion="280193fe57dd703aff873ea89d10d9aa491c58b3"/>
+		<Metadata name="Language.Русский" id="4207b87d-c258-41e6-aa0f-d99e151a9784" configVersion="9aca3021ae344ec2bf19d222c3a3c3f876ce84c0"/>
+		<Metadata name="Role.ев_ОсновнаяРоль" id="5c474f40-3d78-4082-9f14-3ae22e51ea2b" configVersion="a723f3a7cb0e3186281331e92bf9c5319902582e"/>
+	</ConfigVersions>
+</ConfigDumpInfo>

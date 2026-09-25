@@ -5,6 +5,13 @@ import * as path from 'path';
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
+import {
+  fixtureUuid,
+  writeConfigurationXml,
+  writeObjectXml,
+  writeBslFile,
+  type ObjectXmlLayout,
+} from './support/flatMetadataFixtures';
 
 /** Фейковый SecretStore на Map — структурный контракт vscode.SecretStorage. */
 function createFakeSecretStore(): SecretStore {
@@ -623,6 +630,58 @@ function findFirstCatalogWithForm(): { xmlPath: string; formModulePath: string; 
   }
   return null;
 }
+
+/**
+ * `RepositoryService.resolveOwnerObjectXmlPath` уже умел
+ * находить и глубокую, и плоскую раскладку XML владельца (в отличие от
+ * `SupportInfoService`, который эту раскладку не понимал) — тесты ниже
+ * фиксируют это поведение как регрессионную защиту при переводе метода на
+ * общую `findObjectXmlInFolder` (`infra/fs/ObjectLocation.ts`), а не как
+ * красный сценарий: на временном проекте без `example/` захват/снятие
+ * захвата объекта в обеих раскладках должно работать одинаково.
+ */
+suite('RepositoryService — плоская и вложенная раскладка владельца', () => {
+  const layouts: ObjectXmlLayout[] = ['flat', 'deep'];
+
+  for (const layout of layouts) {
+    test(`Запрещает редактирование незахваченного модуля и снимает запрет после захвата (раскладка объекта: ${layout})`, async () => {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-repo-flat-'));
+      try {
+        const configRoot = path.join(tempDir, 'cf');
+        const configUuid = fixtureUuid(`repo-config-${layout}`);
+        const objectUuid = fixtureUuid(`repo-object-${layout}`);
+        writeConfigurationXml(configRoot, configUuid);
+        const objectXmlPath = writeObjectXml(configRoot, 'Catalogs', 'Каталог1', 'Catalog', objectUuid, layout);
+        const modulePath = writeBslFile(path.join(configRoot, 'Catalogs', 'Каталог1', 'Ext', 'ObjectModule.bsl'));
+
+        const service = new RepositoryService(tempDir, new ProjectSecretStorage(createFakeSecretStore(), tempDir));
+        const target = service.resolveTargetByXmlPath(modulePath);
+        assert.ok(target, 'Не удалось определить цель хранилища во временном проекте.');
+
+        await service.saveBinding(target, {
+          repoPath: '\\\\repo\\storage',
+          repoUser: 'tester',
+          repoPassword: 'secret',
+        });
+        service.setConnected(target, true);
+
+        assert.strictEqual(service.isEditRestricted(modulePath), true);
+
+        const fullName = service.resolveFullName({
+          nodeKind: 'Catalog',
+          label: 'Каталог1',
+          xmlPath: objectXmlPath,
+        });
+        assert.strictEqual(fullName, 'Справочник.Каталог1');
+
+        service.setLocked(target, [fullName], true);
+        assert.strictEqual(service.isEditRestricted(modulePath), false);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+  }
+});
 
 // Минимальный валидный XML подсистемы — тот же формат, что в subsystemXmlService.test.ts.
 function buildSubsystemXml(name: string, refs: string[], childSubsystems: string[]): string {

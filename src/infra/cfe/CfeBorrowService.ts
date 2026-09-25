@@ -1,23 +1,18 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { META_TYPES, type MetaKind, getMetaFolder } from '../../domain/MetaTypes';
+import { META_TYPES, type MetaKind, type MetaTypeDef, getMetaFolder } from '../../domain/MetaTypes';
+import { buildBorrowedChildXml } from '../xml/BorrowedChildXml';
 import { ConfigurationXmlEditor } from '../xml/ConfigurationXmlEditor';
 import {
-  escapeRegExp,
-  escapeXmlText,
+  MAIN_CHILD_OBJECTS_ENTRY_INDENT,
+  ensureMainChildObjects,
+  registerChildInMainChildObjects,
+} from '../xml/MainChildObjectsEditor';
+import {
   extractChildMetaElementXml,
-  extractNestingAwareBlock,
-  findChildElementsFullXmlInBlock,
+  writeTextFilePreservingBomAndEol,
 } from '../xml/XmlUtils';
-
-/** Типы, для которых XML-оболочка заимствованного объекта содержит пустой `<ChildObjects/>` */
-const TYPES_WITH_CHILD_OBJECTS = new Set<string>([
-  'Catalog', 'Document', 'ExchangePlan', 'ChartOfAccounts',
-  'ChartOfCharacteristicTypes', 'ChartOfCalculationTypes',
-  'BusinessProcess', 'Task', 'Enum',
-  'InformationRegister', 'AccumulationRegister', 'AccountingRegister', 'CalculationRegister',
-]);
 
 /** Свойства CommonModule, которые копируются из источника в заимствованный объект */
 const COMMON_MODULE_PROPS = [
@@ -259,6 +254,7 @@ export class CfeBorrowService {
     objectName: string,
     formName: string
   ): BorrowObjectResult {
+    this.assertSupportsChildObjects(typeName, `формы ${formName}`);
     const files: string[] = [];
 
     const parentResult = this.borrowObject(cfDir, extDir, typeName, objectName);
@@ -273,8 +269,17 @@ export class CfeBorrowService {
 
     const formMetaDir = path.join(extDir, folder, objectName, 'Forms');
     const formMetaFile = path.join(formMetaDir, `${formName}.xml`);
+    const objFile = path.join(extDir, folder, `${objectName}.xml`);
 
     if (fs.existsSync(formMetaFile)) {
+      // Файлы формы есть, но запись в XML объекта могла не попасть: до issue #28 оболочки
+      // обработок/отчётов/журналов создавались без <ChildObjects>, и регистрация молча пропускалась.
+      if (this.registerChildInParentObject(objFile, 'Form', formName)) {
+        if (!files.includes(objFile)) {
+          files.push(objFile);
+        }
+        return { alreadyBorrowed: false, files };
+      }
       return { alreadyBorrowed: true, files: [] };
     }
 
@@ -318,7 +323,10 @@ export class CfeBorrowService {
       }
     }
 
-    this.registerFormInParentObject(extDir, folder, objectName, formName);
+    // XML родителя уже в files, если родитель заимствован этим же вызовом.
+    if (this.registerChildInParentObject(objFile, 'Form', formName) && !files.includes(objFile)) {
+      files.push(objFile);
+    }
 
     return { alreadyBorrowed: false, files };
   }
@@ -337,6 +345,12 @@ export class CfeBorrowService {
     childTag: string,
     childName: string
   ): BorrowObjectResult {
+    this.assertSupportsChildObjects(typeName, `${childTag}.${childName}`);
+    // Контейнер со своими вложенными элементами (URL-шаблон с методами) нельзя зарегистрировать
+    // текстовой ссылкой — платформа такой XML не примет, а полного блока для него пока не строим.
+    if (!STRUCTURED_CHILD_TAGS.has(childTag) && this.hasChildObjects(childTag)) {
+      throw new Error(`Заимствование ${childTag}.${childName} не поддерживается: элемент содержит вложенные объекты`);
+    }
     const files: string[] = [];
 
     const parentResult = this.borrowObject(cfDir, extDir, typeName, objectName);
@@ -368,15 +382,45 @@ export class CfeBorrowService {
 
   /** Папка типа метаданных в структуре выгрузки или undefined если тип неизвестен */
   getFolderName(typeName: string): string | undefined {
-    if (!(typeName in META_TYPES)) {
+    if (!this.findMetaType(typeName)) {
       return undefined;
     }
     return getMetaFolder(typeName as MetaKind) ?? undefined;
   }
 
   /**
-   * Добавляет `<childTag>childName</childTag>` в блок ChildObjects XML-файла объекта.
-   * Возвращает true, если запись была добавлена, false — если уже присутствует или файл недоступен.
+   * Есть ли у объекта этого типа `<ChildObjects>` в XML. Источник — `META_TYPES[kind].childTags`,
+   * а не собственный список: параллельный реестр уже однажды отстал от него (issue #28).
+   */
+  private hasChildObjects(typeName: string): boolean {
+    return (this.findMetaType(typeName)?.childTags?.length ?? 0) > 0;
+  }
+
+  private findMetaType(typeName: string): MetaTypeDef | undefined {
+    // hasOwnProperty, а не `in`: иначе 'constructor'/'toString' сошли бы за тип метаданных.
+    return Object.prototype.hasOwnProperty.call(META_TYPES, typeName)
+      ? META_TYPES[typeName as MetaKind]
+      : undefined;
+  }
+
+  /**
+   * Отбивает заимствование дочернего элемента у типа без `<ChildObjects>` ДО записи файлов:
+   * иначе оболочка и файлы формы создавались бы, а регистрация в XML объекта молча не выполнялась.
+   * Неизвестный тип пропускается — его отбивает `borrowObject` своим сообщением.
+   */
+  private assertSupportsChildObjects(typeName: string, childLabel: string): void {
+    if (this.findMetaType(typeName) && !this.hasChildObjects(typeName)) {
+      throw new Error(
+        `Тип "${typeName}" не содержит дочерних объектов: заимствование ${childLabel} невозможно`
+      );
+    }
+  }
+
+  /**
+   * Добавляет `<childTag>childName</childTag>` (или готовый блок `childXml`) в главный `<ChildObjects>` XML-файла объекта.
+   * Возвращает true, если запись была добавлена, false — если она уже присутствует.
+   * Оболочке без `<ChildObjects>` (заимствована до issue #28) блок дописывается; если дописать
+   * некуда — исключение, а не молчаливый успех.
    */
   private registerChildInParentObject(
     objFile: string,
@@ -384,38 +428,20 @@ export class CfeBorrowService {
     childName: string,
     childXml?: string
   ): boolean {
-    if (!fs.existsSync(objFile)) {
+    const original = fs.readFileSync(objFile, 'utf-8');
+    const withChildObjects = ensureMainChildObjects(original);
+    if (withChildObjects === undefined) {
+      throw new Error(
+        `Не удалось зарегистрировать ${childTag}.${childName}: в XML объекта нет блока <Properties> (${objFile})`
+      );
+    }
+
+    const next = registerChildInMainChildObjects(withChildObjects, childTag, childName, childXml);
+    if (next === undefined) {
       return false;
     }
 
-    let xml = fs.readFileSync(objFile, 'utf-8');
-
-    if (extractChildMetaElementXml(xml, childTag, childName)) {
-      return false;
-    }
-
-    const textChildRe = new RegExp(`\\s*<${childTag}>${escapeRegExp(childName)}</${childTag}>`);
-    if (childXml && textChildRe.test(xml)) {
-      xml = xml.replace(textChildRe, `\n${childXml}`);
-      fs.writeFileSync(objFile, xml, 'utf-8');
-      return true;
-    }
-
-    if (textChildRe.test(xml)) {
-      return false;
-    }
-
-    const entry = childXml ?? `\t\t\t<${childTag}>${escapeXmlText(childName)}</${childTag}>`;
-
-    if (/<ChildObjects\s*\/>/.test(xml)) {
-      xml = xml.replace(/<ChildObjects\s*\/>/, `<ChildObjects>\n${entry}\n\t\t</ChildObjects>`);
-    } else if (xml.includes('</ChildObjects>')) {
-      xml = xml.replace('</ChildObjects>', `${entry}\n\t\t</ChildObjects>`);
-    } else {
-      return false;
-    }
-
-    fs.writeFileSync(objFile, xml, 'utf-8');
+    writeTextFilePreservingBomAndEol(objFile, original, next);
     return true;
   }
 
@@ -441,129 +467,7 @@ export class CfeBorrowService {
       throw new Error(`Дочерний объект не найден в исходном XML: ${childTag}.${childName}`);
     }
 
-    return this.toBorrowedChildXml(sourceChildXml, childTag, '\t\t\t');
-  }
-
-  private toBorrowedChildXml(sourceChildXml: string, childTag: string, baseIndent: string): string {
-    const sourceUuid = this.extractUuid(sourceChildXml);
-    if (!sourceUuid) {
-      throw new Error(`Не удалось извлечь UUID дочернего объекта: ${childTag}`);
-    }
-
-    let xml = this.normalizeChildXmlIndent(sourceChildXml.replace(/^\uFEFF/, ''), baseIndent);
-    xml = this.replaceElementUuid(xml, childTag);
-    xml = this.ensureInternalInfo(xml, childTag);
-    xml = this.markChildAsBorrowed(xml, sourceUuid);
-
-    if (childTag === 'TabularSection') {
-      xml = this.markTabularSectionAttributesAsBorrowed(xml, baseIndent);
-    }
-
-    return xml;
-  }
-
-  private replaceElementUuid(xml: string, tagName: string): string {
-    const openTagRe = new RegExp(`<${tagName}\\b[^>]*>`);
-    const openTag = openTagRe.exec(xml)?.[0];
-    if (!openTag) {
-      return xml;
-    }
-
-    const nextOpenTag = /\suuid="[^"]*"/.test(openTag)
-      ? openTag.replace(/\suuid="[^"]*"/, ` uuid="${this.newGuid()}"`)
-      : openTag.replace(/>$/, ` uuid="${this.newGuid()}">`);
-    return xml.replace(openTag, nextOpenTag);
-  }
-
-  private ensureInternalInfo(xml: string, tagName: string): string {
-    const directInternalInfoRe = new RegExp(`<${tagName}\\b[^>]*>\\s*<InternalInfo[\\s/>]`);
-    if (directInternalInfoRe.test(xml)) {
-      return xml;
-    }
-
-    const openTagRe = new RegExp(`(<${tagName}\\b[^>]*>)`);
-    const openTagMatch = openTagRe.exec(xml);
-    if (!openTagMatch) {
-      return xml;
-    }
-
-    const baseIndent = this.detectElementIndent(xml);
-    return xml.replace(openTagMatch[1], `${openTagMatch[1]}\n${baseIndent}\t<InternalInfo/>`);
-  }
-
-  private markChildAsBorrowed(xml: string, sourceUuid: string): string {
-    const propertiesMatch = /<Properties>([\s\S]*?)<\/Properties>/.exec(xml);
-    if (!propertiesMatch) {
-      return xml;
-    }
-
-    const propsInner = propertiesMatch[1]
-      .replace(/\s*<ObjectBelonging>[\s\S]*?<\/ObjectBelonging>/, '')
-      .replace(/\s*<ExtendedConfigurationObject>[\s\S]*?<\/ExtendedConfigurationObject>/, '');
-    const propIndent = this.detectPropertiesIndent(propertiesMatch[1]);
-
-    let nextInner = propsInner;
-    const belonging = `\n${propIndent}<ObjectBelonging>Adopted</ObjectBelonging>`;
-    if (/<Name>[\s\S]*?<\/Name>/.test(nextInner)) {
-      nextInner = nextInner.replace(/(\s*<Name>)/, `${belonging}$1`);
-    } else {
-      nextInner = `${belonging}${nextInner}`;
-    }
-
-    const extended = `\n${propIndent}<ExtendedConfigurationObject>${sourceUuid}</ExtendedConfigurationObject>`;
-    const commentRe = /<Comment\s*\/>|<Comment>[\s\S]*?<\/Comment>/;
-    if (commentRe.test(nextInner)) {
-      nextInner = nextInner.replace(commentRe, (comment) => `${comment}${extended}`);
-    } else if (/<Name>[\s\S]*?<\/Name>/.test(nextInner)) {
-      nextInner = nextInner.replace(/(<Name>[\s\S]*?<\/Name>)/, `$1${extended}`);
-    } else {
-      nextInner = `${nextInner}${extended}`;
-    }
-
-    return xml.replace(propertiesMatch[1], nextInner);
-  }
-
-  private markTabularSectionAttributesAsBorrowed(xml: string, baseIndent: string): string {
-    const childObjectsInner = extractNestingAwareBlock(xml, 'ChildObjects');
-    if (!childObjectsInner) {
-      return xml;
-    }
-
-    let result = xml;
-    for (const attribute of findChildElementsFullXmlInBlock(childObjectsInner, 'Attribute')) {
-      const borrowedAttributeXml = this.toBorrowedChildXml(attribute.xml, 'Attribute', `${baseIndent}\t\t`);
-      result = result.replace(attribute.xml, borrowedAttributeXml);
-    }
-    return result;
-  }
-
-  private normalizeChildXmlIndent(xml: string, baseIndent: string): string {
-    const lines = xml.replace(/\r\n?/g, '\n').split('\n');
-    const indents = lines
-      .slice(1)
-      .filter((line) => line.trim().length > 0)
-      .map((line) => /^([ \t]*)/.exec(line)?.[1].length ?? 0);
-    const removeCount = indents.length > 0 ? Math.min(...indents) : 0;
-
-    return lines
-      .map((line, index) => {
-        if (line.trim().length === 0) {
-          return '';
-        }
-        const normalized = index === 0 ? line.trimStart() : line.slice(removeCount);
-        return `${baseIndent}${normalized}`;
-      })
-      .join('\n');
-  }
-
-  private detectElementIndent(xml: string): string {
-    const match = /^([ \t]*)</m.exec(xml);
-    return match?.[1] ?? '\t\t\t';
-  }
-
-  private detectPropertiesIndent(propsInner: string): string {
-    const match = /\n([ \t]*)<[^/!]/.exec(propsInner);
-    return match?.[1] ?? '\t\t\t\t';
+    return buildBorrowedChildXml(sourceChildXml, childTag, MAIN_CHILD_OBJECTS_ENTRY_INDENT, () => this.newGuid());
   }
 
   private resolveSourceXml(cfDir: string, folder: string, objectName: string): string | null {
@@ -669,7 +573,7 @@ export class CfeBorrowService {
 
     lines.push(`\t\t</Properties>`);
 
-    if (TYPES_WITH_CHILD_OBJECTS.has(typeName)) {
+    if (this.hasChildObjects(typeName)) {
       lines.push(`\t\t<ChildObjects/>`);
     }
 
@@ -746,36 +650,6 @@ export class CfeBorrowService {
       `\t</BaseForm>`,
       `</Form>`,
     ].join('\n');
-  }
-
-  /** Добавляет запись о форме в ChildObjects XML-файла родительского объекта в расширении */
-  private registerFormInParentObject(
-    extDir: string,
-    folder: string,
-    objectName: string,
-    formName: string
-  ): void {
-    const objFile = path.join(extDir, folder, `${objectName}.xml`);
-    if (!fs.existsSync(objFile)) {
-      return;
-    }
-    let xml = fs.readFileSync(objFile, 'utf-8');
-
-    // Проверяем, не зарегистрирована ли форма
-    const alreadyRegistered = new RegExp(`<Form>${escapeRegExp(formName)}</Form>`).test(xml);
-    if (alreadyRegistered) {
-      return;
-    }
-
-    const formEntry = `\t\t\t<Form>${formName}</Form>`;
-
-    if (/<ChildObjects\s*\/>/.test(xml)) {
-      xml = xml.replace(/<ChildObjects\s*\/>/, `<ChildObjects>\n${formEntry}\n\t\t</ChildObjects>`);
-    } else {
-      xml = xml.replace('</ChildObjects>', `${formEntry}\n\t\t</ChildObjects>`);
-    }
-
-    fs.writeFileSync(objFile, xml, 'utf-8');
   }
 
   private newGuid(): string {

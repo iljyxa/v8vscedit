@@ -3,13 +3,15 @@ import * as vscode from 'vscode';
 import type { RepositoryBinding, RepositoryNodeRef, RepositoryService, RepositoryTarget } from '../../../infra/repository/RepositoryService';
 import type { CommandServices, NodeArg } from '../_shared';
 import {
-  runApplyDatabaseConfiguration,
   runDecompileExtension,
   runDecompileMainConfiguration,
   runPartialImportFromDatabase,
-  runUpdateExtension,
-  runUpdateMainConfiguration,
 } from '../ext/ExtensionCommandRunner';
+import {
+  ensureTargetUpdatedBeforeCommit,
+  refreshRepositoryUi,
+  runPostRepositorySync,
+} from './RepositoryDatabaseSync';
 import {
   type RepositoryCliServices,
   maybeRestoreLockSnapshot,
@@ -566,106 +568,6 @@ function toCliServices(services: CommandServices): RepositoryCliServices {
     repositoryService: services.repositoryService,
     projectSecretStorage: services.projectSecretStorage,
   };
-}
-
-function refreshRepositoryUi(services: CommandServices): void {
-  services.treeProvider.refresh();
-  services.refreshActionsView();
-}
-
-async function ensureTargetUpdatedBeforeCommit(
-  target: RepositoryTarget,
-  services: CommandServices
-): Promise<boolean> {
-  const changed = services.getChangedConfigurations().find(
-    (item) => path.resolve(item.rootPath).toLowerCase() === path.resolve(target.configRoot).toLowerCase()
-  );
-  if (!changed) {
-    return true;
-  }
-
-  const picked = await vscode.window.showQuickPick([
-    {
-      id: 'update',
-      label: '$(sync) Обновить и продолжить',
-      description: 'Сначала загрузить локальные изменения в базу, затем выполнить помещение',
-      detail: `${changed.name}: изменённых файлов ${String(changed.changedFilesCount)}`,
-    },
-    {
-      id: 'cancel',
-      label: '$(close) Отменить помещение',
-      description: 'Помещение без предварительного обновления запрещено',
-    },
-  ], {
-    title: 'Перед помещением требуется обновление конфигурации',
-    placeHolder: 'В конфигурации есть локальные изменения, ещё не загруженные в базу',
-    ignoreFocusOut: true,
-  });
-
-  if (picked?.id !== 'update') {
-    return false;
-  }
-
-  const updated = target.configKind === 'cfe'
-    ? await runUpdateExtension(
-        target.extensionName ?? target.displayName,
-        target.configRoot,
-        services.workspaceFolder,
-        services.outputChannel,
-        false
-      )
-    : await runUpdateMainConfiguration(
-        target.displayName,
-        target.configRoot,
-        services.workspaceFolder,
-        services.outputChannel,
-        false
-      );
-  if (!updated) {
-    return false;
-  }
-
-  services.markConfigurationsClean([target.configRoot]);
-  refreshRepositoryUi(services);
-  return true;
-}
-
-async function runPostRepositorySync(target: RepositoryTarget, services: CommandServices): Promise<void> {
-  try {
-    const updated = await runApplyDatabaseConfiguration({
-      kind: target.configKind,
-      name: target.displayName,
-      rootPath: target.configRoot,
-      extensionName: target.extensionName,
-    }, services.workspaceFolder, services.outputChannel, false);
-    if (!updated) {
-      return;
-    }
-
-    const imported = target.configKind === 'cfe'
-      ? await runDecompileExtension(
-          target.extensionName ?? target.displayName,
-          target.configRoot,
-          services.workspaceFolder,
-          services.outputChannel
-        )
-      : await runDecompileMainConfiguration(
-          target.displayName,
-          target.configRoot,
-          services.workspaceFolder,
-          services.outputChannel
-        );
-    if (!imported) {
-      return;
-    }
-
-    services.markConfigurationsClean([target.configRoot]);
-    await services.reloadEntries();
-    refreshRepositoryUi(services);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    services.outputChannel.appendLine(`[repository][post-sync][error] ${message}`);
-  }
 }
 
 /**

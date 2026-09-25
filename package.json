@@ -414,30 +414,6 @@
         "title": "BSL Analyzer: Показать лог"
       },
       {
-        "command": "v8vscedit.support.none",
-        "title": "Не на поддержке",
-        "icon": {
-          "light": "./src/icons/light/support-none.svg",
-          "dark": "./src/icons/dark/support-none.svg"
-        }
-      },
-      {
-        "command": "v8vscedit.support.editable",
-        "title": "На поддержке, редактирование разрешено",
-        "icon": {
-          "light": "./src/icons/light/support-editable.svg",
-          "dark": "./src/icons/dark/support-editable.svg"
-        }
-      },
-      {
-        "command": "v8vscedit.support.locked",
-        "title": "На поддержке, редактирование запрещено",
-        "icon": {
-          "light": "./src/icons/light/support-locked.svg",
-          "dark": "./src/icons/dark/support-locked.svg"
-        }
-      },
-      {
         "command": "v8vscedit.repository.connect",
         "title": "Подключить к хранилищу",
         "icon": "$(plug)"
@@ -929,7 +905,7 @@
     "@types/ssh2": "^1.15.5",
     "@types/vscode": "^1.85.0",
     "@vitejs/plugin-vue": "^6.0.6",
-    "@vscode/test-electron": "^2.5.2",
+    "@vscode/test-electron": "^3.1.0",
     "c8": "^11.0.0",
     "eslint": "^10.3.0",
     "glob": "^13.0.6",

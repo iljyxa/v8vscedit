@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { BasedOnXmlService } from '../../infra/xml/BasedOnXmlService';
@@ -32,16 +33,15 @@ import { TypeRegistryService } from '../../ui/views/properties/TypeRegistryServi
  */
 
 // Реальный объект из выгрузки example: Catalog "Банки" содержит Attribute
-// "КоррСчет" с известным uuid — этого достаточно, чтобы зафиксировать, какой
-// xmlPath/uuid резолвер вычисляет для узла типа Attribute, не поднимая
-// ParentConfigurations.bin (реальная инфраструктура поддержки требует бинарный
-// файл хранилища, которого в примере нет; фиксируем именно ветвление вызова).
+// "КоррСчет" — этого достаточно, чтобы зафиксировать, какой xmlPath/uuid
+// резолвер вычисляет для узла типа Attribute, не поднимая ParentConfigurations.bin
+// (фиксируем именно ветвление вызова, а не режим поддержки).
 const BANKS_XML_PATH = path.resolve(
   __dirname,
   '../../../example/2.21/src/cf/Catalogs/Банки.xml'
 );
 const BANKS_ATTRIBUTE_NAME = 'КоррСчет';
-const BANKS_ATTRIBUTE_UUID = '4a11d434-d753-49c6-b402-697eee429f34';
+const BANKS_ATTRIBUTE_UUID = uuidOfAttribute(fs.readFileSync(BANKS_XML_PATH, 'utf-8'), BANKS_ATTRIBUTE_NAME);
 
 // Catalog "АвтоматическиеСкидки" содержит TabularSection "ВремяПоДнямНедели"
 // с дочерним Attribute "Выбран" (в дереве отображается как узел Column) —
@@ -53,7 +53,27 @@ const DISCOUNTS_XML_PATH = path.resolve(
 );
 const DISCOUNTS_TABULAR_SECTION = 'ВремяПоДнямНедели';
 const DISCOUNTS_COLUMN_NAME = 'Выбран';
-const DISCOUNTS_COLUMN_UUID = '516337b6-a882-45f0-9f35-a72588fca1d0';
+const DISCOUNTS_COLUMN_UUID = uuidOfAttribute(
+  tabularSectionXml(fs.readFileSync(DISCOUNTS_XML_PATH, 'utf-8'), DISCOUNTS_TABULAR_SECTION),
+  DISCOUNTS_COLUMN_NAME
+);
+
+/**
+ * Ожидаемые uuid берутся из самой фикстуры (выгрузка платформы — uuid задаёт
+ * Конфигуратор) простым поиском по имени, независимым от проверяемого резолвера.
+ */
+function uuidOfAttribute(xml: string, name: string): string {
+  const match = new RegExp(`<Attribute uuid="([^"]+)">\\s*<Properties>\\s*<Name>${name}</Name>`).exec(xml);
+  assert.ok(match, `в фикстуре нет реквизита ${name}`);
+  return match[1];
+}
+
+/** Блок ТЧ по имени: одноимённый реквизит может быть и у самого объекта. */
+function tabularSectionXml(xml: string, name: string): string {
+  const start = xml.indexOf(`<Name>${name}</Name>`);
+  assert.ok(start !== -1, `в фикстуре нет табличной части ${name}`);
+  return xml.slice(start, xml.indexOf('</TabularSection>', start));
+}
 
 /** Фейковый supportService, фиксирующий, с каким xmlPath/uuid его вызвали. */
 class RecordingSupportService {

@@ -20,12 +20,14 @@ import {
   listConnectedDatabaseExtensions,
 } from './ExtensionCommandRunner';
 import { planExtensionChoices } from '../../../infra/environment';
+import { notifyConfigurationOperationBusy } from './configurationOperationBusy';
+import { type ConfigurationCommandOutcome, failedOutcome } from './configurationCommandOutcome';
 
 interface ActionItem extends vscode.QuickPickItem {
   actionId: 'import' | 'update' | 'compileAndUpdateExt';
 }
 
-interface ImportTarget {
+export interface ImportTarget {
   kind: 'cf' | 'cfe';
   name: string;
   rootPath: string;
@@ -35,18 +37,46 @@ interface RootConfigurationTarget extends ImportTarget {
   extensionName?: string;
 }
 
-let isUpdatingConfigurations = false;
+/**
+ * Точки запуска Конфигуратора и модальные диалоги выбора в командах
+ * подключения расширения и пакетного импорта/обновления. Внедряются, чтобы
+ * захват общего guard'а, судьбу каталога `src/cfe/<имя>` и исход команды можно
+ * было проверить без процесса 1С и без участия человека.
+ */
+export interface ExtensionCommandsDeps {
+  readonly listDatabaseExtensions: typeof listConnectedDatabaseExtensions;
+  readonly decompileExtension: typeof runDecompileExtension;
+  readonly decompileMainConfiguration: typeof runDecompileMainConfiguration;
+  readonly updateMainConfiguration: typeof runUpdateMainConfiguration;
+  readonly updateExtension: typeof runUpdateExtension;
+  readonly pickImportTargets: typeof pickImportTargets;
+  readonly pickChangedConfigurations: typeof pickChangedConfigurations;
+}
+
+export const DEFAULT_EXTENSION_COMMANDS_DEPS: ExtensionCommandsDeps = {
+  listDatabaseExtensions: listConnectedDatabaseExtensions,
+  decompileExtension: runDecompileExtension,
+  decompileMainConfiguration: runDecompileMainConfiguration,
+  updateMainConfiguration: runUpdateMainConfiguration,
+  updateExtension: runUpdateExtension,
+  pickImportTargets,
+  pickChangedConfigurations,
+};
 
 /** Регистрирует команды управления расширением 1С. */
 export function registerExtensionCommands(
   context: vscode.ExtensionContext,
-  services: CommandServices
+  services: CommandServices,
+  deps: ExtensionCommandsDeps = DEFAULT_EXTENSION_COMMANDS_DEPS
 ): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand('v8vscedit.importConfigurations', async () => {
-      if (isUpdatingConfigurations) {
-        await showOperationAlreadyRunningMessage();
-        return;
+    vscode.commands.registerCommand('v8vscedit.importConfigurations', async (): Promise<ConfigurationCommandOutcome> => {
+      // Ранняя проверка — чтобы не показывать выбор конфигураций, когда импорт
+      // всё равно не стартует; окончательный захват — после выбора.
+      const heldBy = services.configurationOperationGuard.heldBy;
+      if (heldBy !== undefined) {
+        notifyConfigurationOperationBusy();
+        return { status: 'busy', heldBy };
       }
 
       const targets = collectImportTargets(
@@ -54,20 +84,31 @@ export function registerExtensionCommands(
         services.workspaceFolder.uri.fsPath
       );
       if (targets.length === 0) {
-        await vscode.window.showWarningMessage('Нет каталога src/cf для импорта основной конфигурации.');
-        return;
+        // Без await: вызывающий (MCP-мост) ждёт исход команды, а не закрытия
+        // предупреждения человеком.
+        void vscode.window.showWarningMessage('Нет каталога src/cf для импорта основной конфигурации.');
+        return { status: 'no-targets' };
       }
 
-      const selected = await pickImportTargets(targets);
+      const selected = await deps.pickImportTargets(targets);
       if (!selected || selected.length === 0) {
-        return;
+        return { status: 'cancelled' };
       }
 
-      isUpdatingConfigurations = true;
-      await vscode.commands.executeCommand('setContext', 'v8vscedit.isUpdatingConfigurations', true);
+      const acquired = services.configurationOperationGuard.tryAcquireOrHeldBy('Импорт конфигураций');
+      if (!acquired.acquired) {
+        notifyConfigurationOperationBusy();
+        return { status: 'busy', heldBy: acquired.heldBy };
+      }
+      const { lease } = acquired;
       beginConfigurationProgress(services, 'Импорт конфигураций', 'подготовка');
       await yieldToUi();
       const completedRootPaths: string[] = [];
+      const completedNames: string[] = [];
+      // Заполняется одновременно с `return false` операции, поэтому при
+      // неуспехе всегда содержит имя; `string`, а не `string | undefined` — TS
+      // не видит присваивания внутри замыкания и сузил бы тип до `undefined`.
+      let stoppedAt = '';
       try {
         const ok = await runWithStandaloneServerStopped(services, 'Импорт конфигураций', async () => {
           const ordered = orderImportTargets(selected);
@@ -82,14 +123,14 @@ export function registerExtensionCommands(
             const progressPrefix = `${String(index + 1)}/${String(ordered.length)}: ${target.name}`;
             const hooks = createImportHooks(services, 'Импорт конфигураций', progressPrefix);
             const imported = target.kind === 'cf'
-              ? await runDecompileMainConfiguration(
+              ? await deps.decompileMainConfiguration(
                   target.name,
                   target.rootPath,
                   services.workspaceFolder,
                   services.outputChannel,
                   hooks
                 )
-              : await runDecompileExtension(
+              : await deps.decompileExtension(
                   target.name,
                   target.rootPath,
                   services.workspaceFolder,
@@ -99,9 +140,11 @@ export function registerExtensionCommands(
 
             if (!imported) {
               setConfigurationProgress(services, 'Импорт конфигураций', `остановлено на "${target.name}"`, false);
+              stoppedAt = target.name;
               return false;
             }
             completedRootPaths.push(target.rootPath);
+            completedNames.push(target.name);
           }
 
           if (ordered.length > 1) {
@@ -113,53 +156,53 @@ export function registerExtensionCommands(
           setConfigurationProgress(services, 'Импорт конфигураций', 'завершено', false);
           return true;
         });
-        if (!ok) {
-          return;
-        }
+        return ok ? { status: 'done', completed: completedNames } : failedOutcome(completedNames, { stoppedAt });
       } catch (error) {
         setConfigurationProgress(services, 'Импорт конфигураций', 'ошибка', false);
         showConfigurationCommandError('Ошибка импорта конфигураций.', error, services);
+        return failedOutcome(completedNames, { error });
       } finally {
-        isUpdatingConfigurations = false;
-        await vscode.commands.executeCommand('setContext', 'v8vscedit.isUpdatingConfigurations', false);
+        lease.release();
         services.markConfigurationsClean(completedRootPaths);
         clearConfigurationProgress(services);
       }
     }),
 
-    vscode.commands.registerCommand('v8vscedit.updateChangedConfigurations', async () => {
-      if (isUpdatingConfigurations) {
-        await showOperationAlreadyRunningMessage();
-        return false;
+    vscode.commands.registerCommand('v8vscedit.updateChangedConfigurations', async (): Promise<ConfigurationCommandOutcome> => {
+      const acquired = services.configurationOperationGuard.tryAcquireOrHeldBy('Обновление конфигураций');
+      if (!acquired.acquired) {
+        notifyConfigurationOperationBusy();
+        return { status: 'busy', heldBy: acquired.heldBy };
       }
-
-      isUpdatingConfigurations = true;
-      await vscode.commands.executeCommand('setContext', 'v8vscedit.isUpdatingConfigurations', true);
+      const { lease } = acquired;
       beginConfigurationProgress(services, 'Обновление конфигураций', 'проверка изменений');
       await yieldToUi();
       const completedRootPaths: string[] = [];
+      const completedNames: string[] = [];
+      // См. одноимённую переменную импорта: заполняется вместе с `return false`.
+      let stoppedAt = '';
       try {
         const changed = services.getChangedConfigurations();
 
         if (changed.length === 0) {
           setConfigurationProgress(services, 'Обновление конфигураций', 'изменений нет', false);
           // Уведомление показываем без await: `await` внутри критической секции
-          // держал бы isUpdatingConfigurations=true до закрытия нотификации
+          // держал бы общий guard занятым до закрытия нотификации
           // пользователем, а до тех пор любая операция отбивалась сообщением
           // «уже выполняется» (состояние «идёт обновление» залипало).
           void vscode.window.showInformationMessage('Изменений в конфигурациях не обнаружено.');
-          return true;
+          return { status: 'no-changes' };
         }
 
         const selected = changed.length === 1
           ? changed
-          : await pickChangedConfigurations(changed);
+          : await deps.pickChangedConfigurations(changed);
         if (!selected || selected.length === 0) {
           setConfigurationProgress(services, 'Обновление конфигураций', 'отменено', false);
-          return false;
+          return { status: 'cancelled' };
         }
 
-        return await runWithStandaloneServerStopped(services, 'Обновление конфигураций', async () => {
+        const ok = await runWithStandaloneServerStopped(services, 'Обновление конфигураций', async () => {
           const ordered = orderUpdateTargets(selected);
           for (let index = 0; index < ordered.length; index += 1) {
             const target = ordered[index];
@@ -170,7 +213,7 @@ export function registerExtensionCommands(
               true
             );
             const updated = target.kind === 'cf'
-              ? await runUpdateMainConfiguration(
+              ? await deps.updateMainConfiguration(
                   target.name,
                   target.rootPath,
                   services.workspaceFolder,
@@ -178,7 +221,7 @@ export function registerExtensionCommands(
                   ordered.length === 1,
                   createProgressHooks(services, 'Обновление конфигураций', `${String(index + 1)}/${String(ordered.length)}: ${target.name}`)
                 )
-              : await runUpdateExtension(
+              : await deps.updateExtension(
                   target.name,
                   target.rootPath,
                   services.workspaceFolder,
@@ -189,9 +232,11 @@ export function registerExtensionCommands(
 
             if (!updated) {
               setConfigurationProgress(services, 'Обновление конфигураций', `остановлено на "${target.name}"`, false);
+              stoppedAt = target.name;
               return false;
             }
             completedRootPaths.push(target.rootPath);
+            completedNames.push(target.name);
           }
 
           if (ordered.length > 1) {
@@ -200,21 +245,27 @@ export function registerExtensionCommands(
           setConfigurationProgress(services, 'Обновление конфигураций', 'завершено', false);
           return true;
         });
+        return ok ? { status: 'done', completed: completedNames } : failedOutcome(completedNames, { stoppedAt });
       } catch (error) {
         setConfigurationProgress(services, 'Обновление конфигураций', 'ошибка', false);
         showConfigurationCommandError('Ошибка обновления конфигураций.', error, services);
-        return false;
+        return failedOutcome(completedNames, { error });
       } finally {
-        isUpdatingConfigurations = false;
-        await vscode.commands.executeCommand('setContext', 'v8vscedit.isUpdatingConfigurations', false);
+        lease.release();
         services.markConfigurationsClean(completedRootPaths);
         clearConfigurationProgress(services);
       }
     }),
 
     vscode.commands.registerCommand('v8vscedit.connectExtension', async () => {
-      /* c8 ignore next -- строка вызова vscode-команды; не юнит-тестируется без полного харнесса CommandServices, ветвящаяся логика выбора имени — в planExtensionChoices (покрыта на 100%) */
-      const normalizedExtensionName = await resolveExtensionNameToConnect(services);
+      // Запрос списка расширений — отдельный запуск Конфигуратора и выбор
+      // пользователя; при занятом guard'е подключение всё равно не стартует.
+      if (services.configurationOperationGuard.isBusy) {
+        notifyConfigurationOperationBusy();
+        return;
+      }
+
+      const normalizedExtensionName = await resolveExtensionNameToConnect(services, deps.listDatabaseExtensions);
       if (!normalizedExtensionName) {
         return;
       }
@@ -229,7 +280,6 @@ export function registerExtensionCommands(
         return;
       }
 
-      fs.mkdirSync(extensionRoot, { recursive: true });
       await runExclusiveConfigurationOperation(
         {
           title: `Подключение расширения ${normalizedExtensionName}`,
@@ -245,13 +295,18 @@ export function registerExtensionCommands(
             await services.reloadEntries();
           },
         },
-        () =>
-          runDecompileExtension(
+        () => {
+          // Каталог создаётся только под захваченным guard'ом: при отказе в
+          // захвате afterFailure не вызывается, и пустой src/cfe/<имя> остался
+          // бы, блокируя повторное подключение того же расширения.
+          fs.mkdirSync(extensionRoot, { recursive: true });
+          return deps.decompileExtension(
             normalizedExtensionName,
             extensionRoot,
             services.workspaceFolder,
             services.outputChannel
-          )
+          );
+        }
       );
     }),
 
@@ -595,10 +650,13 @@ function isDirectory(directoryPath: string): boolean {
  * причина явно сообщается пользователю. Ветвящаяся логика выбора вынесена в
  * чистую `planExtensionChoices`; здесь — только диалоги vscode.
  */
-/* c8 ignore start -- диалоги vscode (QuickPick) и чтение ФС списка подключённых расширений; не юнит-тестируется (правило CLAUDE.md №4), решающая логика — в planExtensionChoices */
-async function resolveExtensionNameToConnect(services: CommandServices): Promise<string | undefined> {
+/* c8 ignore start -- диалоги vscode (QuickPick) и чтение ФС списка подключённых расширений; проверяется только интеграционно (suite issue #38 в configurationOperationGuardCommands.test.ts), решающая логика — в planExtensionChoices */
+async function resolveExtensionNameToConnect(
+  services: CommandServices,
+  listDatabaseExtensions: ExtensionCommandsDeps['listDatabaseExtensions']
+): Promise<string | undefined> {
   const workspaceRoot = services.workspaceFolder.uri.fsPath;
-  const dbNames = await listConnectedDatabaseExtensions(services.workspaceFolder, services.outputChannel);
+  const dbNames = await listDatabaseExtensions(services.workspaceFolder, services.outputChannel);
 
   if (dbNames === undefined) {
     await vscode.window.showErrorMessage(
@@ -946,13 +1004,11 @@ async function runExclusiveConfigurationOperation(
   },
   operation: () => Promise<boolean>
 ): Promise<boolean> {
-  if (isUpdatingConfigurations) {
-    await showOperationAlreadyRunningMessage();
+  const lease = options.services.configurationOperationGuard.tryAcquire(options.title);
+  if (!lease) {
+    notifyConfigurationOperationBusy();
     return false;
   }
-
-  isUpdatingConfigurations = true;
-  await vscode.commands.executeCommand('setContext', 'v8vscedit.isUpdatingConfigurations', true);
   beginConfigurationProgress(options.services, options.title, options.startMessage);
   await yieldToUi();
   let failureHookCalled = false;
@@ -987,12 +1043,7 @@ async function runExclusiveConfigurationOperation(
     showConfigurationCommandError(`Ошибка операции "${options.title}".`, error, options.services);
     return false;
   } finally {
-    isUpdatingConfigurations = false;
-    await vscode.commands.executeCommand('setContext', 'v8vscedit.isUpdatingConfigurations', false);
+    lease.release();
     clearConfigurationProgress(options.services);
   }
-}
-
-async function showOperationAlreadyRunningMessage(): Promise<void> {
-  await vscode.window.showInformationMessage('Операция с конфигурацией уже выполняется. Дождитесь её завершения.');
 }

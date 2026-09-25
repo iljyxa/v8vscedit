@@ -7,14 +7,44 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import * as vscode from 'vscode';
 import * as z from 'zod/v4';
+import {
+  CONFIGURATION_COMMAND_STATUSES,
+  type ConfigurationCommandOutcome,
+  isConfigurationCommandSucceeded,
+} from '../../commands/ext/configurationCommandOutcome';
 import { canonicalToLegacyModulePath } from '../McpPathResolvers';
 import type { McpRegistrationDeps } from './McpRegistrationDeps';
 
-const ALLOWED_COMMANDS = new Set([
+const ALLOWED_COMMANDS = [
   'v8vscedit.refresh',
   'v8vscedit.importConfigurations',
   'v8vscedit.updateChangedConfigurations',
-]);
+] as const;
+
+type AllowedCommandId = (typeof ALLOWED_COMMANDS)[number];
+
+/**
+ * Исход формирует сама команда (она же держит guard), мост лишь переводит его
+ * в ответ: предпроверка guard'а здесь была бы вторым источником правды и не
+ * защищала бы от захвата между проверкой и вызовом.
+ */
+async function executeAllowedCommand(command: AllowedCommandId): Promise<ConfigurationCommandOutcome> {
+  if (command === 'v8vscedit.refresh') {
+    // Перечитывание дерева не работает с базой и не возвращает исход; его
+    // завершение без исключения и есть успех.
+    await vscode.commands.executeCommand(command);
+    return { status: 'done', completed: [] };
+  }
+  return vscode.commands.executeCommand<ConfigurationCommandOutcome>(command);
+}
+
+function toExecuteCommandResponse(
+  command: AllowedCommandId,
+  outcome: ConfigurationCommandOutcome
+): Record<string, unknown> {
+  const { status, ...details } = outcome;
+  return { command, outcome: status, result: isConfigurationCommandSucceeded(outcome), ...details };
+}
 
 export function registerConfigLifecycleTools(server: McpServer, deps: McpRegistrationDeps): void {
   const { services, gate } = deps;
@@ -152,17 +182,20 @@ export function registerConfigLifecycleTools(server: McpServer, deps: McpRegistr
     'v8vscedit_execute_command',
     {
       title: 'Выполнить команду расширения',
-      description: 'Безопасный мост только для явно разрешённых команд расширения: refresh, importConfigurations, updateChangedConfigurations.',
+      description: 'Безопасный мост только для явно разрешённых команд расширения: refresh, importConfigurations, updateChangedConfigurations. '
+        + `Ответ: command, outcome (${CONFIGURATION_COMMAND_STATUSES.join('|')}), result (true при done/no-changes), `
+        + 'heldBy при busy — выполняющаяся операция, completed/stoppedAt/error при done/failed. '
+        + 'importConfigurations и updateChangedConfigurations при нескольких конфигурациях ждут выбора пользователя.',
       inputSchema: z.object({
-        command: z.enum([...ALLOWED_COMMANDS] as [string, ...string[]]),
+        command: z.enum(ALLOWED_COMMANDS),
       }),
       annotations: {
         destructiveHint: true,
       },
     },
     async ({ command }) => gate.wrapAsync(async () => {
-      const result = await vscode.commands.executeCommand(command);
-      return { command, result: result ?? null };
+      const outcome = await executeAllowedCommand(command);
+      return toExecuteCommandResponse(command, outcome);
     })
   );
 }

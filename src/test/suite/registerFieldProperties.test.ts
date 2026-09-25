@@ -438,13 +438,13 @@ suite('registerFieldProperties — состав свойств полей рег
     // пишет генератор, должно идти в том же порядке, что и в реальной выгрузке,
     // и не содержать ключей, которых у эталонного поля нет.
     const cases: { file: string; tag: 'Attribute' | 'Dimension' | 'Resource'; owner: string }[] = [
-      { file: 'InformationRegisters/АвтоНумерацияДоговоровКонтрагента.xml', tag: 'Resource', owner: 'InformationRegister' },
-      { file: 'InformationRegisters/АбонентыЭДО.xml', tag: 'Dimension', owner: 'InformationRegister' },
-      { file: 'AccumulationRegisters/АвансовыеПлатежиИностранцевПоНДФЛ.xml', tag: 'Resource', owner: 'AccumulationRegister' },
-      { file: 'AccumulationRegisters/АвансовыеПлатежиИностранцевПоНДФЛ.xml', tag: 'Dimension', owner: 'AccumulationRegister' },
-      { file: 'AccumulationRegisters/АвансовыеПлатежиИностранцевПоНДФЛ.xml', tag: 'Attribute', owner: 'AccumulationRegister' },
-      { file: 'AccountingRegisters/Управленческий.xml', tag: 'Dimension', owner: 'AccountingRegister' },
-      { file: 'AccountingRegisters/Управленческий.xml', tag: 'Resource', owner: 'AccountingRegister' },
+      { file: 'InformationRegisters/КурсыВалют.xml', tag: 'Resource', owner: 'InformationRegister' },
+      { file: 'InformationRegisters/ЦеныНоменклатуры.xml', tag: 'Dimension', owner: 'InformationRegister' },
+      { file: 'AccumulationRegisters/БонусныеБаллы.xml', tag: 'Resource', owner: 'AccumulationRegister' },
+      { file: 'AccumulationRegisters/БонусныеБаллы.xml', tag: 'Dimension', owner: 'AccumulationRegister' },
+      { file: 'AccumulationRegisters/БонусныеБаллы.xml', tag: 'Attribute', owner: 'AccumulationRegister' },
+      { file: 'AccountingRegisters/Хозрасчетный.xml', tag: 'Dimension', owner: 'AccountingRegister' },
+      { file: 'AccountingRegisters/Хозрасчетный.xml', tag: 'Resource', owner: 'AccountingRegister' },
     ];
 
     for (const item of cases) {
@@ -503,7 +503,10 @@ suite('registerFieldProperties — проверка принадлежности
     const service = new MetadataValidationService();
     let checked = 0;
     for (const folder of ['InformationRegisters', 'AccumulationRegisters', 'AccountingRegisters', 'Catalogs', 'Documents']) {
-      for (const xmlPath of takeFixtureObjects(folder, 12)) {
+      const objects = takeFixtureObjects(folder, 12);
+      // Порог общего числа ниже не заметит пропажу целого вида — проверяем каждый.
+      assert.ok(objects.length > 0, `в фикстуре нет объектов ${folder}`);
+      for (const xmlPath of objects) {
         const result = service.validate({ objectPath: xmlPath });
         const wrong = result.objects[0].issues.filter((issue) => issue.code === 'property-not-allowed');
         assert.deepStrictEqual(
@@ -514,7 +517,9 @@ suite('registerFieldProperties — проверка принадлежности
         checked += 1;
       }
     }
-    assert.ok(checked >= 40, `проверено объектов: ${String(checked)}`);
+    // Фикстура — компактная конфигурация «Торговый учёт», а не типовая ERP: порог
+    // подтверждает, что проверка прошла по заметному набору объектов, а не по паре штук.
+    assert.ok(checked >= 20, `проверено объектов: ${String(checked)}`);
   });
 
   test('объект без <ChildObjects> и ТЧ без колонок проверку не ломают', () => {

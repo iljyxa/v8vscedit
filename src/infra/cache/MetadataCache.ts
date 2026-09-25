@@ -8,6 +8,7 @@ import { type MetaKind, getMetaFolder, getMetaType, getMetaTypesByGroup } from '
 import { buildScopeKey } from './HashCache';
 import type { MetadataGitDecorationTarget } from '../git/GitMetadataStatusService';
 import { getObjectLocationFromXml, resolveObjectXmlPath } from '../fs/MetaPathResolver';
+import { findObjectXmlInFolder } from '../fs/ObjectLocation';
 import { parseConfigXml, parseObjectXml, readTemplateTypeFromXml } from '../xml';
 
 export type MetadataCacheSingleClickAction = 'openTemplateContent';
@@ -760,10 +761,13 @@ function buildUrlTemplateNode(
 }
 
 function buildSubsystemNodes(entry: ConfigEntry, info: ConfigInfo, names: string[]): MetadataCacheNode[] {
-  const subsystemsRoot = path.join(entry.rootPath, getMetaFolder('Subsystem') ?? 'Subsystems');
+  // Фолбэк недостижим: у Subsystem папка задана в META_TYPES константой; `??` нужен только
+  // из-за сигнатуры getMetaFolder (string | null).
+  /* c8 ignore next */
+  const subsystemsFolder = getMetaFolder('Subsystem') ?? 'Subsystems';
   return names
     .map((name) => {
-      const xmlPath = resolveSubsystemXml(subsystemsRoot, name);
+      const xmlPath = findObjectXmlInFolder(entry.rootPath, subsystemsFolder, name);
       return xmlPath ? buildSubsystemNode(entry, info, name, xmlPath, getSubsystemHomeDir(xmlPath, name), new Set()) : undefined;
     })
     .filter((item): item is MetadataCacheNode => Boolean(item));
@@ -796,7 +800,7 @@ function buildSubsystemNode(
   const children = (objectInfo?.children ?? [])
     .filter((item) => item.tag === 'Subsystem' && item.name !== name)
     .map((item) => {
-      const childXmlPath = resolveSubsystemXml(path.join(homeDir, 'Subsystems'), item.name);
+      const childXmlPath = findObjectXmlInFolder(homeDir, 'Subsystems', item.name);
       return childXmlPath
         ? buildSubsystemNode(entry, info, item.name, childXmlPath, getSubsystemHomeDir(childXmlPath, item.name), nextVisited)
         : undefined;
@@ -905,15 +909,6 @@ function resolveChildGroupDecorationPaths(objectXmlPath: string, tag: ChildTag):
 
 function isEmbeddedChildTag(tag: ChildTag): boolean {
   return tag !== 'Form' && tag !== 'Command' && tag !== 'Template';
-}
-
-function resolveSubsystemXml(root: string, name: string): string | undefined {
-  const deep = path.join(root, name, `${name}.xml`);
-  if (fs.existsSync(deep)) {
-    return deep;
-  }
-  const flat = path.join(root, `${name}.xml`);
-  return fs.existsSync(flat) ? flat : undefined;
 }
 
 function getSubsystemHomeDir(xmlPath: string, subsystemName: string): string {

@@ -16,11 +16,12 @@ import type { SkdDefinition } from '../../infra/xml/DataCompositionSchemaService
  * а не только структуру кода.
  *
  * Недетерминизма в буквенных данных нет: compile() пишет новый файл без BOM/CRLF
- * (fs.writeFileSync), а edit() на реальной выгрузке 1С сохраняет её BOM/CRLF через
- * writeTextFilePreservingBomAndEol — оба пути детерминированы, поэтому весь текст
- * (включая переводы строк, отступы, самозакрытие тегов, BOM) сравнивается буквально
- * без нормализации и без плейсхолдеров: во всех сценариях ниже нет uuid/даты,
- * генерируемых сервисом заново при каждом прогоне.
+ * (fs.writeFileSync), а edit() на реальной выгрузке 1С сохраняет её BOM и построчный
+ * EOL неизменённых строк через writeTextFilePreservingBomAndEol/preserveBomAndEol
+ * (LineEndings.ts) — оба пути детерминированы, поэтому весь текст (включая переводы
+ * строк, отступы, самозакрытие тегов, BOM) сравнивается буквально без нормализации
+ * и без плейсхолдеров: во всех сценариях ниже нет uuid/даты, генерируемых сервисом
+ * заново при каждом прогоне.
  */
 suite('DataCompositionSchemaService — байт-golden характеризация (предусловие дробления на infra/xml/dcs/*)', () => {
   test('compile: полный байтовый эталон XML схемы из репрезентативного SkdDefinition (dataSource/dataSet+calc+total/parameters c @autoDates/variant c selection+filter+order+structure)', () => {
@@ -306,10 +307,20 @@ suite('DataCompositionSchemaService — байт-golden характеризац
   test('edit — цепочка add-field/modify-field/add-parameter/rename-parameter/reorder-parameters на реальной выгрузке example/2.21 (Reports/ПраваДоступа): полный байтовый эталон после каждого шага', () => {
     // Реальная выгрузка 1С с BOM + CRLF: сохранение обоих через
     // writeTextFilePreservingBomAndEol — часть контракта, который обязан пережить
-    // дробление сервиса. Фикстура компактна (68 строк), но содержит multi-valueType
-    // поле "Пользователь" (4 альтернативных <v8:Type>), namespace-префиксованный
-        // settingsVariant (dcsset:) и <parameter> с value/useRestriction/use — то есть
+    // дробление сервиса. Фикстура компактна (84 строки), но содержит multi-valueType
+    // поле "Пользователь" (3 альтернативных <v8:Type>), namespace-префиксованный
+    // settingsVariant (dcsset:) и <parameter> с value/useRestriction/use — то есть
     // задевает основные ветки replaceFieldBlock/replaceParameterBlock/renameParameter.
+    //
+    // Смешанные переводы строк: платформа пишет текст <query> с голыми LF внутри
+    // CRLF-файла. preserveBomAndEol (LineEndings.ts) построчно сохраняет исходный EOL
+    // неизменённых строк, поэтому 17 внутренних строк запроса остаются на голом LF
+    // и после правок, не затрагивающих сам текст запроса (add-field/modify-field/
+    // add-parameter/rename-parameter/reorder-parameters ничего не меняют внутри
+    // <query>…</query>) — правка iljyxa/v8vscedit#18. CRLF сохраняется только у последней
+    // строки запроса «…Организации</query>», т.к. и в исходнике она оканчивалась на CRLF
+    // (граница со следующей строкой файла); новые и заменённые блоки получают EOL по
+    // стилю заполнения (см. LineEndings.ts).
     const fixture = path.resolve(
       __dirname,
       '../../../example/2.21/src/cf/Reports/ПраваДоступа/Templates/МакетПараметров/Ext/Template.xml'
@@ -343,14 +354,13 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t\t\t</v8:item>' + '\r\n'
       + '\t\t\t</title>' + '\r\n'
       + '\t\t\t<valueType>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ВнешниеПользователи</v8:Type>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ГруппыВнешнихПользователей</v8:Type>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ГруппыПользователей</v8:Type>' + '\r\n'
       + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Пользователи</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Контрагенты</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Организации</v8:Type>' + '\r\n'
       + '\t\t\t</valueType>' + '\r\n'
       + '\t\t</field>' + '\r\n'
       + '\t\t<dataSource>ИсточникДанных1</dataSource>' + '\r\n'
-      + '\t\t<query>ВЫБРАТЬ НЕОПРЕДЕЛЕНО КАК Пользователь</query>' + '\r\n'
+      + '\t\t<query>ВЫБРАТЬ\n\tПользователи.Ссылка КАК Пользователь\nИЗ\n\tСправочник.Пользователи КАК Пользователи\n\nОБЪЕДИНИТЬ ВСЕ\n\nВЫБРАТЬ\n\tКонтрагенты.Ссылка\nИЗ\n\tСправочник.Контрагенты КАК Контрагенты\n\nОБЪЕДИНИТЬ ВСЕ\n\nВЫБРАТЬ\n\tОрганизации.Ссылка\nИЗ\n\tСправочник.Организации КАК Организации</query>' + '\r\n'
       + '\t</dataSet>' + '\r\n'
       + '\t<parameter>' + '\r\n'
       + '\t\t<name>ПодробныеСведенияОПравахДоступа</name>' + '\r\n'
@@ -372,7 +382,7 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t<dcsset:presentation xsi:type="v8:LocalStringType">' + '\r\n'
       + '\t\t\t<v8:item>' + '\r\n'
       + '\t\t\t\t<v8:lang>ru</v8:lang>' + '\r\n'
-      + '\t\t\t\t<v8:content>Права доступа</v8:content>' + '\r\n'
+      + '\t\t\t\t<v8:content>ПраваДоступа</v8:content>' + '\r\n'
       + '\t\t\t</v8:item>' + '\r\n'
       + '\t\t</dcsset:presentation>' + '\r\n'
       + '\t\t<dcsset:settings xmlns:pal="http://v8.1c.ru/8.1/data/ui/colors/palette" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows">' + '\r\n'
@@ -388,7 +398,7 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t\t\t\t<dcscor:use>false</dcscor:use>' + '\r\n'
       + '\t\t\t\t\t<dcscor:parameter>ПодробныеСведенияОПравахДоступа</dcscor:parameter>' + '\r\n'
       + '\t\t\t\t\t<dcscor:value xsi:type="xs:boolean">false</dcscor:value>' + '\r\n'
-      + '\t\t\t\t\t<dcsset:userSettingID>b61802a2-20e1-457e-ad65-c61886a04ff8</dcsset:userSettingID>' + '\r\n'
+      + '\t\t\t\t\t<dcsset:userSettingID>7a4419ba-878e-4056-8b60-9ffd5a8cd15d</dcsset:userSettingID>' + '\r\n'
       + '\t\t\t\t</dcscor:item>' + '\r\n'
       + '\t\t\t</dcsset:dataParameters>' + '\r\n'
       + '\t\t</dcsset:settings>' + '\r\n'
@@ -428,14 +438,13 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t\t\t</v8:item>' + '\r\n'
       + '\t\t\t</title>' + '\r\n'
       + '\t\t\t<valueType>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ВнешниеПользователи</v8:Type>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ГруппыВнешнихПользователей</v8:Type>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ГруппыПользователей</v8:Type>' + '\r\n'
       + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Пользователи</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Контрагенты</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Организации</v8:Type>' + '\r\n'
       + '\t\t\t</valueType>' + '\r\n'
       + '\t\t</field>' + '\r\n'
       + '\t\t<dataSource>ИсточникДанных1</dataSource>' + '\r\n'
-      + '\t\t<query>ВЫБРАТЬ НЕОПРЕДЕЛЕНО КАК Пользователь</query>' + '\r\n'
+      + '\t\t<query>ВЫБРАТЬ\n\tПользователи.Ссылка КАК Пользователь\nИЗ\n\tСправочник.Пользователи КАК Пользователи\n\nОБЪЕДИНИТЬ ВСЕ\n\nВЫБРАТЬ\n\tКонтрагенты.Ссылка\nИЗ\n\tСправочник.Контрагенты КАК Контрагенты\n\nОБЪЕДИНИТЬ ВСЕ\n\nВЫБРАТЬ\n\tОрганизации.Ссылка\nИЗ\n\tСправочник.Организации КАК Организации</query>' + '\r\n'
       + '\t\t<field xsi:type="DataSetFieldField">' + '\r\n'
       + '\t\t\t<dataPath>Роль</dataPath>' + '\r\n'
       + '\t\t\t<field>Роль</field>' + '\r\n'
@@ -467,7 +476,7 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t<dcsset:presentation xsi:type="v8:LocalStringType">' + '\r\n'
       + '\t\t\t<v8:item>' + '\r\n'
       + '\t\t\t\t<v8:lang>ru</v8:lang>' + '\r\n'
-      + '\t\t\t\t<v8:content>Права доступа</v8:content>' + '\r\n'
+      + '\t\t\t\t<v8:content>ПраваДоступа</v8:content>' + '\r\n'
       + '\t\t\t</v8:item>' + '\r\n'
       + '\t\t</dcsset:presentation>' + '\r\n'
       + '\t\t<dcsset:settings xmlns:pal="http://v8.1c.ru/8.1/data/ui/colors/palette" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows">' + '\r\n'
@@ -483,7 +492,7 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t\t\t\t<dcscor:use>false</dcscor:use>' + '\r\n'
       + '\t\t\t\t\t<dcscor:parameter>ПодробныеСведенияОПравахДоступа</dcscor:parameter>' + '\r\n'
       + '\t\t\t\t\t<dcscor:value xsi:type="xs:boolean">false</dcscor:value>' + '\r\n'
-      + '\t\t\t\t\t<dcsset:userSettingID>b61802a2-20e1-457e-ad65-c61886a04ff8</dcsset:userSettingID>' + '\r\n'
+      + '\t\t\t\t\t<dcsset:userSettingID>7a4419ba-878e-4056-8b60-9ffd5a8cd15d</dcsset:userSettingID>' + '\r\n'
       + '\t\t\t\t</dcscor:item>' + '\r\n'
       + '\t\t\t</dcsset:dataParameters>' + '\r\n'
       + '\t\t</dcsset:settings>' + '\r\n'
@@ -534,14 +543,13 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t\t\t</v8:item>' + '\r\n'
       + '\t\t\t</title>' + '\r\n'
       + '\t\t\t<valueType>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ВнешниеПользователи</v8:Type>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ГруппыВнешнихПользователей</v8:Type>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ГруппыПользователей</v8:Type>' + '\r\n'
       + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Пользователи</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Контрагенты</v8:Type>' + '\r\n'
+      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Организации</v8:Type>' + '\r\n'
       + '\t\t\t</valueType>' + '\r\n'
       + '\t\t</field>' + '\r\n'
       + '\t\t<dataSource>ИсточникДанных1</dataSource>' + '\r\n'
-      + '\t\t<query>ВЫБРАТЬ НЕОПРЕДЕЛЕНО КАК Пользователь</query>' + '\r\n'
+      + '\t\t<query>ВЫБРАТЬ\n\tПользователи.Ссылка КАК Пользователь\nИЗ\n\tСправочник.Пользователи КАК Пользователи\n\nОБЪЕДИНИТЬ ВСЕ\n\nВЫБРАТЬ\n\tКонтрагенты.Ссылка\nИЗ\n\tСправочник.Контрагенты КАК Контрагенты\n\nОБЪЕДИНИТЬ ВСЕ\n\nВЫБРАТЬ\n\tОрганизации.Ссылка\nИЗ\n\tСправочник.Организации КАК Организации</query>' + '\r\n'
       + '\t\t<field xsi:type="DataSetFieldField">' + '\r\n'
       + '\t\t\t<dataPath>Роль</dataPath>' + '\r\n'
       + '\t\t\t<field>Роль</field>' + '\r\n'
@@ -573,7 +581,7 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t<dcsset:presentation xsi:type="v8:LocalStringType">' + '\r\n'
       + '\t\t\t<v8:item>' + '\r\n'
       + '\t\t\t\t<v8:lang>ru</v8:lang>' + '\r\n'
-      + '\t\t\t\t<v8:content>Права доступа</v8:content>' + '\r\n'
+      + '\t\t\t\t<v8:content>ПраваДоступа</v8:content>' + '\r\n'
       + '\t\t\t</v8:item>' + '\r\n'
       + '\t\t</dcsset:presentation>' + '\r\n'
       + '\t\t<dcsset:settings xmlns:pal="http://v8.1c.ru/8.1/data/ui/colors/palette" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows">' + '\r\n'
@@ -589,7 +597,7 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t\t\t\t<dcscor:use>false</dcscor:use>' + '\r\n'
       + '\t\t\t\t\t<dcscor:parameter>ПодробныеСведенияОПравахДоступа</dcscor:parameter>' + '\r\n'
       + '\t\t\t\t\t<dcscor:value xsi:type="xs:boolean">false</dcscor:value>' + '\r\n'
-      + '\t\t\t\t\t<dcsset:userSettingID>b61802a2-20e1-457e-ad65-c61886a04ff8</dcsset:userSettingID>' + '\r\n'
+      + '\t\t\t\t\t<dcsset:userSettingID>7a4419ba-878e-4056-8b60-9ffd5a8cd15d</dcsset:userSettingID>' + '\r\n'
       + '\t\t\t\t</dcscor:item>' + '\r\n'
       + '\t\t\t</dcsset:dataParameters>' + '\r\n'
       + '\t\t</dcsset:settings>' + '\r\n'
@@ -597,8 +605,9 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '</DataCompositionSchema>';
     assert.strictEqual(afterModifyField, expectedAfterModifyField);
 
-    // Шаг 3: add-parameter — новый параметр вставляется перед </DataCompositionSchema>,
-    // то есть ПОСЛЕ settingsVariant (insertBeforeClose на корень схемы).
+    // Шаг 3: add-parameter — новый параметр встаёт после существующих параметров, перед
+    // первым settingsVariant: порядок прямых детей корня схемы — xs:sequence, снятый с выгрузки
+    // платформы (iljyxa/v8vscedit#31). Остальной документ не переформатируется.
     const editAddParameter = service.edit({
       templatePath,
       operation: 'add-parameter',
@@ -608,21 +617,9 @@ suite('DataCompositionSchemaService — байт-golden характеризац
     assert.strictEqual(editAddParameter.warnings.length, 0);
 
     const afterAddParameter = fs.readFileSync(templatePath, 'utf-8');
-    assert.ok(afterAddParameter.endsWith(
-      '\t<parameter>' + '\r\n'
-      + '\t\t<name>ПериодАнализа</name>' + '\r\n'
-      + '\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
-      + '\t\t\t<v8:item><v8:lang>ru</v8:lang><v8:content>Период анализа</v8:content></v8:item>' + '\r\n'
-      + '\t\t</title>' + '\r\n'
-      + '\t\t<valueType>' + '\r\n'
-      + '\t\t\t<v8:Type>v8:StandardPeriod</v8:Type>' + '\r\n'
-      + '\t\t</valueType>' + '\r\n'
-      + '\t</parameter>' + '\r\n'
-      + '</DataCompositionSchema>'
-    ), 'новый параметр ПериодАнализа должен быть вставлен последним перед закрытием корня');
-    // Полный эталон — та же строка afterModifyField с точечной вставкой параметра
-    // перед закрывающим корневым тегом (insertBeforeClose не переформатирует остальной документ).
-    const expectedAfterAddParameter = expectedAfterModifyField.slice(0, -('</DataCompositionSchema>'.length))
+    const settingsVariantAt = expectedAfterModifyField.indexOf('\t<settingsVariant>');
+    assert.ok(settingsVariantAt > expectedAfterModifyField.indexOf('\t</parameter>'), 'в фикстуре параметр стоит до settingsVariant');
+    const expectedAfterAddParameter = expectedAfterModifyField.slice(0, settingsVariantAt)
       + '\t<parameter>' + '\r\n'
       + '\t\t<name>ПериодАнализа</name>' + '\r\n'
       + '\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
@@ -632,7 +629,7 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t\t<v8:Type>v8:StandardPeriod</v8:Type>' + '\r\n'
       + '\t\t</valueType>' + '\r\n'
       + '\t</parameter>' + '\r\n'
-      + '</DataCompositionSchema>';
+      + expectedAfterModifyField.slice(settingsVariantAt);
     assert.strictEqual(afterAddParameter, expectedAfterAddParameter);
 
     // Шаг 4: rename-parameter — переименовывает ТОЛЬКО <name> целевого <parameter>,
@@ -658,91 +655,12 @@ suite('DataCompositionSchemaService — байт-golden характеризац
     // затрагиваются только findDirectElementRanges(rootInner, 'parameter')).
     assert.ok(afterRename.includes('<dcscor:parameter>ПодробныеСведенияОПравахДоступа</dcscor:parameter>'));
 
-    // Шаг 5: reorder-parameters — переставляет местами блоки <parameter> целиком
-    // (порядок "ПериодАнализа, ПоказыватьПодробности"), остальной документ (включая
-    // settingsVariant между dataSet и параметрами) остаётся на прежнем месте.
-    const editReorder = service.edit({
-      templatePath,
-      operation: 'reorder-parameters',
-      value: 'ПериодАнализа, ПоказыватьПодробности',
-    });
-    assert.strictEqual(editReorder.warnings.length, 0);
-
-    const afterReorder = fs.readFileSync(templatePath, 'utf-8');
-    const expectedAfterReorder =
-      '﻿<?xml version="1.0" encoding="UTF-8"?>' + '\r\n'
-      + '<DataCompositionSchema xmlns="http://v8.1c.ru/8.1/data-composition-system/schema" xmlns:dcscom="http://v8.1c.ru/8.1/data-composition-system/common" xmlns:dcscor="http://v8.1c.ru/8.1/data-composition-system/core" xmlns:dcsset="http://v8.1c.ru/8.1/data-composition-system/settings" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:v8ui="http://v8.1c.ru/8.1/data/ui" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' + '\r\n'
-      + '\t<dataSource>' + '\r\n'
-      + '\t\t<name>ИсточникДанных1</name>' + '\r\n'
-      + '\t\t<dataSourceType>Local</dataSourceType>' + '\r\n'
-      + '\t</dataSource>' + '\r\n'
-      + '\t<dataSet xsi:type="DataSetQuery">' + '\r\n'
-      + '\t\t<name>НаборДанных1</name>' + '\r\n'
-      + '\t\t\t\t<field xsi:type="DataSetFieldField">' + '\r\n'
-      + '\t\t\t<dataPath>Пользователь</dataPath>' + '\r\n'
-      + '\t\t\t<field>Пользователь</field>' + '\r\n'
-      + '\t\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
-      + '\t\t\t\t<v8:item><v8:lang>ru</v8:lang><v8:content>Пользователь(ФИО)</v8:content></v8:item>' + '\r\n'
-      + '\t\t\t</title>' + '\r\n'
-      + '\t\t\t<valueType>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Пользователи</v8:Type>' + '\r\n'
-      + '\t\t\t</valueType>' + '\r\n'
-      + '\t\t</field>' + '\r\n'
-      + '\t\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
-      + '\t\t\t\t<v8:item>' + '\r\n'
-      + '\t\t\t\t\t<v8:lang>ru</v8:lang>' + '\r\n'
-      + '\t\t\t\t\t<v8:content>Пользователь</v8:content>' + '\r\n'
-      + '\t\t\t\t</v8:item>' + '\r\n'
-      + '\t\t\t</title>' + '\r\n'
-      + '\t\t\t<valueType>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ВнешниеПользователи</v8:Type>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ГруппыВнешнихПользователей</v8:Type>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.ГруппыПользователей</v8:Type>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Пользователи</v8:Type>' + '\r\n'
-      + '\t\t\t</valueType>' + '\r\n'
-      + '\t\t</field>' + '\r\n'
-      + '\t\t<dataSource>ИсточникДанных1</dataSource>' + '\r\n'
-      + '\t\t<query>ВЫБРАТЬ НЕОПРЕДЕЛЕНО КАК Пользователь</query>' + '\r\n'
-      + '\t\t<field xsi:type="DataSetFieldField">' + '\r\n'
-      + '\t\t\t<dataPath>Роль</dataPath>' + '\r\n'
-      + '\t\t\t<field>Роль</field>' + '\r\n'
-      + '\t\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
-      + '\t\t\t\t<v8:item><v8:lang>ru</v8:lang><v8:content>Роль</v8:content></v8:item>' + '\r\n'
-      + '\t\t\t</title>' + '\r\n'
-      + '\t\t\t<valueType>' + '\r\n'
-      + '\t\t\t\t<v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:CatalogRef.Роли</v8:Type>' + '\r\n'
-      + '\t\t\t</valueType>' + '\r\n'
-      + '\t\t</field>' + '\r\n'
-      + '</dataSet>' + '\r\n'
-      + '\t' + '\r\n'
-      + '\t<settingsVariant>' + '\r\n'
-      + '\t\t<dcsset:name>ПраваДоступа</dcsset:name>' + '\r\n'
-      + '\t\t<dcsset:presentation xsi:type="v8:LocalStringType">' + '\r\n'
-      + '\t\t\t<v8:item>' + '\r\n'
-      + '\t\t\t\t<v8:lang>ru</v8:lang>' + '\r\n'
-      + '\t\t\t\t<v8:content>Права доступа</v8:content>' + '\r\n'
-      + '\t\t\t</v8:item>' + '\r\n'
-      + '\t\t</dcsset:presentation>' + '\r\n'
-      + '\t\t<dcsset:settings xmlns:pal="http://v8.1c.ru/8.1/data/ui/colors/palette" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows">' + '\r\n'
-      + '\t\t\t<dcsset:filter>' + '\r\n'
-      + '\t\t\t\t<dcsset:item xsi:type="dcsset:FilterItemComparison">' + '\r\n'
-      + '\t\t\t\t\t<dcsset:left xsi:type="dcscor:Field">Пользователь</dcsset:left>' + '\r\n'
-      + '\t\t\t\t\t<dcsset:comparisonType>Equal</dcsset:comparisonType>' + '\r\n'
-      + '\t\t\t\t\t<dcsset:viewMode>Inaccessible</dcsset:viewMode>' + '\r\n'
-      + '\t\t\t\t</dcsset:item>' + '\r\n'
-      + '\t\t\t</dcsset:filter>' + '\r\n'
-      + '\t\t\t<dcsset:dataParameters>' + '\r\n'
-      + '\t\t\t\t<dcscor:item xsi:type="dcsset:SettingsParameterValue">' + '\r\n'
-      + '\t\t\t\t\t<dcscor:use>false</dcscor:use>' + '\r\n'
-      + '\t\t\t\t\t<dcscor:parameter>ПодробныеСведенияОПравахДоступа</dcscor:parameter>' + '\r\n'
-      + '\t\t\t\t\t<dcscor:value xsi:type="xs:boolean">false</dcscor:value>' + '\r\n'
-      + '\t\t\t\t\t<dcsset:userSettingID>b61802a2-20e1-457e-ad65-c61886a04ff8</dcsset:userSettingID>' + '\r\n'
-      + '\t\t\t\t</dcscor:item>' + '\r\n'
-      + '\t\t\t</dcsset:dataParameters>' + '\r\n'
-      + '\t\t</dcsset:settings>' + '\r\n'
-      + '\t</settingsVariant>' + '\r\n'
-      + '\t' + '\r\n'
-      + '<parameter>' + '\r\n'
+    // Шаг 5: reorder-parameters — переставляет блоки <parameter> на их собственных местах
+    // (iljyxa/v8vscedit#29): i-й по позиции параметр заменяется i-м в новом порядке. Исходный
+    // ПоказыватьПодробности и добавленный на шаге 3 ПериодАнализа стоят подряд до settingsVariant;
+    // после перестановки они меняются местами, разделители и остальной документ не меняются.
+    const periodBlock =
+      '<parameter>' + '\r\n'
       + '\t\t<name>ПериодАнализа</name>' + '\r\n'
       + '\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
       + '\t\t\t<v8:item><v8:lang>ru</v8:lang><v8:content>Период анализа</v8:content></v8:item>' + '\r\n'
@@ -750,8 +668,9 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t<valueType>' + '\r\n'
       + '\t\t\t<v8:Type>v8:StandardPeriod</v8:Type>' + '\r\n'
       + '\t\t</valueType>' + '\r\n'
-      + '\t</parameter>' + '\r\n'
-      + '<parameter>' + '\r\n'
+      + '\t</parameter>';
+    const showDetailsBlock =
+      '<parameter>' + '\r\n'
       + '\t\t<name>ПоказыватьПодробности</name>' + '\r\n'
       + '\t\t<title xsi:type="v8:LocalStringType">' + '\r\n'
       + '\t\t\t<v8:item>' + '\r\n'
@@ -765,8 +684,26 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       + '\t\t<value xsi:type="xs:boolean">false</value>' + '\r\n'
       + '\t\t<useRestriction>false</useRestriction>' + '\r\n'
       + '\t\t<use>Always</use>' + '\r\n'
-      + '\t</parameter>' + '\r\n'
-      + '</DataCompositionSchema>';
+      + '\t</parameter>';
+    const settingsVariantIndex = afterRename.indexOf('\t<settingsVariant>');
+    assert.ok(afterRename.indexOf(showDetailsBlock) < afterRename.indexOf(periodBlock), 'до перестановки ПоказыватьПодробности стоит первым');
+    assert.ok(afterRename.indexOf(periodBlock) < settingsVariantIndex, 'оба параметра стоят до settingsVariant');
+
+    const editReorder = service.edit({
+      templatePath,
+      operation: 'reorder-parameters',
+      value: 'ПериодАнализа, ПоказыватьПодробности',
+    });
+    assert.strictEqual(editReorder.warnings.length, 0);
+    assert.strictEqual(editReorder.changedFiles.length, 1);
+
+    const afterReorder = fs.readFileSync(templatePath, 'utf-8');
+    const expectedAfterReorder =
+      afterRename.slice(0, afterRename.indexOf(showDetailsBlock))
+      + periodBlock
+      + afterRename.slice(afterRename.indexOf(showDetailsBlock) + showDetailsBlock.length, afterRename.indexOf(periodBlock))
+      + showDetailsBlock
+      + afterRename.slice(afterRename.indexOf(periodBlock) + periodBlock.length);
     assert.strictEqual(afterReorder, expectedAfterReorder);
   });
 
@@ -788,7 +725,7 @@ suite('DataCompositionSchemaService — байт-golden характеризац
       'Варианты: 1',
       '',
       '--- Query: НаборДанных1 ---',
-      'ВЫБРАТЬ НЕОПРЕДЕЛЕНО КАК Пользователь',
+      'ВЫБРАТЬ\n\tПользователи.Ссылка КАК Пользователь\nИЗ\n\tСправочник.Пользователи КАК Пользователи\n\nОБЪЕДИНИТЬ ВСЕ\n\nВЫБРАТЬ\n\tКонтрагенты.Ссылка\nИЗ\n\tСправочник.Контрагенты КАК Контрагенты\n\nОБЪЕДИНИТЬ ВСЕ\n\nВЫБРАТЬ\n\tОрганизации.Ссылка\nИЗ\n\tСправочник.Организации КАК Организации',
       '',
       '--- Fields ---',
       '  НаборДанных1: Пользователь',

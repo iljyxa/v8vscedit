@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { escapeXmlText, unescapeXml } from '../XmlUtils';
+import { escapeXmlText, findDirectElementRanges, findNestingAwareElementRange, unescapeXml } from '../XmlUtils';
 
 export function resolveTemplateContentPath(inputPath: string): string {
   let target = path.resolve(inputPath);
@@ -110,6 +110,47 @@ export function replaceFirstMatchingBlock(xml: string, tagName: string, predicat
 
 export function insertBeforeClose(xml: string, tagName: string, fragment: string): string {
   return xml.replace(new RegExp(`\\s*</${tagName}>`), () => `\n${fragment}\n</${tagName}>`);
+}
+
+/**
+ * Порядок прямых детей корня схемы СКД (xs:sequence), снятый с выгрузки платформы 8.3.27 и
+ * 8.5.1: элементы, записанные не на своё место, платформа принимает, но при выгрузке
+ * переставляет — вставка в конец корня (после settingsVariant) давала лишний diff при первой
+ * же выгрузке из конфигуратора.
+ */
+export const DCS_ROOT_ELEMENT_ORDER = [
+  'dataSource',
+  'dataSet',
+  'dataSetLink',
+  'calculatedField',
+  'totalField',
+  'parameter',
+  'template',
+  'groupTemplate',
+  'settingsVariant',
+] as const;
+
+export type DcsRootElement = typeof DCS_ROOT_ELEMENT_ORDER[number];
+
+/**
+ * Вставляет элемент корня схемы перед первым прямым ребёнком, который по
+ * {@link DCS_ROOT_ELEMENT_ORDER} идёт позже, — то есть после последнего элемента своего или
+ * предшествующего вида. Отступ перед вытесняемым элементом переносится на него самого, а
+ * `fragment` (собранный builder'ом с ведущим `\t`) встаёт на место этого отступа. Нет
+ * последующих элементов — вставка перед закрывающим тегом корня.
+ */
+export function insertIntoSchemaRoot(xml: string, tagName: DcsRootElement, fragment: string): string {
+  const rootRange = findNestingAwareElementRange(xml, 'DataCompositionSchema');
+  const inner = rootRange ? xml.slice(rootRange.openEnd, rootRange.closeStart) : '';
+  const following = DCS_ROOT_ELEMENT_ORDER.slice(DCS_ROOT_ELEMENT_ORDER.indexOf(tagName) + 1);
+  const starts = following.flatMap((tag) => findDirectElementRanges(inner, tag).slice(0, 1).map((range) => range.start));
+  if (!rootRange || starts.length === 0) {
+    return insertBeforeClose(xml, 'DataCompositionSchema', fragment);
+  }
+  const at = rootRange.openEnd + Math.min(...starts);
+  const before = xml.slice(0, at);
+  const indent = before.slice(before.replace(/[ \t]+$/, '').length);
+  return `${before}${fragment.trimStart()}\n${indent}${xml.slice(at)}`;
 }
 
 export function replaceOrInsert(xml: string, tagName: string, inner: string, parentTag: string): string {

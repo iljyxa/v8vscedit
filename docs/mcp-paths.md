@@ -584,7 +584,7 @@ MCP-инструменты принимают только канон. Люба�
 | `v8vscedit_cfe_borrow` | Заимствует объект, форму или дочерний элемент из CF в CFE. | — (FS-аргументы) |
 | `v8vscedit_cfe_patch_method` | BSL-перехватчик &Перед/&После/&ИзменениеИКонтроль в CFE. | `Справочники.X.МодульОбъекта`, … |
 | `v8vscedit_cfe_diff` | Состав расширения и проверка переноса #Вставка. | — (`extensionPath` FS) |
-| `v8vscedit_execute_command` | Allowlist команд расширения: `refresh`, `importConfigurations`, `updateChangedConfigurations`. | — |
+| `v8vscedit_execute_command` | Allowlist команд расширения: `refresh`, `importConfigurations`, `updateChangedConfigurations`. Ответ — явный исход `outcome` (`done`/`no-changes`/`no-targets`/`cancelled`/`busy`/`failed`); при `busy` — `heldBy` с заголовком держащей операции. | — |
 
 Несколько инструментов (`create_epf`/`create_erf`/`validate_external_object`/
 `epf_bsp_*`/`cfe_borrow`/`cfe_diff`) работают с EPF/ERF/CFE по обычному
