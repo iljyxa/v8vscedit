@@ -19,6 +19,7 @@ import { getNodeDescriptor } from './nodes/index';
 import { getIconUris } from './presentation/icon';
 import { MetadataNode } from './TreeNode';
 import { GitMetadataDecorationProvider } from './decorations/GitMetadataDecorationProvider';
+import { SUPPORT_CHANGES_FORBIDDEN_SUFFIX, SUPPORT_SUFFIX_RE } from '../support/supportLockReason';
 
 export class MetadataTreeProvider implements vscode.TreeDataProvider<MetadataNode>, vscode.Disposable {
   private readonly onDidChangeTreeDataEmitter = new vscode.EventEmitter<MetadataNode | undefined | null>();
@@ -241,8 +242,14 @@ export class MetadataTreeProvider implements vscode.TreeDataProvider<MetadataNod
     }
 
     const mode = this.supportService.getSupportMode(element.xmlPath);
-    const baseContextValue = (element.contextValue ?? '').replace(/-support\d$/, '');
-    element.contextValue = `${baseContextValue}-support${String(mode)}`;
+    // `?? ''` — только ради типа `string | undefined` у `vscode.TreeItem.contextValue`:
+    // `MetadataNode` проставляет contextValue строкой ещё в конструкторе.
+    /* c8 ignore next */
+    const baseContextValue = (element.contextValue ?? '').replace(SUPPORT_SUFFIX_RE, '');
+    const reasonSuffix = this.supportService.hasChangesForbidden(element.xmlPath)
+      ? SUPPORT_CHANGES_FORBIDDEN_SUFFIX
+      : '';
+    element.contextValue = `${baseContextValue}-support${String(mode)}${reasonSuffix}`;
   }
 
   /** Привязывает узел к реальному файлу или каталогу, чтобы работали штатные git-декорации VS Code. */

@@ -129,6 +129,9 @@ function readonlyText(): string {
   if (props.state.readonlyReason === 'support') {
     return 'Только чтение: объект на поддержке';
   }
+  if (props.state.readonlyReason === 'supportChangesForbidden') {
+    return 'Только чтение: изменения конфигурации запрещены в настройках поддержки';
+  }
   if (props.state.readonlyReason === 'repository') {
     return 'Только чтение: объект не захвачен в хранилище';
   }

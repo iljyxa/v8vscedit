@@ -187,11 +187,18 @@ export class SupportInfoService {
   }
 
   hasConfigData(filePath: string): boolean {
-    const normFilePath = normPath(filePath);
-    for (const data of this.cache.values()) {
-      if (normFilePath.startsWith(data.normalizedRoot + '/')) { return true; }
-    }
-    return false;
+    return this.findConfigData(filePath) !== undefined;
+  }
+
+  /**
+   * Установлен ли флаг «изменения запрещены» в `.bin` конфигурации, которой
+   * принадлежит файл. Это ПРИЧИНА блокировки, а не режим: запрет правки решает
+   * {@link getSupportMode} (он уже даёт `Locked`), а этот предикат нужен UI,
+   * чтобы отличить закрытую настройками поддержки конфигурацию от объекта
+   * поставщика, — у них разные способы снять запрет.
+   */
+  hasChangesForbidden(filePath: string): boolean {
+    return this.findConfigData(filePath)?.changesForbidden === true;
   }
 
   isLocked(filePath: string): boolean {
@@ -217,6 +224,14 @@ export class SupportInfoService {
   }
 
   // ── private ─────────────────────────────────────────────────────────────
+
+  private findConfigData(filePath: string): ConfigSupportData | undefined {
+    const normFilePath = normPath(filePath);
+    for (const data of this.cache.values()) {
+      if (normFilePath.startsWith(data.normalizedRoot + '/')) { return data; }
+    }
+    return undefined;
+  }
 
   private clearPathUuidCacheForRoot(normalizedRoot: string): void {
     const prefix = normalizedRoot + '/';
