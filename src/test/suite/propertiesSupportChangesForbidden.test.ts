@@ -207,7 +207,7 @@ suite('PropertiesViewController.getViewState — readonlyReason при issue #22
     }
   });
 
-  test('normal: Контрагенты (a=2, снят с поддержки → None) → readonly=false, readonlyReason не задан', () => {
+  test('normal: Контрагенты (a=2, снят с поддержки → Removed, issue #21) → readonly=false, readonlyReason не задан', () => {
     const fixture = buildSupportFixtureRoot('normal');
     try {
       const supportService = new SupportInfoService(new TestLogger());

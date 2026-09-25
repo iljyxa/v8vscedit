@@ -13,10 +13,11 @@
  * `parentConfigurationsParser.test.ts`): в нём справочник
  * `АвансовыйОтчетПрисоединенныеФайлы` имеет код `a=0` (не редактируется →
  * `SupportMode.Locked`), а `Контрагенты` — код `a=2` (снят с поддержки →
- * `SupportMode.None`, никогда не `Locked`, несмотря на числовое совпадение со
- * старой — неверной — трактовкой кода 2 как запрета). Для сценария «изменения
- * запрещены» у нового (не входящего в поставку) корня используется другой
- * реальный файл — `example/support/changes-forbidden/ParentConfigurations.bin`.
+ * `SupportMode.Removed`, issue #21, никогда не `Locked`, несмотря на числовое
+ * совпадение со старой — неверной — трактовкой кода 2 как запрета). Для
+ * сценария «изменения запрещены» у нового (не входящего в поставку) корня
+ * используется другой реальный файл —
+ * `example/support/changes-forbidden/ParentConfigurations.bin`.
  */
 import * as assert from 'assert';
 import * as fs from 'fs';
@@ -279,9 +280,9 @@ suite('MetadataMutationService — проверка SupportMode.Locked при ad
   test('РЕГРЕССИЯ: объект снятый с поддержки (код a=2 в реальном .bin) добавляет реквизит успешно', async () => {
     // Старая (неверная) трактовка использовала «сырой» код `a` файла напрямую
     // как SupportMode — код 2 совпадал с числовым значением SupportMode.Locked
-    // и потому «снятый с поддержки» объект (a=2, реально ПОЛНОСТЬЮ свободен от
-    // ограничений — SupportMode.None) ошибочно блокировался. Контрагенты в
-    // реальной поставке имеют именно код a=2.
+    // и потому «снятый с поддержки» объект (a=2, реально доступен для
+    // редактирования — SupportMode.Removed, issue #21) ошибочно блокировался.
+    // Контрагенты в реальной поставке имеют именно код a=2.
     writeConfigurationXml('66666666-6666-6666-6666-666666666666');
     const { xmlPath: kontragentyXmlPath } = copyRealObject(KONTRAGENTY_XML, 'Catalogs', 'Контрагенты.xml');
     copyRealParentConfigurationsBin();
@@ -290,8 +291,8 @@ suite('MetadataMutationService — проверка SupportMode.Locked при ad
     supportService.loadConfig(configRoot);
     assert.strictEqual(
       supportService.getSupportMode(kontragentyXmlPath),
-      SupportMode.None,
-      'Контрагенты (a=2 в реальном .bin) должны давать SupportMode.None, а не Locked'
+      SupportMode.Removed,
+      'Контрагенты (a=2 в реальном .bin) должны давать SupportMode.Removed, а не Locked'
     );
 
     const repositoryService = new RepositoryService(tempDir, createFakeProjectSecretStorage(tempDir));

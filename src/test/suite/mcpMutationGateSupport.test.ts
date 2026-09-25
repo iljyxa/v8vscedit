@@ -112,7 +112,7 @@ suite('McpMutationGate.assertMetadataEditable — issue #22 (флаг «изме
     }
   });
 
-  test('normal: Контрагенты (a=2, снят с поддержки → None) → не бросает', () => {
+  test('normal: Контрагенты (a=2, снят с поддержки → Removed, issue #21) → не бросает', () => {
     const fixture = buildSupportFixtureRoot('normal');
     try {
       const supportService = new SupportInfoService(new TestLogger());

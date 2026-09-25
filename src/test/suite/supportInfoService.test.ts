@@ -19,6 +19,7 @@ import {
   MALFORMED_BIN_CASES,
   buildSupportFixtureRoot,
   firstAttributeUuid,
+  readRootUuid,
 } from './support/realConfigFixtures';
 
 class TestLogger implements Logger {
@@ -57,10 +58,11 @@ suite('SupportInfoService', () => {
  * Реальная выгрузка `example/2.20` и `example/2.21` — одна и та же поставка
  * (`example/tools/support-rules.json`): Configuration, Document.ПриходТовара,
  * AccumulationRegister.ТоварыНаСкладах — editable (код `a`=1); Catalog.Контрагенты
- * — снят с поддержки (код `a`=2 → SupportMode.None); всё остальное — locked
- * (код `a`=0), включая последнюю запись файла (IntegrationServices/
- * СервисИнтеграции1) — регрессия «последней записи», которую старая реализация
- * не находила вовсе (искала совпадение до конца файла без учёта хвоста).
+ * — снят с поддержки (код `a`=2 → SupportMode.Removed, issue #21); всё
+ * остальное — locked (код `a`=0), включая последнюю запись файла
+ * (IntegrationServices/СервисИнтеграции1) — регрессия «последней записи»,
+ * которую старая реализация не находила вовсе (искала совпадение до конца
+ * файла без учёта хвоста).
  */
 suite('SupportInfoService — реальная фикстура (228 записей одной поставки)', () => {
   const versions: ('2.20' | '2.21')[] = ['2.20', '2.21'];
@@ -91,9 +93,9 @@ suite('SupportInfoService — реальная фикстура (228 запис�
         });
       }
 
-      test('Catalogs/Контрагенты.xml → None (снят с поддержки), isLocked=false', () => {
+      test('Catalogs/Контрагенты.xml → Removed (снят с поддержки), isLocked=false', () => {
         const xmlPath = path.join(configRoot, 'Catalogs', 'Контрагенты.xml');
-        assert.strictEqual(service.getSupportMode(xmlPath), SupportMode.None);
+        assert.strictEqual(service.getSupportMode(xmlPath), SupportMode.Removed);
         assert.strictEqual(service.isLocked(xmlPath), false);
       });
 
@@ -125,16 +127,22 @@ suite('SupportInfoService — реальная фикстура (228 запис�
         assert.strictEqual(service.getSupportModeByUuid(documentXmlPath, randomUuid), SupportMode.None);
       });
 
-      test('BSL-модуль владельца (Catalogs/Контрагенты/Ext/ObjectModule.bsl, владелец a=2) → None', () => {
-        // Контрагенты снят с поддержки (код a=2 в реальном .bin) — модуль
-        // объекта резолвится к владельцу (у него нет собственного XML) и
-        // должен унаследовать None, а не остаться заблокированным по старой
-        // (неверной) трактовке кода 2 как Locked.
-        const bslPath = path.join(configRoot, 'Catalogs', 'Контрагенты', 'Ext', 'ObjectModule.bsl');
-        assert.strictEqual(service.getSupportMode(bslPath), SupportMode.None);
+      test('getSupportModeByUuid для собственного uuid Контрагентов (a=2 в реальном .bin) → Removed (issue #21)', () => {
+        const kontragentyXmlPath = path.join(configRoot, 'Catalogs', 'Контрагенты.xml');
+        const uuid = readRootUuid(kontragentyXmlPath);
+        assert.strictEqual(service.getSupportModeByUuid(kontragentyXmlPath, uuid), SupportMode.Removed);
       });
 
-      test('BSL-модуль формы с собственным XML (Catalogs/Контрагенты/Forms/ФормаЭлемента, a=2) → None', () => {
+      test('BSL-модуль владельца (Catalogs/Контрагенты/Ext/ObjectModule.bsl, владелец a=2) → Removed', () => {
+        // Контрагенты снят с поддержки (код a=2 в реальном .bin) — модуль
+        // объекта резолвится к владельцу (у него нет собственного XML) и
+        // должен унаследовать Removed (issue #21), а не остаться
+        // заблокированным по старой (неверной) трактовке кода 2 как Locked.
+        const bslPath = path.join(configRoot, 'Catalogs', 'Контрагенты', 'Ext', 'ObjectModule.bsl');
+        assert.strictEqual(service.getSupportMode(bslPath), SupportMode.Removed);
+      });
+
+      test('BSL-модуль формы с собственным XML (Catalogs/Контрагенты/Forms/ФормаЭлемента, a=2) → Removed', () => {
         // У формы есть собственный Forms/ФормаЭлемента.xml с отдельным uuid и
         // отдельным кодом (a=2) в .bin — режим модуля формы берётся из него,
         // а не из владельца-справочника.
@@ -148,7 +156,7 @@ suite('SupportInfoService — реальная фикстура (228 запис�
           'Form',
           'Module.bsl'
         );
-        assert.strictEqual(service.getSupportMode(bslPath), SupportMode.None);
+        assert.strictEqual(service.getSupportMode(bslPath), SupportMode.Removed);
       });
 
       test('BSL-модуль заведомо заблокированного объекта (HTTPServices/Chatbot/Ext/Module.bsl, a=0) → Locked', () => {
@@ -255,14 +263,14 @@ suite('SupportInfoService — изменения запрещены (реаль�
  * синтезированными через `support/flatMetadataFixtures.ts`; `example/` не
  * используется. Параметр — код файла `a` (см. `SUPPORT_BIN_CODE`), а не
  * домен-режим: `SupportInfoService` транслирует 0→Locked, 1→Editable,
- * 2→None.
+ * 2→Removed (issue #21).
  */
 suite('SupportInfoService — плоская и вложенная раскладка XML объекта', () => {
   const layouts: ObjectXmlLayout[] = ['flat', 'deep'];
   const codeCases: { code: number; codeLabel: string; expectedMode: SupportMode; modeLabel: string }[] = [
     { code: SUPPORT_BIN_CODE.locked, codeLabel: 'a=0 (locked)', expectedMode: SupportMode.Locked, modeLabel: 'Locked' },
     { code: SUPPORT_BIN_CODE.editable, codeLabel: 'a=1 (editable)', expectedMode: SupportMode.Editable, modeLabel: 'Editable' },
-    { code: SUPPORT_BIN_CODE.removed, codeLabel: 'a=2 (removed)', expectedMode: SupportMode.None, modeLabel: 'None' },
+    { code: SUPPORT_BIN_CODE.removed, codeLabel: 'a=2 (removed)', expectedMode: SupportMode.Removed, modeLabel: 'Removed' },
   ];
 
   for (const layout of layouts) {
@@ -677,7 +685,7 @@ suite('SupportInfoService — рассинхронизация заявленн�
 /**
  * Несколько поставщиков — одна и та же запись объекта встречается в `.bin`
  * несколько раз (по разу на поставщика) с разными кодами. Итоговый домен-режим
- * — самый строгий среди них: Locked > Editable > None.
+ * — самый строгий среди них: Locked > Editable > Removed (issue #21).
  */
 suite('SupportInfoService — несколько поставщиков (дубли uuid)', () => {
   test('коды (editable, затем locked) → итог Locked, лог «поставщиков: 2»', () => {
@@ -720,6 +728,113 @@ suite('SupportInfoService — несколько поставщиков (дуб�
       assert.strictEqual(service.getSupportMode(xmlPath), SupportMode.Editable);
     });
   });
+});
+
+/**
+ * Issue #21: полная матрица строгости для трёх доменных режимов, которые
+ * реально встречаются в `uuidToMode` (Locked/Editable/Removed — `None` туда
+ * не попадает, это лишь дефолт при отсутствии записи вовсе). Порядок записей
+ * в `.bin` не должен влиять на результат — проверяются все 9 упорядоченных
+ * пар кодов, а не только два показательных случая выше.
+ */
+suite('SupportInfoService — строгость режима у нескольких поставщиков, все пары (issue #21)', () => {
+  // Строгость контракта: Locked > Editable > Removed (> None формально, но
+  // None никогда не приходит из BIN_CODE_TO_MODE — только из отсутствия записи).
+  // Ранги заданы в тесте независимо от MODE_STRICTNESS реализации, иначе тест
+  // сверял бы таблицу саму с собой.
+  const STRICTNESS_BY_LABEL: Readonly<Record<'Locked' | 'Editable' | 'Removed', number>> = {
+    Locked: 3,
+    Editable: 2,
+    Removed: 1,
+  };
+  const codes: readonly { code: number; label: 'Locked' | 'Editable' | 'Removed'; mode: SupportMode }[] = [
+    { code: SUPPORT_BIN_CODE.locked, label: 'Locked', mode: SupportMode.Locked },
+    { code: SUPPORT_BIN_CODE.editable, label: 'Editable', mode: SupportMode.Editable },
+    { code: SUPPORT_BIN_CODE.removed, label: 'Removed', mode: SupportMode.Removed },
+  ];
+
+  for (const first of codes) {
+    for (const second of codes) {
+      const firstWins = STRICTNESS_BY_LABEL[first.label] >= STRICTNESS_BY_LABEL[second.label];
+      const expectedLabel = firstWins ? first.label : second.label;
+
+      test(`коды (${first.label}, затем ${second.label}) → итог ${expectedLabel}, не зависит от порядка записей`, () => {
+        withConfigRoot((configRoot) => {
+          const configUuid = fixtureUuid(`strictness-${first.label}-${second.label}-config`);
+          const objectUuid = fixtureUuid(`strictness-${first.label}-${second.label}-object`);
+          writeConfigurationXml(configRoot, configUuid);
+          const xmlPath = writeObjectXml(configRoot, 'Catalogs', 'Об1', 'Catalog', objectUuid, 'flat');
+          writeParentConfigurationsBin(configRoot, new Map([[objectUuid, first.code]]), {
+            vendorCount: 2,
+            extraRecords: [[second.code, objectUuid]],
+          });
+
+          const service = new SupportInfoService(new TestLogger());
+          service.loadConfig(configRoot);
+
+          const expected = firstWins ? first.mode : second.mode;
+          assert.strictEqual(service.getSupportMode(xmlPath), expected);
+        });
+      });
+    }
+  }
+});
+
+/**
+ * Issue #21: объект, uuid которого заведомо отсутствует в реальной поставке
+ * (`unlistedCatalogXmlPath` — синтетический, см. JSDoc в `realConfigFixtures.ts`),
+ * остаётся `SupportMode.None` («не на поддержке» в буквальном смысле) — это
+ * НЕ то же самое, что «снят с поддержки» (код `a=2`, теперь `Removed`).
+ */
+suite('SupportInfoService — объект вне поставки (реальный корень normal, issue #21)', () => {
+  test('unlistedCatalogXmlPath → None, isLocked=false', () => {
+    const fixture = buildSupportFixtureRoot('normal');
+    try {
+      const service = new SupportInfoService(new TestLogger());
+      service.loadConfig(fixture.configRoot);
+
+      assert.strictEqual(service.getSupportMode(fixture.unlistedCatalogXmlPath), SupportMode.None);
+      assert.strictEqual(service.isLocked(fixture.unlistedCatalogXmlPath), false);
+    } finally {
+      fixture.dispose();
+    }
+  });
+});
+
+/**
+ * Issue #21: `isLocked` — производная от `getSupportMode`, а не отдельная
+ * трактовка кода. Проверяется на реальных объектах трёх разных кодов (плюс
+ * корень конфигурации) в обоих вариантах фикстуры: при запрете изменений
+ * ЛЮБОЙ объект обязан быть `Locked`, а значит и `isLocked=true`.
+ */
+suite('SupportInfoService — isLocked согласован с getSupportMode (реальная фикстура, issue #21)', () => {
+  const variants: readonly ('normal' | 'forbidden')[] = ['normal', 'forbidden'];
+  const objectsOf = (fixture: ReturnType<typeof buildSupportFixtureRoot>): readonly { label: string; xmlPath: string }[] => [
+    { label: 'Configuration.xml', xmlPath: fixture.configurationXmlPath },
+    { label: 'Контрагенты (a=2)', xmlPath: fixture.kontragentyXmlPath },
+    { label: 'АвансовыйОтчетПрисоединенныеФайлы (a=0)', xmlPath: fixture.avansovyOtchetXmlPath },
+    { label: 'ПриходТовара (a=1)', xmlPath: fixture.prihodTovaraXmlPath },
+  ];
+
+  for (const variant of variants) {
+    test(`${variant}: isLocked(x) === (getSupportMode(x) === Locked) для всех четырёх объектов`, () => {
+      const fixture = buildSupportFixtureRoot(variant);
+      try {
+        const service = new SupportInfoService(new TestLogger());
+        service.loadConfig(fixture.configRoot);
+
+        for (const { label, xmlPath } of objectsOf(fixture)) {
+          const mode = service.getSupportMode(xmlPath);
+          assert.strictEqual(service.isLocked(xmlPath), mode === SupportMode.Locked, label);
+          if (variant === 'forbidden') {
+            assert.strictEqual(mode, SupportMode.Locked, `${label}: при запрете изменений режим всегда Locked`);
+          }
+        }
+      } finally {
+        fixture.dispose();
+      }
+    });
+  }
 });
 
 suite('SupportInfoService — BOM реального .bin', () => {

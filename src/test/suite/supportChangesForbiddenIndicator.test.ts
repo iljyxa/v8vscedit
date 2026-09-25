@@ -112,7 +112,7 @@ interface ObjectCase {
 }
 
 const OBJECT_CASES: readonly ObjectCase[] = [
-  { label: 'Контрагенты (a=2 → None вне запрета)', nodeKind: 'catalog', xmlPathOf: (f) => f.kontragentyXmlPath, normalSuffix: '-support0' },
+  { label: 'Контрагенты (a=2 → Removed вне запрета, issue #21)', nodeKind: 'catalog', xmlPathOf: (f) => f.kontragentyXmlPath, normalSuffix: '-support3' },
   { label: 'АвансовыйОтчетПрисоединенныеФайлы (a=0 → Locked вне запрета)', nodeKind: 'catalog', xmlPathOf: (f) => f.avansovyOtchetXmlPath, normalSuffix: '-support2' },
   { label: 'ПриходТовара (a=1 → Editable вне запрета)', nodeKind: 'document', xmlPathOf: (f) => f.prihodTovaraXmlPath, normalSuffix: '-support1' },
 ];
@@ -259,7 +259,7 @@ suite('MetadataTreeProvider — applySupportDecoration идемпотентна 
     }
   });
 
-  test('переход forbidden → normal на одном и том же узле: маркер исчезает, Контрагенты получает -support0', () => {
+  test('переход forbidden → normal на одном и том же узле: маркер исчезает, Контрагенты получает -support3 (Removed, issue #21)', () => {
     const fixture = buildSupportFixtureRoot('forbidden');
     const { cacheRoot, dispose } = makeCacheRoot();
     try {
@@ -285,8 +285,8 @@ suite('MetadataTreeProvider — applySupportDecoration идемпотентна 
         assert.strictEqual(countForbiddenMarkers(normalContextValue), 0, 'маркер запрета изменений должен исчезнуть');
         assert.strictEqual(countSupportModeSuffixes(normalContextValue), 1);
         assert.ok(
-          (normalContextValue ?? '').includes('-support0'),
-          `Контрагенты (a=2) вне запрета — SupportMode.None: ${String(normalContextValue)}`
+          (normalContextValue ?? '').includes('-support3'),
+          `Контрагенты (a=2) вне запрета — SupportMode.Removed (issue #21): ${String(normalContextValue)}`
         );
       } finally {
         treeProvider.dispose();
