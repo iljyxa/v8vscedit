@@ -350,7 +350,10 @@ suite('AgentOperationService — dumpToDirectory (issue #1)', () => {
 
       const listFileMatch = /--list-file=("[^"]*"|\S+)/.exec(dumpCommand);
       assert.ok(listFileMatch, 'Аргумент --list-file должен присутствовать в команде.');
-      const listFilePath = listFileMatch[1].replace(/^"|"$/g, '');
+      // Пути в командах агента задаются относительно его файлового корня
+      // `<projectRoot>/.v8vscedit/agent/0` (AgentWorkspaceService.toAgentPath) —
+      // абсолютный путь сломал бы SSH-режим агента.
+      const listFilePath = path.join(tempRoot, '.v8vscedit', 'agent', '0', listFileMatch[1].replace(/^"|"$/g, ''));
       assert.ok(fs.existsSync(listFilePath), `Файл списка объектов должен существовать: ${listFilePath}`);
       const listContent = fs.readFileSync(listFilePath, 'utf-8');
       fullNames.forEach((fullName) => assert.ok(listContent.includes(fullName), `Список должен содержать "${fullName}".`));

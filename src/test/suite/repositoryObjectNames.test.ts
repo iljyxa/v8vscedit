@@ -43,7 +43,7 @@ suite('RepositoryObjectNames — таблица ONE_C_TYPE_NAMES: round-trip par
       assert.deepStrictEqual(parseRepositoryFullName(`${ru}.Тест`), { kind, name: 'Тест' });
     });
 
-    test(`"${ru}.Тест" → toChildObjectRef даёт "${String(META_TYPES[kind].englishKind ?? kind)}.Тест"`, () => {
+    test(`"${ru}.Тест" → toChildObjectRef даёт "${META_TYPES[kind].englishKind ?? kind}.Тест"`, () => {
       const expectedEnglishKind = META_TYPES[kind].englishKind ?? kind;
       assert.strictEqual(toChildObjectRef(`${ru}.Тест`), `${expectedEnglishKind}.Тест`);
     });

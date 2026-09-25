@@ -40,8 +40,8 @@ suite('RepositoryObjectScope — resolveObjectScope', () => {
 
   test('реальный объект (Контрагенты, плоская раскладка) — xmlRel вне dirRel, дочерние файлы под dirRel', () => {
     const scope = resolveObjectScope(EXAMPLE_CF, 'Справочник.Контрагенты', cfTarget);
-    assert.ok(scope && scope.kind === 'object');
-    const objectScope = scope as Extract<ObjectScope, { kind: 'object' }>;
+    assert.ok(scope?.kind === 'object');
+    const objectScope = scope;
     assert.strictEqual(objectScope.fullName, 'Справочник.Контрагенты');
     assert.strictEqual(posix(objectScope.xmlRel), 'Catalogs/Контрагенты.xml');
 
@@ -56,7 +56,7 @@ suite('RepositoryObjectScope — resolveObjectScope', () => {
 
   test('реальный объект с Ext (Валюты) — файлы Ext/Help учитываются', () => {
     const scope = resolveObjectScope(EXAMPLE_CF, 'Справочник.Валюты', cfTarget);
-    assert.ok(scope && scope.kind === 'object');
+    assert.ok(scope?.kind === 'object');
     const files = collectScopeFiles(EXAMPLE_CF, scope).map(posix);
     assert.ok(files.includes('Catalogs/Валюты.xml'));
     assert.ok(files.includes('Catalogs/Валюты/Ext/Help.xml'));
@@ -71,12 +71,13 @@ suite('RepositoryObjectScope — resolveObjectScope', () => {
       const objectUuid = fixtureUuid('scope-deep-object');
       writeConfigurationXml(tempDir, configUuid);
       writeObjectXml(tempDir, 'Catalogs', 'Глубокий', 'Catalog', objectUuid, 'deep');
+      fs.mkdirSync(path.join(tempDir, 'Catalogs', 'Глубокий', 'Ext'), { recursive: true });
       fs.writeFileSync(path.join(tempDir, 'Catalogs', 'Глубокий', 'Ext', 'ObjectModule.bsl'), 'Процедура X() КонецПроцедуры', 'utf-8');
 
       const target: RepositoryTarget = { configRoot: tempDir, configKind: 'cf', displayName: 'Тест' };
       const scope = resolveObjectScope(tempDir, 'Справочник.Глубокий', target);
-      assert.ok(scope && scope.kind === 'object');
-      const objectScope = scope as Extract<ObjectScope, { kind: 'object' }>;
+      assert.ok(scope?.kind === 'object');
+      const objectScope = scope;
       assert.strictEqual(posix(objectScope.xmlRel), 'Catalogs/Глубокий/Глубокий.xml');
 
       const files = collectScopeFiles(tempDir, scope).map(posix);
@@ -99,7 +100,7 @@ suite('RepositoryObjectScope — resolveObjectScope', () => {
 
       const target: RepositoryTarget = { configRoot: tempDir, configKind: 'cf', displayName: 'Тест' };
       const scope = resolveObjectScope(tempDir, 'Справочник.ПростойСправочник', target);
-      assert.ok(scope && scope.kind === 'object');
+      assert.ok(scope?.kind === 'object');
       const files = collectScopeFiles(tempDir, scope).map(posix);
       assert.deepStrictEqual(files, ['Catalogs/ПростойСправочник.xml']);
     } finally {
@@ -129,8 +130,8 @@ suite('RepositoryObjectScope — resolveObjectScope', () => {
 
       const target: RepositoryTarget = { configRoot: tempDir, configKind: 'cf', displayName: 'Тест' };
       const scope = resolveObjectScope(tempDir, 'Подсистема.Родитель', target);
-      assert.ok(scope && scope.kind === 'object');
-      const objectScope = scope as Extract<ObjectScope, { kind: 'object' }>;
+      assert.ok(scope?.kind === 'object');
+      const objectScope = scope;
       assert.ok(objectScope.excludeDirRels.length > 0, 'excludeDirRels должен содержать вложенную ветку Subsystems/**.');
 
       assert.strictEqual(isPathInScope('Subsystems/Родитель.xml', scope), true);
@@ -190,16 +191,16 @@ suite('RepositoryObjectScope — mapDumpPathToProject', () => {
 
       const flatScope = resolveObjectScope(flatDir, 'Справочник.Объект', flatTarget);
       const deepScope = resolveObjectScope(deepDir, 'Справочник.Объект', deepTarget);
-      assert.ok(flatScope && flatScope.kind === 'object');
-      assert.ok(deepScope && deepScope.kind === 'object');
+      assert.ok(flatScope?.kind === 'object');
+      assert.ok(deepScope?.kind === 'object');
 
       // dump — плоский, project — глубокий: XML должен ремапиться на глубокий путь project'а.
-      const mappedXml = mapDumpPathToProject((flatScope as Extract<ObjectScope, { kind: 'object' }>).xmlRel, flatScope, 'deep');
-      assert.strictEqual(posix(mappedXml), posix((deepScope as Extract<ObjectScope, { kind: 'object' }>).xmlRel));
+      const mappedXml = mapDumpPathToProject((flatScope).xmlRel, flatScope, 'deep');
+      assert.strictEqual(posix(mappedXml), posix((deepScope).xmlRel));
 
       // dump и project имеют одинаковую раскладку — путь не меняется.
-      const unchangedXml = mapDumpPathToProject((flatScope as Extract<ObjectScope, { kind: 'object' }>).xmlRel, flatScope, 'flat');
-      assert.strictEqual(posix(unchangedXml), posix((flatScope as Extract<ObjectScope, { kind: 'object' }>).xmlRel));
+      const unchangedXml = mapDumpPathToProject((flatScope).xmlRel, flatScope, 'flat');
+      assert.strictEqual(posix(unchangedXml), posix((flatScope).xmlRel));
 
       // Дочерний файл (Ext/ObjectModule.bsl) не зависит от раскладки XML — путь идентичен в обеих раскладках.
       const childRel = posix(path.join('Catalogs', 'Объект', 'Ext', 'ObjectModule.bsl'));

@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { RepositoryLockState } from '../../infra/repository/RepositoryLockState';
-import { CONFIGURATION_ROOT_LOCK_NAME, getRootLockName } from '../../infra/repository/RepositoryObjectNames';
+import { getRootLockName } from '../../infra/repository/RepositoryObjectNames';
 import type { RepositoryTarget } from '../../infra/repository/RepositoryService';
 
 /**

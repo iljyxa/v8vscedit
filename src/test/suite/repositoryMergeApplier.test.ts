@@ -70,7 +70,7 @@ suite('RepositoryMergeApplier — applyRepositoryMerge: choice="replace"', () =>
   test('silent write копирует байты выгрузки поверх проекта (BOM+CRLF) и патчит хеш-кэш', () => {
     const fixture = createFixture('replace-write');
     try {
-      const contentWithBomAndCrlf = `﻿<MetaDataObject>\r\n<Catalog/>\r\n</MetaDataObject>`;
+      const contentWithBomAndCrlf = `\uFEFF<MetaDataObject>\r\n<Catalog/>\r\n</MetaDataObject>`;
       fs.mkdirSync(path.join(fixture.dumpDir, 'Catalogs'), { recursive: true });
       fs.writeFileSync(path.join(fixture.dumpDir, 'Catalogs', 'Объект.xml'), contentWithBomAndCrlf, 'utf-8');
 

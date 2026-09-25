@@ -52,7 +52,7 @@ suite('ConfigDumpInfoReader — parseConfigDumpInfo/readConfigDumpInfoFile', () 
   });
 
   test('parseConfigDumpInfo снимает BOM перед разбором', () => {
-    const xml = `﻿<?xml version="1.0" encoding="UTF-8"?>
+    const xml = `\uFEFF<?xml version="1.0" encoding="UTF-8"?>
 <ConfigDumpInfo xmlns="http://v8.1c.ru/8.3/xcf/dumpinfo">
   <ConfigVersions>
     <Metadata name="Catalog.Тест" id="11111111-1111-1111-1111-111111111111" configVersion="abc123"/>
