@@ -84,3 +84,25 @@ export function registerChildInMainChildObjects(
   }
   return `${xml.slice(0, insertAt)}${entry}\n${xml.slice(insertAt)}`;
 }
+
+/**
+ * Гарантирует наличие главного `<ChildObjects>` в XML объекта: если блока нет, вставляет пустой
+ * `<ChildObjects/>` сразу после `</Properties>` корневого элемента — там, где его располагает
+ * платформа. Возвращает исходную строку, если блок уже есть, и `undefined`, если вставить некуда
+ * (в XML нет `<Properties>`).
+ *
+ * Нужна для оболочек обработок/отчётов/журналов, заимствованных до issue #28: они создавались без
+ * `<ChildObjects/>`, и регистрация формы/макета в них молча не выполнялась.
+ */
+export function ensureMainChildObjects(xml: string): string | undefined {
+  if (findNestingAwareElementRange(xml, 'ChildObjects')) {
+    return xml;
+  }
+  // Без `<ChildObjects>` первый `<Properties>` — блок корневого элемента: свойства дочерних
+  // элементов лежат только внутри `<ChildObjects>`.
+  const properties = findNestingAwareElementRange(xml, 'Properties');
+  if (!properties) {
+    return undefined;
+  }
+  return `${xml.slice(0, properties.end)}\n\t\t<ChildObjects/>${xml.slice(properties.end)}`;
+}

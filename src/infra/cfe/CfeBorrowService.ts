@@ -1,25 +1,18 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { META_TYPES, type MetaKind, getMetaFolder } from '../../domain/MetaTypes';
+import { META_TYPES, type MetaKind, type MetaTypeDef, getMetaFolder } from '../../domain/MetaTypes';
 import { buildBorrowedChildXml } from '../xml/BorrowedChildXml';
 import { ConfigurationXmlEditor } from '../xml/ConfigurationXmlEditor';
 import {
   MAIN_CHILD_OBJECTS_ENTRY_INDENT,
+  ensureMainChildObjects,
   registerChildInMainChildObjects,
 } from '../xml/MainChildObjectsEditor';
 import {
   extractChildMetaElementXml,
   writeTextFilePreservingBomAndEol,
 } from '../xml/XmlUtils';
-
-/** Типы, для которых XML-оболочка заимствованного объекта содержит пустой `<ChildObjects/>` */
-const TYPES_WITH_CHILD_OBJECTS = new Set<string>([
-  'Catalog', 'Document', 'ExchangePlan', 'ChartOfAccounts',
-  'ChartOfCharacteristicTypes', 'ChartOfCalculationTypes',
-  'BusinessProcess', 'Task', 'Enum',
-  'InformationRegister', 'AccumulationRegister', 'AccountingRegister', 'CalculationRegister',
-]);
 
 /** Свойства CommonModule, которые копируются из источника в заимствованный объект */
 const COMMON_MODULE_PROPS = [
@@ -261,6 +254,7 @@ export class CfeBorrowService {
     objectName: string,
     formName: string
   ): BorrowObjectResult {
+    this.assertSupportsChildObjects(typeName, `формы ${formName}`);
     const files: string[] = [];
 
     const parentResult = this.borrowObject(cfDir, extDir, typeName, objectName);
@@ -275,8 +269,17 @@ export class CfeBorrowService {
 
     const formMetaDir = path.join(extDir, folder, objectName, 'Forms');
     const formMetaFile = path.join(formMetaDir, `${formName}.xml`);
+    const objFile = path.join(extDir, folder, `${objectName}.xml`);
 
     if (fs.existsSync(formMetaFile)) {
+      // Файлы формы есть, но запись в XML объекта могла не попасть: до issue #28 оболочки
+      // обработок/отчётов/журналов создавались без <ChildObjects>, и регистрация молча пропускалась.
+      if (this.registerChildInParentObject(objFile, 'Form', formName)) {
+        if (!files.includes(objFile)) {
+          files.push(objFile);
+        }
+        return { alreadyBorrowed: false, files };
+      }
       return { alreadyBorrowed: true, files: [] };
     }
 
@@ -321,7 +324,6 @@ export class CfeBorrowService {
     }
 
     // XML родителя уже в files, если родитель заимствован этим же вызовом.
-    const objFile = path.join(extDir, folder, `${objectName}.xml`);
     if (this.registerChildInParentObject(objFile, 'Form', formName) && !files.includes(objFile)) {
       files.push(objFile);
     }
@@ -343,6 +345,12 @@ export class CfeBorrowService {
     childTag: string,
     childName: string
   ): BorrowObjectResult {
+    this.assertSupportsChildObjects(typeName, `${childTag}.${childName}`);
+    // Контейнер со своими вложенными элементами (URL-шаблон с методами) нельзя зарегистрировать
+    // текстовой ссылкой — платформа такой XML не примет, а полного блока для него пока не строим.
+    if (!STRUCTURED_CHILD_TAGS.has(childTag) && this.hasChildObjects(childTag)) {
+      throw new Error(`Заимствование ${childTag}.${childName} не поддерживается: элемент содержит вложенные объекты`);
+    }
     const files: string[] = [];
 
     const parentResult = this.borrowObject(cfDir, extDir, typeName, objectName);
@@ -374,15 +382,45 @@ export class CfeBorrowService {
 
   /** Папка типа метаданных в структуре выгрузки или undefined если тип неизвестен */
   getFolderName(typeName: string): string | undefined {
-    if (!(typeName in META_TYPES)) {
+    if (!this.findMetaType(typeName)) {
       return undefined;
     }
     return getMetaFolder(typeName as MetaKind) ?? undefined;
   }
 
   /**
+   * Есть ли у объекта этого типа `<ChildObjects>` в XML. Источник — `META_TYPES[kind].childTags`,
+   * а не собственный список: параллельный реестр уже однажды отстал от него (issue #28).
+   */
+  private hasChildObjects(typeName: string): boolean {
+    return (this.findMetaType(typeName)?.childTags?.length ?? 0) > 0;
+  }
+
+  private findMetaType(typeName: string): MetaTypeDef | undefined {
+    // hasOwnProperty, а не `in`: иначе 'constructor'/'toString' сошли бы за тип метаданных.
+    return Object.prototype.hasOwnProperty.call(META_TYPES, typeName)
+      ? META_TYPES[typeName as MetaKind]
+      : undefined;
+  }
+
+  /**
+   * Отбивает заимствование дочернего элемента у типа без `<ChildObjects>` ДО записи файлов:
+   * иначе оболочка и файлы формы создавались бы, а регистрация в XML объекта молча не выполнялась.
+   * Неизвестный тип пропускается — его отбивает `borrowObject` своим сообщением.
+   */
+  private assertSupportsChildObjects(typeName: string, childLabel: string): void {
+    if (this.findMetaType(typeName) && !this.hasChildObjects(typeName)) {
+      throw new Error(
+        `Тип "${typeName}" не содержит дочерних объектов: заимствование ${childLabel} невозможно`
+      );
+    }
+  }
+
+  /**
    * Добавляет `<childTag>childName</childTag>` (или готовый блок `childXml`) в главный `<ChildObjects>` XML-файла объекта.
-   * Возвращает true, если запись была добавлена, false — если уже присутствует или файл недоступен.
+   * Возвращает true, если запись была добавлена, false — если она уже присутствует.
+   * Оболочке без `<ChildObjects>` (заимствована до issue #28) блок дописывается; если дописать
+   * некуда — исключение, а не молчаливый успех.
    */
   private registerChildInParentObject(
     objFile: string,
@@ -390,12 +428,15 @@ export class CfeBorrowService {
     childName: string,
     childXml?: string
   ): boolean {
-    if (!fs.existsSync(objFile)) {
-      return false;
+    const original = fs.readFileSync(objFile, 'utf-8');
+    const withChildObjects = ensureMainChildObjects(original);
+    if (withChildObjects === undefined) {
+      throw new Error(
+        `Не удалось зарегистрировать ${childTag}.${childName}: в XML объекта нет блока <Properties> (${objFile})`
+      );
     }
 
-    const original = fs.readFileSync(objFile, 'utf-8');
-    const next = registerChildInMainChildObjects(original, childTag, childName, childXml);
+    const next = registerChildInMainChildObjects(withChildObjects, childTag, childName, childXml);
     if (next === undefined) {
       return false;
     }
@@ -532,7 +573,7 @@ export class CfeBorrowService {
 
     lines.push(`\t\t</Properties>`);
 
-    if (TYPES_WITH_CHILD_OBJECTS.has(typeName)) {
+    if (this.hasChildObjects(typeName)) {
       lines.push(`\t\t<ChildObjects/>`);
     }
 
