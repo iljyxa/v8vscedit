@@ -1,26 +1,20 @@
-﻿import * as path from 'path';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import type { RepositoryBinding, RepositoryNodeRef, RepositoryService, RepositoryTarget } from '../../../infra/repository/RepositoryService';
 import type { CommandServices, NodeArg } from '../_shared';
-import { runDecompileExtension, runDecompileMainConfiguration } from '../ext/ExtensionCommandRunner';
-import { dumpConfigurationToTemp } from '../ext/ConfigurationDumpRunner';
-import { syncSelectedSnapshotFiles } from '../../../infra/agent/DirectorySnapshot';
-import { patchHashCacheForFiles } from '../../../infra/cache/HashCache';
 import {
   ensureTargetUpdatedBeforeCommit,
   refreshRepositoryUi,
   runPostRepositorySync,
 } from './RepositoryDatabaseSync';
+import { type RepositoryCliServices, runRepositoryCliCommand } from './RepositoryCommandRunner';
 import {
-  type RepositoryCliServices,
-  maybeRestoreLockSnapshot,
-  maybeRestoreLockSnapshotForFullNames,
-  runRepositoryCliCommand,
-  runRepositoryCommitAction,
-  runRepositoryLockAction,
-  runRepositoryUnlockAction,
-  runRepositoryUpdateAction,
-} from './RepositoryCommandRunner';
+  DEFAULT_REPOSITORY_FILE_SYNC_DEPS,
+  ensureRepositoryGuardFree,
+  type RepositoryFileSyncDeps,
+} from './RepositoryFileSyncShared';
+import { runRepositoryLockFlow, runRepositoryUpdateFlow } from './RepositoryLockSync';
+import { runRepositoryCommitFlow, runRepositoryUnlockFlow } from './RepositoryUnlockSync';
 
 interface BooleanPickItem extends vscode.QuickPickItem {
   value: boolean;
@@ -46,7 +40,8 @@ type RepositoryCommandNode = NodeArg & RepositoryNodeRef;
  */
 export function registerRepositoryCommands(
   context: vscode.ExtensionContext,
-  services: CommandServices
+  services: CommandServices,
+  deps: RepositoryFileSyncDeps = DEFAULT_REPOSITORY_FILE_SYNC_DEPS
 ): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('v8vscedit.repository.connect', async (node: NodeArg) => {
@@ -184,19 +179,20 @@ export function registerRepositoryCommands(
       if (!repositoryNode) {
         return;
       }
+      const label = repositoryNode.label ?? 'выбранный узел';
+      // Занятость проверяется до вопросов пользователю: иначе он отвечал бы на них
+      // ради операции, которая всё равно не стартует.
+      if (!ensureRepositoryGuardFree(services, deps, `Захват «${label}»`)) {
+        return;
+      }
 
-      const recursive = await askRecursiveMode('Захват объектов', repositoryNode.label ?? 'выбранный узел');
+      const recursive = await askRecursiveMode('Захват объектов', label);
       if (recursive === undefined) {
         return;
       }
 
-      const ok = await runRepositoryLockAction(toCliServices(services), repositoryNode, recursive);
-      if (ok) {
+      if (await runRepositoryLockFlow(repositoryNode, recursive, services, deps) === 'done') {
         refreshRepositoryUi(services);
-        const target = requireTarget(services.repositoryService, repositoryNode);
-        if (target) {
-          void runFileSyncAfterLockOrUpdate(target, repositoryNode, recursive, services);
-        }
       }
     }),
 
@@ -205,8 +201,12 @@ export function registerRepositoryCommands(
       if (!repositoryNode) {
         return;
       }
+      const label = repositoryNode.label ?? 'выбранный узел';
+      if (!ensureRepositoryGuardFree(services, deps, `Освобождение «${label}»`)) {
+        return;
+      }
 
-      const recursive = await askRecursiveMode('Освобождение объектов', repositoryNode.label ?? 'выбранный узел');
+      const recursive = await askRecursiveMode('Освобождение объектов', label);
       if (recursive === undefined) {
         return;
       }
@@ -220,19 +220,17 @@ export function registerRepositoryCommands(
         return;
       }
 
-      const ok = await runRepositoryUnlockAction(toCliServices(services), repositoryNode, recursive, force);
-      if (ok) {
+      if (await runRepositoryUnlockFlow(repositoryNode, { recursive, force }, services, deps) === 'done') {
         refreshRepositoryUi(services);
-        const target = requireTarget(services.repositoryService, repositoryNode);
-        if (target) {
-          void runFileSyncAfterUnlock(target, repositoryNode, recursive, services);
-        }
       }
     }),
 
     vscode.commands.registerCommand('v8vscedit.repository.commit', async (node: NodeArg) => {
       const repositoryNode = requireRepositoryNode(services, node);
       if (!repositoryNode) {
+        return;
+      }
+      if (!ensureRepositoryGuardFree(services, deps, `Помещение «${repositoryNode.label ?? 'выбранный узел'}»`)) {
         return;
       }
 
@@ -260,8 +258,7 @@ export function registerRepositoryCommands(
         return;
       }
 
-      const ok = await runRepositoryCommitAction(toCliServices(services), repositoryNode, formData);
-      if (ok) {
+      if (await runRepositoryCommitFlow(repositoryNode, formData, services, deps) === 'done') {
         refreshRepositoryUi(services);
       }
     }),
@@ -271,8 +268,12 @@ export function registerRepositoryCommands(
       if (!repositoryNode) {
         return;
       }
+      const label = repositoryNode.label ?? 'выбранный узел';
+      if (!ensureRepositoryGuardFree(services, deps, `Получение «${label}»`)) {
+        return;
+      }
 
-      const recursive = await askRecursiveMode('Получение из хранилища', repositoryNode.label ?? 'выбранный узел');
+      const recursive = await askRecursiveMode('Получение из хранилища', label);
       if (recursive === undefined) {
         return;
       }
@@ -295,17 +296,14 @@ export function registerRepositoryCommands(
         return;
       }
 
-      const ok = await runRepositoryUpdateAction(toCliServices(services), repositoryNode, {
-        recursive,
-        force,
-        version: version.trim() || undefined,
-      });
-      if (ok) {
+      const outcome = await runRepositoryUpdateFlow(
+        repositoryNode,
+        { recursive, force, version: version.trim() || undefined },
+        services,
+        deps
+      );
+      if (outcome === 'done') {
         refreshRepositoryUi(services);
-        const target = requireTarget(services.repositoryService, repositoryNode);
-        if (target) {
-          void runFileSyncAfterLockOrUpdate(target, repositoryNode, recursive, services);
-        }
       }
     }),
 
@@ -567,220 +565,6 @@ function toCliServices(services: CommandServices): RepositoryCliServices {
     repositoryService: services.repositoryService,
     projectSecretStorage: services.projectSecretStorage,
   };
-}
-
-/**
- * Читает единую настройку `v8vscedit.repository.syncFilesOnLockUnlock`, управляющую
- * всем циклом синхронизации файлов с базой при захвате/получении/отмене захвата —
- * см. {@link runFileSyncAfterLockOrUpdate} и {@link runFileSyncAfterUnlock}. Настройка
- * одна на весь цикл: выключена — не работает ни довыгрузка из базы, ни локальный
- * снапшот для отката, ни полный импорт при отмене захвата корня.
- */
-function isFileSyncOnLockUnlockEnabled(): boolean {
-  return vscode.workspace
-    .getConfiguration('v8vscedit.repository')
-    .get<boolean>('syncFilesOnLockUnlock', true);
-}
-
-/**
- * Готовит `beforeProjectFilesChanged`-хук для операций дампа/импорта из базы: файлы
- * пишет расширение само, контролируемо — предупреждаем watcher источников
- * (Container.wireConfigurationSourceWatcher), чтобы он не запускал СВОЙ независимый
- * пересчёт дерева/поддержки на те же самые пути параллельно с явным reloadEntries()
- * вызывающей стороны. Тот же приём, что и в ExtensionCommands.createImportHooks.
- */
-function buildFileSyncHooks(services: CommandServices): { beforeProjectFilesChanged: (filePaths: string[]) => void } {
-  return {
-    beforeProjectFilesChanged: (filePaths: string[]) => {
-      services.suppressConfigurationReloadForFiles(filePaths);
-    },
-  };
-}
-
-/**
- * После успешного захвата/получения объектов хранилища — если включена настройка
- * `v8vscedit.repository.syncFilesOnLockUnlock` — довыгружает их из БД в файлы,
- * устраняя расхождение между хранилищем и локальными XML без дорогого полного
- * импорта всей конфигурации на каждый точечный захват. Захват корня конфигурации/
- * расширения целиком (см. `RepositoryService.buildPartialDumpPlan`) — единственное
- * исключение: там частичная выгрузка равна полной, поэтому выполняется обычный
- * полный импорт (тот же путь, что и ручная кнопка «Импортировать из базы»).
- *
- * Для отдельных объектов дополнительно снимает локальный снапшот файлов
- * (`RepositoryService.captureLockSnapshot`, issue #2) — точку отсчёта для
- * возможного отката при `unlock` (см. {@link runFileSyncAfterUnlock}). Снапшот
- * снимается ПОСЛЕ довыгрузки (если она прошла успешно), чтобы точкой отсчёта было
- * состояние, подтверждённое базой, а не произвольное локальное состояние на
- * диске на момент запуска команды; если довыгрузка не выполнялась или не удалась —
- * тем не менее снимается запасной снапшот с текущего состояния диска.
- *
- * Не блокирует основной хендлер команды (вызывается через `void`, как и
- * {@link runPostRepositorySync}) — захват/получение уже завершились успешно,
- * довыгрузка — это отдельный фоновый шаг со своим прогрессом. Используется и для
- * `v8vscedit.repository.lock`, и для `v8vscedit.repository.update` — оба оставляют
- * локальные файлы потенциально рассинхронизированными с базой ровно тем же образом.
- */
-async function runFileSyncAfterLockOrUpdate(
-  target: RepositoryTarget,
-  repositoryNode: RepositoryCommandNode,
-  recursive: boolean,
-  services: CommandServices
-): Promise<void> {
-  if (!isFileSyncOnLockUnlockEnabled()) {
-    return;
-  }
-
-  try {
-    const objects = services.repositoryService.createObjectsFileForNode(repositoryNode, recursive);
-    const plan = services.repositoryService.buildPartialDumpPlan(repositoryNode, objects, recursive);
-    const hooks = buildFileSyncHooks(services);
-
-    if (plan.rootCaptureFull) {
-      void vscode.window.showInformationMessage(
-        `Захвачена/получена вся конфигурация «${target.displayName}» целиком — выполняется полный импорт из базы.`
-      );
-      const imported = target.configKind === 'cfe'
-        ? await runDecompileExtension(target.extensionName ?? target.displayName, target.configRoot, services.workspaceFolder, services.outputChannel, hooks)
-        : await runDecompileMainConfiguration(target.displayName, target.configRoot, services.workspaceFolder, services.outputChannel, hooks);
-      if (imported) {
-        // Открываем окно тишины (тот же приём, что и runPostRepositorySync/ExtensionCommands
-        // на любом полном импорте) — иначе отложенные события watcher'а по только что
-        // записанным полным импортом файлам заново пометят конфигурацию «изменённой»
-        // и запустят дорогой полный пересчёт changeDetector.detect().
-        services.markConfigurationsClean([target.configRoot]);
-        // Дерево/поддержку уже перестроил reloadEntries() (treeProvider.updateEntries) —
-        // повторный refreshRepositoryUi() тут же заново гонял бы buildRoots()
-        // (а с ним и supportService.loadConfig на каждый корень) без новой информации.
-        await services.reloadEntries();
-        services.refreshActionsView();
-      }
-      // Для корня целиком локальный снапшот не снимается — у него нет единого XML-файла
-      // объекта-владельца, к которому его можно привязать (см. RepositoryService).
-      return;
-    }
-
-    if (plan.fullNames.length > 0) {
-      const dumped = await dumpConfigurationToTemp(
-        {
-          kind: target.configKind,
-          name: target.displayName,
-          rootPath: target.configRoot,
-          extensionName: target.extensionName,
-        },
-        { mode: 'partial', fullNames: plan.fullNames },
-        services.workspaceFolder,
-        services.outputChannel
-      );
-      if (!dumped.ok) {
-        throw new Error(dumped.reason);
-      }
-      try {
-        // Временно — прежнее прямое копирование выгрузки поверх проекта; слияние с
-        // диалогом конфликтов подключается при переводе команды на RepositoryLockSync.
-        const relativeFiles = dumped.handle.relativeFiles.filter((relativeFile) => relativeFile !== 'ConfigDumpInfo.xml');
-        hooks.beforeProjectFilesChanged(relativeFiles.map((relativeFile) => path.join(target.configRoot, relativeFile)));
-        syncSelectedSnapshotFiles(dumped.handle.dir, target.configRoot, relativeFiles);
-        patchHashCacheForFiles(services.workspaceFolder.uri.fsPath, target.configKind, target.configRoot, target.extensionName ?? '', relativeFiles);
-      } finally {
-        dumped.handle.dispose();
-      }
-      await services.reloadEntries();
-      services.refreshActionsView();
-    }
-
-    if (plan.fullNames.length > 1) {
-      // Рекурсивный захват Подсистемы: фактически захваченных/довыгруженных объектов
-      // несколько (сама подсистема + участники Content) — снимаем снапшот по каждому,
-      // а не только по узлу подсистемы, иначе правки в объектах-участниках не попадут
-      // под защиту отката при unlock (см. captureLockSnapshotForFullName).
-      for (const fullName of plan.fullNames) {
-        const memberXmlPath = services.repositoryService.resolveXmlPathByFullName(target.configRoot, fullName);
-        if (memberXmlPath) {
-          services.repositoryService.captureLockSnapshotForFullName(target, fullName, memberXmlPath);
-        }
-      }
-    } else {
-      services.repositoryService.captureLockSnapshot(target, repositoryNode);
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    services.outputChannel.appendLine(`[repository][file-sync][error] ${message}`);
-    void vscode.window.showWarningMessage(
-      `Не удалось автоматически выгрузить объекты «${repositoryNode.label ?? target.displayName}» из базы: ${message}`
-    );
-  }
-}
-
-/**
- * После успешного `unlock` — если включена настройка
- * `v8vscedit.repository.syncFilesOnLockUnlock` — синхронизирует локальные файлы
- * с состоянием базы после отмены захвата (issue #2). Два разных пути в зависимости
- * от того, что было захвачено:
- *
- * - Рекурсивный захват корня конфигурации/расширения целиком: при отмене захвата
- *   в хранилище база возвращает конфигурацию к состоянию ДО захвата (поведение
- *   платформы 1С, не зависит от расширения) — выполняется обычный полный импорт
- *   из базы, чтобы синхронизировать с этим откаченным состоянием локальные файлы.
- *   Локального снапшота для корня нет (см. {@link runFileSyncAfterLockOrUpdate}),
- *   поэтому альтернативы «откатить/оставить» здесь не предлагается — импорт просто
- *   приводит файлы в соответствие базе.
- * - Отдельный объект: используется локальный снапшот, снятый при захвате —
- *   {@link maybeRestoreLockSnapshot} сравнивает текущие файлы со снапшотом и, если
- *   они разошлись, предлагает пользователю откатить их к состоянию на момент
- *   захвата либо оставить как есть.
- */
-async function runFileSyncAfterUnlock(
-  target: RepositoryTarget,
-  repositoryNode: RepositoryCommandNode,
-  recursive: boolean,
-  services: CommandServices
-): Promise<void> {
-  if (!isFileSyncOnLockUnlockEnabled()) {
-    return;
-  }
-
-  try {
-    const objects = services.repositoryService.createObjectsFileForNode(repositoryNode, recursive);
-    const plan = services.repositoryService.buildPartialDumpPlan(repositoryNode, objects, recursive);
-
-    if (plan.rootCaptureFull) {
-      const hooks = buildFileSyncHooks(services);
-      void vscode.window.showInformationMessage(
-        `Захват всей конфигурации «${target.displayName}» отменён — выполняется полный импорт из базы для синхронизации файлов.`
-      );
-      const imported = target.configKind === 'cfe'
-        ? await runDecompileExtension(target.extensionName ?? target.displayName, target.configRoot, services.workspaceFolder, services.outputChannel, hooks)
-        : await runDecompileMainConfiguration(target.displayName, target.configRoot, services.workspaceFolder, services.outputChannel, hooks);
-      if (imported) {
-        // См. симметричную правку и обоснование в runFileSyncAfterLockOrUpdate — то же
-        // окно тишины нужно и здесь, полный импорт пишет столько же файлов.
-        services.markConfigurationsClean([target.configRoot]);
-        await services.reloadEntries();
-        services.refreshActionsView();
-      }
-      return;
-    }
-
-    if (plan.fullNames.length > 1) {
-      // Рекурсивный захват Подсистемы — сравниваем/откатываем по всем фактически
-      // захваченным объектам разом (см. симметричную правку captureLockSnapshotForFullName
-      // в runFileSyncAfterLockOrUpdate), а не только по узлу подсистемы.
-      await maybeRestoreLockSnapshotForFullNames(
-        toCliServices(services),
-        target,
-        plan.fullNames,
-        repositoryNode.label ?? target.displayName
-      );
-    } else {
-      await maybeRestoreLockSnapshot(toCliServices(services), target, repositoryNode);
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    services.outputChannel.appendLine(`[repository][file-sync][error] ${message}`);
-    void vscode.window.showWarningMessage(
-      `Не удалось синхронизировать файлы объектов «${repositoryNode.label ?? target.displayName}» с базой после отмены захвата: ${message}`
-    );
-  }
 }
 
 function requireRootTarget(services: CommandServices, node: NodeArg): RepositoryTarget | null {

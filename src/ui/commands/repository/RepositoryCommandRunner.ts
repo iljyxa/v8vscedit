@@ -23,6 +23,25 @@ interface ConnectionParams {
   v8Path?: string;
 }
 
+/**
+ * Запрос к Конфигуратору по хранилищу без UI-реакции на исход: вызывается и внутри
+ * аренды `configurationOperationGuard`, где модальные окна запрещены (запрет №18).
+ */
+export interface RepositoryCliRequest {
+  command: string;
+  target: RepositoryTarget;
+  extraArgs: string[];
+  bindingOverride?: RepositoryBinding;
+  progressTitle?: string;
+  progressStartMessage?: string;
+  failureOperation?: string;
+}
+
+export type RepositoryCliResult =
+  | { status: 'done' }
+  | { status: 'interrupted'; message: string }
+  | { status: 'failed'; message: string };
+
 interface RepositoryCliRunOptions {
   command: string;
   target: RepositoryTarget;
@@ -50,72 +69,89 @@ export interface RepositoryCliServices {
   projectSecretStorage: ProjectSecretStorage;
 }
 
-export async function runRepositoryCliCommand(
-  options: RepositoryCliRunOptions,
+/**
+ * Запускает команду хранилища и возвращает исход. Команда проверяется до чтения
+ * env.json: неизвестная команда — ошибка вызывающего кода, а не окружения. Любой
+ * сбой подготовки (нет env.json, привязки, параметров подключения) — `failed`, а не
+ * исключение: вызывающий сообщает о нём уже после освобождения guard'а.
+ */
+export async function executeRepositoryCli(
+  request: RepositoryCliRequest,
   services: RepositoryCliServices
-): Promise<boolean> {
-  const connection = await resolveDatabaseConnection(
-    services.repositoryService.getEnvJsonPath(),
-    services.projectSecretStorage
-  );
-  const binding = options.bindingOverride
-    ?? await services.repositoryService.resolveBindingForCommand(options.target);
-  if (!binding) {
-    throw new Error(`Для "${options.target.displayName}" не настроено подключение к хранилищу в env.json.`);
-  }
-
-  const v8Path = resolveV8ExecutablePath(connection.v8Path ?? '');
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8repo_'));
-  const outFile = path.join(tempDir, `${options.command}.log`);
-
-  beginRepositoryOperationStatus(options.progressTitle, options.progressStartMessage);
-
+): Promise<RepositoryCliResult> {
+  const title = request.progressTitle ?? request.command;
+  let designerArgs: string[];
+  let v8Path: string;
   try {
-    const designerArgs: string[] = ['DESIGNER'];
+    const commandArgs = buildCommandDesignerArgs(request.command, request.extraArgs);
+    const connection = await resolveDatabaseConnection(
+      services.repositoryService.getEnvJsonPath(),
+      services.projectSecretStorage
+    );
+    const binding = request.bindingOverride
+      ?? await services.repositoryService.resolveBindingForCommand(request.target);
+    if (!binding) {
+      throw new Error(`Для "${request.target.displayName}" не настроено подключение к хранилищу в env.json.`);
+    }
+    designerArgs = ['DESIGNER'];
     appendConnectionDesignerArgs(designerArgs, connection);
     appendRepositoryDesignerArgs(designerArgs, binding);
-    designerArgs.push(...buildCommandDesignerArgs(options.command, options.extraArgs ?? []));
-    if (options.target.extensionName) {
-      designerArgs.push('-Extension', options.target.extensionName);
+    designerArgs.push(...commandArgs);
+    if (request.target.extensionName) {
+      designerArgs.push('-Extension', request.target.extensionName);
     }
-    designerArgs.push('/Out', outFile, '/DisableStartupDialogs');
+    v8Path = resolveV8ExecutablePath(connection.v8Path ?? '');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    services.outputChannel.appendLine(`[repository][error] ${message}`);
+    return { status: 'failed', message };
+  }
+  return runRepositoryDesigner(request, title, v8Path, designerArgs, services);
+}
 
-    const commandAsText = `${v8Path} ${designerArgs.join(' ')}`;
+/* c8 ignore start -- запуск процесса Конфигуратора: платформа 1С недоступна в тестовом окружении;
+   аргументы покрыты тестами buildCommandDesignerArgs, ветки подготовки — тестами executeRepositoryCli. */
+async function runRepositoryDesigner(
+  request: RepositoryCliRequest,
+  title: string,
+  v8Path: string,
+  designerArgs: string[],
+  services: RepositoryCliServices
+): Promise<RepositoryCliResult> {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8repo_'));
+  const outFile = path.join(tempDir, `${request.command}.log`);
+  const args = [...designerArgs, '/Out', outFile, '/DisableStartupDialogs'];
+  const commandAsText = `${v8Path} ${args.join(' ')}`;
+  beginRepositoryOperationStatus(title, request.progressStartMessage ?? 'Выполняю команду хранилища...');
+  try {
     services.outputChannel.appendLine(`[repository] Старт: ${commandAsText}`);
-
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];
     // Прогресс-нотификация с кнопкой отмены для прерывания зависшего конфигуратора.
     // Статус-бар не переписываем — withProgress добавлен только ради отмены.
     const result = await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: options.progressTitle,
-        cancellable: true,
-      },
+      { location: vscode.ProgressLocation.Notification, title, cancellable: true },
       (_progress, token) => runProcess({
         command: v8Path,
-        args: designerArgs,
+        args,
         cwd: services.workspaceFolder.uri.fsPath,
         shell: false,
         cancellationToken: token,
         onStdout: (text) => {
           const line = text.trim();
-          if (!line) {
-            return;
+          if (line) {
+            stdoutChunks.push(line);
+            services.outputChannel.appendLine(`[repository][stdout] ${line}`);
+            updateRepositoryOperationStatus(title, trimStatusMessage(line));
           }
-          stdoutChunks.push(line);
-          services.outputChannel.appendLine(`[repository][stdout] ${line}`);
-          updateRepositoryOperationStatus(options.progressTitle, trimStatusMessage(line));
         },
         onStderr: (text) => {
           const line = text.trim();
-          if (!line) {
-            return;
+          if (line) {
+            stderrChunks.push(line);
+            services.outputChannel.appendLine(`[repository][stderr] ${line}`);
+            updateRepositoryOperationStatus(title, trimStatusMessage(`stderr: ${line}`));
           }
-          stderrChunks.push(line);
-          services.outputChannel.appendLine(`[repository][stderr] ${line}`);
-          updateRepositoryOperationStatus(options.progressTitle, trimStatusMessage(`stderr: ${line}`));
         },
       })
     );
@@ -123,48 +159,32 @@ export async function runRepositoryCliCommand(
     const interruption = describeProcessInterruption(result);
     if (interruption) {
       services.outputChannel.appendLine(`[repository] ${interruption}`);
-      endRepositoryOperationStatus(options.progressTitle, 'прервано');
-      void vscode.window.showInformationMessage(`${options.progressTitle}: ${interruption}`);
-      return false;
+      endRepositoryOperationStatus(title, 'прервано');
+      return { status: 'interrupted', message: interruption };
     }
 
     const logContent = readLogFileContent(outFile);
-    if (result.exitCode !== 0) {
-      if (logContent) {
-        services.outputChannel.appendLine(`[repository][log]\n${logContent}`);
-      }
-      const details = [
-        ...stderrChunks,
-        ...stdoutChunks,
-        result.lastStderr,
-        result.lastStdout,
-        logContent,
-      ].filter(Boolean);
-      const reason = extractFailureReason(details, result.exitCode);
-      const operation = options.failureOperation ?? options.progressTitle.toLowerCase();
-      throw new Error(`Ошибка при ${operation}: ${reason}`);
-    }
-
     if (logContent) {
       services.outputChannel.appendLine(`[repository][log]\n${logContent}`);
     }
-
-    if (options.afterSuccess) {
-      await options.afterSuccess();
+    if (result.exitCode !== 0) {
+      const details = [...stderrChunks, ...stdoutChunks, result.lastStderr, result.lastStdout, logContent].filter(Boolean);
+      const reason = extractFailureReason(details, result.exitCode);
+      const operation = request.failureOperation ?? title.toLowerCase();
+      const message = `Ошибка при ${operation}: ${reason}`;
+      services.outputChannel.appendLine(`[repository][error] ${message}`);
+      endRepositoryOperationStatus(title, 'ошибка');
+      return { status: 'failed', message };
     }
 
     services.outputChannel.appendLine(`[repository] Завершено: ${commandAsText}`);
-    endRepositoryOperationStatus(options.progressTitle, 'завершено');
-    if (options.showSuccessMessage !== false) {
-      void vscode.window.showInformationMessage(options.successMessage);
-    }
-    return true;
+    endRepositoryOperationStatus(title, 'завершено');
+    return { status: 'done' };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     services.outputChannel.appendLine(`[repository][error] ${message}`);
-    endRepositoryOperationStatus(options.progressTitle, 'ошибка');
-    await vscode.window.showErrorMessage(`${options.errorTitle}\n${message}`);
-    return false;
+    endRepositoryOperationStatus(title, 'ошибка');
+    return { status: 'failed', message };
   } finally {
     try {
       fs.rmSync(tempDir, { recursive: true, force: true });
@@ -172,6 +192,46 @@ export async function runRepositoryCliCommand(
       // временный каталог уже мог быть удалён — игнорируем
     }
   }
+}
+/* c8 ignore stop */
+
+/**
+ * Обёртка с UI-реакцией для команд вне guard'а (подключение, создание, отключение,
+ * пользователи, выгрузка версии, отчёт, метка): ошибку здесь можно показать модально.
+ */
+export async function runRepositoryCliCommand(
+  options: RepositoryCliRunOptions,
+  services: RepositoryCliServices
+): Promise<boolean> {
+  const result = await executeRepositoryCli({
+    command: options.command,
+    target: options.target,
+    extraArgs: options.extraArgs ?? [],
+    bindingOverride: options.bindingOverride,
+    progressTitle: options.progressTitle,
+    progressStartMessage: options.progressStartMessage,
+    failureOperation: options.failureOperation,
+  }, services);
+  if (result.status === 'interrupted') {
+    void vscode.window.showInformationMessage(`${options.progressTitle}: ${result.message}`);
+    return false;
+  }
+  if (result.status === 'failed') {
+    await vscode.window.showErrorMessage(`${options.errorTitle}\n${result.message}`);
+    return false;
+  }
+  try {
+    await options.afterSuccess?.();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    services.outputChannel.appendLine(`[repository][error] ${message}`);
+    await vscode.window.showErrorMessage(`${options.errorTitle}\n${message}`);
+    return false;
+  }
+  if (options.showSuccessMessage !== false) {
+    void vscode.window.showInformationMessage(options.successMessage);
+  }
+  return true;
 }
 
 export function resolveRepositoryTarget(
@@ -184,221 +244,80 @@ export function resolveRepositoryTarget(
   return repositoryService.resolveTargetByXmlPath(node.xmlPath);
 }
 
-export async function runRepositoryLockAction(
-  services: RepositoryCliServices,
-  node: RepositoryNodeRef,
-  recursive: boolean
-): Promise<boolean> {
-  const target = requireTarget(services.repositoryService, node);
-  const objects = services.repositoryService.createObjectsFileForNode(node, recursive);
-  return runRepositoryCliCommand({
+/**
+ * Захват всегда с `-Revised`: без него база остаётся на старой версии объекта, и
+ * правки поверх неё при помещении перетёрли бы чужие изменения из хранилища.
+ */
+export function buildLockExtraArgs(objectsFile: string): string[] {
+  return ['-ObjectsFile', objectsFile, '-Revised'];
+}
+
+export function buildRepositoryLockRequest(target: RepositoryTarget, objectsFile: string, label: string): RepositoryCliRequest {
+  return {
     command: 'repository-lock',
     target,
-    extraArgs: [
-      '-ObjectsFile',
-      objects.filePath,
-    ],
-    progressTitle: `Захват: ${node.label ?? target.displayName}`,
+    extraArgs: buildLockExtraArgs(objectsFile),
+    progressTitle: `Захват: ${label}`,
     progressStartMessage: 'Получаю объекты из хранилища для редактирования...',
-    successMessage: `Объекты "${node.label ?? target.displayName}" захвачены.`,
-    errorTitle: `Ошибка захвата объектов "${node.label ?? target.displayName}".`,
     failureOperation: 'захвате объектов хранилища',
-    afterSuccess: () => {
-      services.repositoryService.setLocked(target, objects.fullNames, true);
-    },
-  }, services);
+  };
 }
 
-export async function runRepositoryUnlockAction(
-  services: RepositoryCliServices,
-  node: RepositoryNodeRef,
-  recursive: boolean,
+export function buildRepositoryUnlockRequest(
+  target: RepositoryTarget,
+  objectsFile: string,
+  label: string,
   force: boolean
-): Promise<boolean> {
-  const target = requireTarget(services.repositoryService, node);
-  const objects = services.repositoryService.createObjectsFileForNode(node, recursive);
-  return runRepositoryCliCommand({
+): RepositoryCliRequest {
+  return {
     command: 'repository-unlock',
     target,
-    extraArgs: [
-      '-ObjectsFile',
-      objects.filePath,
-      ...(force ? ['-Force'] : []),
-    ],
-    progressTitle: `Освобождение: ${node.label ?? target.displayName}`,
+    extraArgs: ['-ObjectsFile', objectsFile, ...(force ? ['-Force'] : [])],
+    progressTitle: `Освобождение: ${label}`,
     progressStartMessage: 'Отменяю захват объектов...',
-    successMessage: `Объекты "${node.label ?? target.displayName}" освобождены.`,
-    errorTitle: `Ошибка освобождения объектов "${node.label ?? target.displayName}".`,
     failureOperation: 'освобождении объектов хранилища',
-    afterSuccess: () => {
-      services.repositoryService.setLocked(target, objects.fullNames, false);
-    },
-  }, services);
+  };
 }
 
-/**
- * Сравнивает файлы объекта со снапшотом, снятым при захвате (см.
- * `RepositoryService.captureLockSnapshot`), и при расхождении предлагает пользователю
- * откатить их — иначе изменения, сделанные во время захвата, молча остаются на диске
- * даже после отмены захвата (issue #2). Снапшот в любом случае удаляется по завершении:
- * захват снят, и его смысл как точки отсчёта для отката исчерпан.
- *
- * Вызывается из `RepositoryCommands.ts` после успешного `unlock` — только для отдельных
- * объектов (не для рекурсивного захвата корня целиком, там путь другой — полный импорт
- * из базы, см. `RepositoryCommands.runFileSyncAfterUnlock`) и только если включена
- * настройка `v8vscedit.repository.syncFilesOnLockUnlock`.
- */
-export async function maybeRestoreLockSnapshot(
-  services: RepositoryCliServices,
+export function buildRepositoryUpdateRequest(
   target: RepositoryTarget,
-  node: RepositoryNodeRef
-): Promise<void> {
-  const diff = services.repositoryService.getLockSnapshotDiff(target, node);
-  if (!diff.hasSnapshot) {
-    return;
-  }
-
-  if (diff.changedFiles.length > 0) {
-    const label = node.label ?? target.displayName;
-    const restoreChoice = 'Откатить изменения';
-    const keepChoice = 'Оставить изменения';
-    const choice = await vscode.window.showWarningMessage(
-      `Файлы объекта "${label}" были изменены после захвата (${String(diff.changedFiles.length)}). ` +
-        'Откатить их к состоянию на момент захвата?',
-      { modal: true },
-      restoreChoice,
-      keepChoice
-    );
-
-    if (choice === restoreChoice) {
-      const restored = services.repositoryService.restoreLockSnapshot(target, node);
-      services.outputChannel.appendLine(`[repository] Откат файлов "${label}" к состоянию на момент захвата: ${restored.join(', ')}`);
-      void vscode.window.showInformationMessage(`Изменения объекта "${label}" откачены к состоянию на момент захвата.`);
-    }
-  }
-
-  services.repositoryService.discardLockSnapshot(target, node);
+  objectsFile: string,
+  label: string,
+  options: { force: boolean; version?: string }
+): RepositoryCliRequest {
+  return {
+    command: 'repository-update',
+    target,
+    extraArgs: [
+      '-ObjectsFile', objectsFile,
+      ...(options.version ? ['-Version', options.version] : []),
+      ...(options.force ? ['-Force'] : []),
+    ],
+    progressTitle: `Получение: ${label}`,
+    progressStartMessage: 'Получаю изменения из хранилища...',
+    failureOperation: 'получении изменений из хранилища',
+  };
 }
 
-/**
- * Агрегатный вариант {@link maybeRestoreLockSnapshot} для рекурсивного захвата
- * Подсистемы, где фактически захваченных/довыгруженных объектов несколько (сама
- * подсистема + участники `<Content>`, включая вложенные подсистемы — см.
- * `RepositoryService.resolveSubsystemMemberFullNames`). Одиночный узел здесь не
- * подходит: `maybeRestoreLockSnapshot(node)` сравнил бы со снапшотом только сам
- * узел подсистемы, полностью пропустив изменения в захваченных объектах-участниках
- * (issue #2 для рекурсивного захвата Подсистемы).
- *
- * Один диалог на весь набор объектов — не по одному диалогу на объект: изменённых
- * участников за один захват может быть много, и по одному подтверждению на каждый
- * означало бы серию модальных окон подряд.
- */
-export async function maybeRestoreLockSnapshotForFullNames(
-  services: RepositoryCliServices,
+export function buildRepositoryCommitRequest(
   target: RepositoryTarget,
-  fullNames: readonly string[],
-  label: string
-): Promise<void> {
-  const withSnapshot = fullNames
-    .map((fullName) => ({ fullName, diff: services.repositoryService.getLockSnapshotDiffForFullName(target, fullName) }))
-    .filter((item) => item.diff.hasSnapshot);
-
-  const changed = withSnapshot.filter((item) => item.diff.changedFiles.length > 0);
-  if (changed.length > 0) {
-    const totalChangedFiles = changed.reduce((sum, item) => sum + item.diff.changedFiles.length, 0);
-    const restoreChoice = 'Откатить изменения';
-    const keepChoice = 'Оставить изменения';
-    const choice = await vscode.window.showWarningMessage(
-      `Файлы ${String(changed.length)} объект(ов) «${label}» (${String(totalChangedFiles)} файл(ов) суммарно) ` +
-        'были изменены после захвата. Откатить их к состоянию на момент захвата?',
-      { modal: true },
-      restoreChoice,
-      keepChoice
-    );
-
-    if (choice === restoreChoice) {
-      for (const item of changed) {
-        const restored = services.repositoryService.restoreLockSnapshotForFullName(target, item.fullName);
-        services.outputChannel.appendLine(`[repository] Откат файлов "${item.fullName}" к состоянию на момент захвата: ${restored.join(', ')}`);
-      }
-      void vscode.window.showInformationMessage(`Изменения объектов «${label}» (${String(changed.length)}) откачены к состоянию на момент захвата.`);
-    }
-  }
-
-  for (const item of withSnapshot) {
-    services.repositoryService.discardLockSnapshotForFullName(target, item.fullName);
-  }
-}
-
-export async function runRepositoryCommitAction(
-  services: RepositoryCliServices,
-  node: RepositoryNodeRef,
-  options: {
-    recursive: boolean;
-    comment: string;
-    keepLocked: boolean;
-    force: boolean;
-  }
-): Promise<boolean> {
-  const target = requireTarget(services.repositoryService, node);
-  const objects = services.repositoryService.createObjectsFileForNode(node, options.recursive);
-  return runRepositoryCliCommand({
+  objectsFile: string,
+  label: string,
+  options: { comment: string; keepLocked: boolean; force: boolean }
+): RepositoryCliRequest {
+  return {
     command: 'repository-commit',
     target,
     extraArgs: [
-      '-ObjectsFile',
-      objects.filePath,
+      '-ObjectsFile', objectsFile,
       ...(options.comment ? ['-Comment', options.comment] : []),
       ...(options.keepLocked ? ['-KeepLocked'] : []),
       ...(options.force ? ['-Force'] : []),
     ],
-    progressTitle: `Помещение: ${node.label ?? target.displayName}`,
+    progressTitle: `Помещение: ${label}`,
     progressStartMessage: 'Помещаю изменения в хранилище...',
-    successMessage: `Изменения "${node.label ?? target.displayName}" помещены в хранилище.`,
-    errorTitle: `Ошибка помещения "${node.label ?? target.displayName}" в хранилище.`,
     failureOperation: 'помещении изменений в хранилище',
-    afterSuccess: () => {
-      if (!options.keepLocked) {
-        services.repositoryService.setLocked(target, objects.fullNames, false);
-      }
-    },
-  }, services);
-}
-
-export async function runRepositoryUpdateAction(
-  services: RepositoryCliServices,
-  node: RepositoryNodeRef,
-  options: {
-    recursive: boolean;
-    force: boolean;
-    version?: string;
-  }
-): Promise<boolean> {
-  const target = requireTarget(services.repositoryService, node);
-  const objects = services.repositoryService.createObjectsFileForNode(node, options.recursive);
-  return runRepositoryCliCommand({
-    command: 'repository-update',
-    target,
-    extraArgs: [
-      '-ObjectsFile',
-      objects.filePath,
-      ...(options.version ? ['-Version', options.version] : []),
-      ...(options.force ? ['-Force'] : []),
-    ],
-    progressTitle: `Получение: ${node.label ?? target.displayName}`,
-    progressStartMessage: 'Получаю изменения из хранилища...',
-    successMessage: `Объекты "${node.label ?? target.displayName}" обновлены из хранилища.`,
-    errorTitle: `Ошибка получения "${node.label ?? target.displayName}" из хранилища.`,
-    failureOperation: 'получении изменений из хранилища',
-  }, services);
-}
-
-function requireTarget(repositoryService: RepositoryService, node: RepositoryNodeRef): RepositoryTarget {
-  const target = resolveRepositoryTarget(repositoryService, node);
-  if (!target) {
-    throw new Error('Не удалось определить конфигурацию для выбранного узла.');
-  }
-  return target;
+  };
 }
 
 function appendConnectionDesignerArgs(args: string[], connection: ConnectionParams): void {
@@ -483,7 +402,7 @@ function pushIfValue(target: string[], name: string, value: string | undefined):
   }
 }
 
-function buildCommandDesignerArgs(command: string, extraArgs: string[]): string[] {
+export function buildCommandDesignerArgs(command: string, extraArgs: string[]): string[] {
   const opts = parseExtraArgs(extraArgs);
   switch (command) {
     case 'repository-create': {
