@@ -10,6 +10,7 @@ import {
   resolveOwnerFullNameByRelativePath,
   resolveUnitXmlRel,
   resolveLockUnitByRelativePath,
+  removeEmptyParentDirs,
   type ObjectScope,
 } from '../../infra/repository/RepositoryObjectScope';
 import { CONFIGURATION_ROOT_LOCK_NAME, getRootLockName } from '../../infra/repository/RepositoryObjectNames';
@@ -397,6 +398,13 @@ suite('RepositoryObjectScope — resolveUnitXmlRel (issue #1, раздел 10, �
   test('неизвестная единица (нераспознанное имя) → null', () => {
     assert.strictEqual(resolveUnitXmlRel(EXAMPLE_CF, 'БезТочки'), null);
   });
+
+  test('вид без папки в META_TYPES (ЦветПалитры/PaletteColor) → null, а не исключение', () => {
+    // ЦветПалитры распознаётся ONE_C_TYPE_NAMES (parseRepositoryUnit успешен), но
+    // META_TYPES.PaletteColor.folder не задан (вид без собственной папки выгрузки) —
+    // resolveUnitDirRel должен вернуть null, а не упасть на построении пути.
+    assert.strictEqual(resolveUnitXmlRel(EXAMPLE_CF, 'ЦветПалитры.Акцент'), null);
+  });
 });
 
 /**
@@ -459,5 +467,60 @@ suite('RepositoryObjectScope — resolveLockUnitByRelativePath (issue #1, раз
 
   test('неизвестная папка верхнего уровня → null', () => {
     assert.strictEqual(resolveLockUnitByRelativePath('НеизвестнаяПапка/Файл.xml', cfTarget), null);
+  });
+
+  test('путь заканчивается на КАТАЛОГ единицы (не .xml-файл) — имя последнего сегмента не обрезается (stripXmlExtension: ветка без .xml)', () => {
+    // Только строковые операции (запрет №11) — resolveUnitSuffixByRelativePath не
+    // проверяет существование файла, поэтому «путь к каталогу формы, без имени файла
+    // внутри» — легитимный вход, отличный от уже покрытого «путь к самому XML формы».
+    assert.strictEqual(
+      resolveLockUnitByRelativePath('Catalogs/Контрагенты/Forms/ФормаЭлемента', cfTarget),
+      'Справочник.Контрагенты.Форма.ФормаЭлемента'
+    );
+  });
+});
+
+/**
+ * `removeEmptyParentDirs` — раздел 10, Р4/Р8: после удаления файла подчинённой
+ * единицы освобождает опустевшие промежуточные каталоги (`Forms/`, если из неё
+ * убрали последнюю форму), но не трогает каталог, в котором остались другие
+ * файлы, и не падает, если каталог уже отсутствует на диске.
+ */
+suite('RepositoryObjectScope — removeEmptyParentDirs', () => {
+  // Область строится для ЕДИНИЦЫ формы (не владельца): область владельца с
+  // depth:'unit' исключает Forms/** целиком, а removeEmptyParentDirs здесь
+  // вызывается именно для файлов ВНУТРИ уже удалённой единицы (после rmSync
+  // самой формы или её содержимого), т.е. по её собственной области.
+  function formUnitScope(): Extract<ObjectScope, { kind: 'object' }> {
+    return resolveObjectScope(EXAMPLE_CF, 'Справочник.Контрагенты.Форма.ФормаЭлемента', cfTarget, 'unit') as Extract<ObjectScope, { kind: 'object' }>;
+  }
+
+  test('каталог после удаления файла остаётся непустым (есть другой файл единицы) — не удаляется, подъём останавливается', () => {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-remove-empty-parent-nonempty-'));
+    try {
+      const formDir = path.join(baseDir, 'Catalogs', 'Контрагенты', 'Forms', 'ФормаЭлемента');
+      // Ext/ уже опустел (CommandModule.bsl удалён отдельно, имитация «после rmSync») —
+      // подъём должен убрать именно его, но остановиться на ФормаЭлемента/, где
+      // остаётся собственный XML формы.
+      fs.mkdirSync(path.join(formDir, 'Ext'), { recursive: true });
+      fs.writeFileSync(path.join(formDir, 'ФормаЭлемента.xml'), '', 'utf-8');
+
+      removeEmptyParentDirs(baseDir, 'Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/CommandModule.bsl', formUnitScope());
+
+      assert.strictEqual(fs.existsSync(formDir), true, 'Каталог с оставшимся файлом единицы не должен удаляться.');
+      assert.strictEqual(fs.existsSync(path.join(formDir, 'ФормаЭлемента.xml')), true);
+    } finally {
+      fs.rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test('родительский каталог уже отсутствует на диске — readdirSync бросает, ветка catch отрабатывает без исключения наружу', () => {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-remove-empty-parent-missing-'));
+    try {
+      // Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext вообще не создавался — readdirSync бросит ENOENT.
+      assert.doesNotThrow(() => removeEmptyParentDirs(baseDir, 'Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/Module.bsl', formUnitScope()));
+    } finally {
+      fs.rmSync(baseDir, { recursive: true, force: true });
+    }
   });
 });
