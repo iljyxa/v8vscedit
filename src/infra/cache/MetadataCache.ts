@@ -148,7 +148,7 @@ export function saveMetadataCache(projectRoot: string, snapshot: MetadataCacheSn
   // (объект добавлен/переименован/удалён), чтобы updateMetadataCacheAfter* писали актуальное состояние.
   const persisted: MetadataCacheSnapshot = { ...snapshot, fingerprint: computeFingerprint(snapshot.rootPath) };
   // Пишем во временный файл рядом и атомарно подменяем целевой через rename,
-  // чтобы прерывание записи не оставило битый JSON в кэше (образец — HashCache.saveHashCache).
+  // чтобы прерывание записи не оставило битый JSON в кэше (образец — infra/fs/AtomicFileWrite.writeFileAtomicSync).
   const tempPath = `${filePath}.${String(process.pid)}.${String(Date.now())}.tmp`;
   try {
     fs.writeFileSync(tempPath, JSON.stringify(persisted), 'utf-8');

@@ -1,6 +1,7 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import { writeFileAtomicSync } from '../fs/AtomicFileWrite';
 
 export interface HashCacheSnapshot {
   schemaVersion: 1;
@@ -65,6 +66,14 @@ export function buildHashSnapshot(scopeKey: string, configDir: string): HashCach
   walkSupportedFiles(configDir, (fullPath, relativePath) => {
     files[relativePath] = computeFileHash(fullPath);
   });
+  return createHashSnapshot(scopeKey, files);
+}
+
+/**
+ * Оборачивает готовую карту хешей в снапшот текущей схемы — чтобы версию схемы
+ * и метку генерации знал только этот модуль, а не каждый построитель снапшота.
+ */
+export function createHashSnapshot(scopeKey: string, files: Record<string, string>): HashCacheSnapshot {
   return {
     schemaVersion: CACHE_SCHEMA_VERSION,
     scopeKey,
@@ -77,18 +86,7 @@ export function buildHashSnapshot(scopeKey: string, configDir: string): HashCach
  * Сохраняет снапшот на диск в служебный каталог проекта.
  */
 export function saveHashCache(projectRoot: string, snapshot: HashCacheSnapshot): void {
-  const filePath = getCacheFilePath(projectRoot, snapshot.scopeKey);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  // Пишем во временный файл рядом и атомарно подменяем целевой через rename,
-  // чтобы прерывание записи не оставило битый JSON в кэше.
-  const tempPath = `${filePath}.${String(process.pid)}.${String(Date.now())}.tmp`;
-  try {
-    fs.writeFileSync(tempPath, JSON.stringify(snapshot), 'utf-8');
-    fs.renameSync(tempPath, filePath);
-  } catch (error) {
-    fs.rmSync(tempPath, { force: true });
-    throw error;
-  }
+  writeFileAtomicSync(getCacheFilePath(projectRoot, snapshot.scopeKey), JSON.stringify(snapshot));
 }
 
 /**
@@ -172,12 +170,20 @@ export function isTemplateContentConfigFile(relativePath: string): boolean {
   return TEMPLATE_CONTENT_RE.test(relativePath.replace(/\\/g, '/'));
 }
 
-function getCacheFilePath(projectRoot: string, scopeKey: string): string {
+/**
+ * Путь к файлам кэша области без расширения: соседние служебные файлы одной
+ * области (снапшот хешей, stat-индекс) различаются только суффиксом.
+ */
+export function resolveHashCacheFileStem(projectRoot: string, scopeKey: string): string {
   const hash = crypto.createHash('sha1').update(scopeKey).digest('hex');
-  return path.join(projectRoot, HASH_CACHE_DIR, `${hash}.json`);
+  return path.join(projectRoot, HASH_CACHE_DIR, hash);
 }
 
-function computeFileHash(filePath: string): string {
+function getCacheFilePath(projectRoot: string, scopeKey: string): string {
+  return `${resolveHashCacheFileStem(projectRoot, scopeKey)}.json`;
+}
+
+export function computeFileHash(filePath: string): string {
   const content = fs.readFileSync(filePath);
   const oneShotHash = Reflect.get(crypto, 'hash');
   if (typeof oneShotHash === 'function') {
@@ -186,7 +192,7 @@ function computeFileHash(filePath: string): string {
   return crypto.createHash('sha1').update(content).digest('hex');
 }
 
-function walkSupportedFiles(
+export function walkSupportedFiles(
   rootDir: string,
   visitor: (fullPath: string, relativePath: string) => void
 ): void {
