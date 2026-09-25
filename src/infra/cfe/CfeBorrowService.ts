@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { META_TYPES, type MetaKind, getMetaFolder } from '../../domain/MetaTypes';
+import { buildBorrowedChildXml } from '../xml/BorrowedChildXml';
 import { ConfigurationXmlEditor } from '../xml/ConfigurationXmlEditor';
 import {
   MAIN_CHILD_OBJECTS_ENTRY_INDENT,
@@ -9,8 +10,6 @@ import {
 } from '../xml/MainChildObjectsEditor';
 import {
   extractChildMetaElementXml,
-  extractNestingAwareBlock,
-  findChildElementsFullXmlInBlock,
   writeTextFilePreservingBomAndEol,
 } from '../xml/XmlUtils';
 
@@ -427,129 +426,7 @@ export class CfeBorrowService {
       throw new Error(`Дочерний объект не найден в исходном XML: ${childTag}.${childName}`);
     }
 
-    return this.toBorrowedChildXml(sourceChildXml, childTag, MAIN_CHILD_OBJECTS_ENTRY_INDENT);
-  }
-
-  private toBorrowedChildXml(sourceChildXml: string, childTag: string, baseIndent: string): string {
-    const sourceUuid = this.extractUuid(sourceChildXml);
-    if (!sourceUuid) {
-      throw new Error(`Не удалось извлечь UUID дочернего объекта: ${childTag}`);
-    }
-
-    let xml = this.normalizeChildXmlIndent(sourceChildXml.replace(/^\uFEFF/, ''), baseIndent);
-    xml = this.replaceElementUuid(xml, childTag);
-    xml = this.ensureInternalInfo(xml, childTag);
-    xml = this.markChildAsBorrowed(xml, sourceUuid);
-
-    if (childTag === 'TabularSection') {
-      xml = this.markTabularSectionAttributesAsBorrowed(xml, baseIndent);
-    }
-
-    return xml;
-  }
-
-  private replaceElementUuid(xml: string, tagName: string): string {
-    const openTagRe = new RegExp(`<${tagName}\\b[^>]*>`);
-    const openTag = openTagRe.exec(xml)?.[0];
-    if (!openTag) {
-      return xml;
-    }
-
-    const nextOpenTag = /\suuid="[^"]*"/.test(openTag)
-      ? openTag.replace(/\suuid="[^"]*"/, ` uuid="${this.newGuid()}"`)
-      : openTag.replace(/>$/, ` uuid="${this.newGuid()}">`);
-    return xml.replace(openTag, nextOpenTag);
-  }
-
-  private ensureInternalInfo(xml: string, tagName: string): string {
-    const directInternalInfoRe = new RegExp(`<${tagName}\\b[^>]*>\\s*<InternalInfo[\\s/>]`);
-    if (directInternalInfoRe.test(xml)) {
-      return xml;
-    }
-
-    const openTagRe = new RegExp(`(<${tagName}\\b[^>]*>)`);
-    const openTagMatch = openTagRe.exec(xml);
-    if (!openTagMatch) {
-      return xml;
-    }
-
-    const baseIndent = this.detectElementIndent(xml);
-    return xml.replace(openTagMatch[1], `${openTagMatch[1]}\n${baseIndent}\t<InternalInfo/>`);
-  }
-
-  private markChildAsBorrowed(xml: string, sourceUuid: string): string {
-    const propertiesMatch = /<Properties>([\s\S]*?)<\/Properties>/.exec(xml);
-    if (!propertiesMatch) {
-      return xml;
-    }
-
-    const propsInner = propertiesMatch[1]
-      .replace(/\s*<ObjectBelonging>[\s\S]*?<\/ObjectBelonging>/, '')
-      .replace(/\s*<ExtendedConfigurationObject>[\s\S]*?<\/ExtendedConfigurationObject>/, '');
-    const propIndent = this.detectPropertiesIndent(propertiesMatch[1]);
-
-    let nextInner = propsInner;
-    const belonging = `\n${propIndent}<ObjectBelonging>Adopted</ObjectBelonging>`;
-    if (/<Name>[\s\S]*?<\/Name>/.test(nextInner)) {
-      nextInner = nextInner.replace(/(\s*<Name>)/, `${belonging}$1`);
-    } else {
-      nextInner = `${belonging}${nextInner}`;
-    }
-
-    const extended = `\n${propIndent}<ExtendedConfigurationObject>${sourceUuid}</ExtendedConfigurationObject>`;
-    const commentRe = /<Comment\s*\/>|<Comment>[\s\S]*?<\/Comment>/;
-    if (commentRe.test(nextInner)) {
-      nextInner = nextInner.replace(commentRe, (comment) => `${comment}${extended}`);
-    } else if (/<Name>[\s\S]*?<\/Name>/.test(nextInner)) {
-      nextInner = nextInner.replace(/(<Name>[\s\S]*?<\/Name>)/, `$1${extended}`);
-    } else {
-      nextInner = `${nextInner}${extended}`;
-    }
-
-    return xml.replace(propertiesMatch[1], nextInner);
-  }
-
-  private markTabularSectionAttributesAsBorrowed(xml: string, baseIndent: string): string {
-    const childObjectsInner = extractNestingAwareBlock(xml, 'ChildObjects');
-    if (!childObjectsInner) {
-      return xml;
-    }
-
-    let result = xml;
-    for (const attribute of findChildElementsFullXmlInBlock(childObjectsInner, 'Attribute')) {
-      const borrowedAttributeXml = this.toBorrowedChildXml(attribute.xml, 'Attribute', `${baseIndent}\t\t`);
-      result = result.replace(attribute.xml, borrowedAttributeXml);
-    }
-    return result;
-  }
-
-  private normalizeChildXmlIndent(xml: string, baseIndent: string): string {
-    const lines = xml.replace(/\r\n?/g, '\n').split('\n');
-    const indents = lines
-      .slice(1)
-      .filter((line) => line.trim().length > 0)
-      .map((line) => /^([ \t]*)/.exec(line)?.[1].length ?? 0);
-    const removeCount = indents.length > 0 ? Math.min(...indents) : 0;
-
-    return lines
-      .map((line, index) => {
-        if (line.trim().length === 0) {
-          return '';
-        }
-        const normalized = index === 0 ? line.trimStart() : line.slice(removeCount);
-        return `${baseIndent}${normalized}`;
-      })
-      .join('\n');
-  }
-
-  private detectElementIndent(xml: string): string {
-    const match = /^([ \t]*)</m.exec(xml);
-    return match?.[1] ?? '\t\t\t';
-  }
-
-  private detectPropertiesIndent(propsInner: string): string {
-    const match = /\n([ \t]*)<[^/!]/.exec(propsInner);
-    return match?.[1] ?? '\t\t\t\t';
+    return buildBorrowedChildXml(sourceChildXml, childTag, MAIN_CHILD_OBJECTS_ENTRY_INDENT, () => this.newGuid());
   }
 
   private resolveSourceXml(cfDir: string, folder: string, objectName: string): string | null {

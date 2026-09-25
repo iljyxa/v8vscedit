@@ -413,19 +413,24 @@ export function hasDirectChildElementNameInBlock(
   return false;
 }
 
-/** Возвращает все прямые дочерние элементы указанного типа из XML-блока. */
+/**
+ * Возвращает все прямые дочерние элементы указанного типа из XML-блока.
+ * `range` — позиция элемента ОТНОСИТЕЛЬНО блока: по ней мутаторы пересобирают блок срезами,
+ * а не заменой текста (подстановка через `String.replace` искажает `$`-последовательности).
+ */
 export function findChildElementsFullXmlInBlock(
   block: string,
   childTag: string
-): { name: string; xml: string }[] {
-  const result: { name: string; xml: string }[] = [];
-  for (const { childXml, nameNode } of iterateDirectChildrenWithName(block, childTag)) {
+): { name: string; xml: string; range: { start: number; end: number } }[] {
+  const result: { name: string; xml: string; range: { start: number; end: number } }[] = [];
+  for (const { range, childXml, nameNode } of iterateDirectChildrenWithName(block, childTag)) {
     if (!nameNode) {
       continue;
     }
     result.push({
       name: collectText(getElementChildren(nameNode)),
       xml: childXml,
+      range,
     });
   }
 
