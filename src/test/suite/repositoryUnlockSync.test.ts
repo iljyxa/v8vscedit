@@ -62,6 +62,7 @@ interface Harness {
   services: RepositoryFileSyncServices;
   outputLines: string[];
   markChangedCalls: string[][];
+  reloadCalls: number;
 }
 
 function createHarness(): Harness {
@@ -75,6 +76,7 @@ function createHarness(): Harness {
   const guard = new ConfigurationOperationGuard();
   const outputLines: string[] = [];
   const markChangedCalls: string[][] = [];
+  let reloadCalls = 0;
 
   const services: RepositoryFileSyncServices = {
     configurationOperationGuard: guard,
@@ -90,10 +92,13 @@ function createHarness(): Harness {
       refreshCacheForFiles: () => true,
     } as unknown as MetadataTreeProvider,
     refreshActionsView: () => undefined,
-    reloadEntries: () => Promise.resolve(),
+    reloadEntries: () => { reloadCalls += 1; return Promise.resolve(); },
   };
 
-  return { workspaceRoot, configRoot, target, repositoryService, guard, services, outputLines, markChangedCalls };
+  return {
+    workspaceRoot, configRoot, target, repositoryService, guard, services, outputLines, markChangedCalls,
+    get reloadCalls() { return reloadCalls; },
+  };
 }
 
 function baseDeps(overrides: Partial<RepositoryFileSyncDeps> = {}): RepositoryFileSyncDeps {
@@ -348,6 +353,35 @@ suite('RepositoryUnlockSync — корень рекурсивно с хеш-ма
     assert.deepStrictEqual([...(request.fullNames ?? [])].sort(), ['Справочник.А', 'Справочник.Б'].sort());
   });
 
+  test('изменился САМ Configuration.xml относительно манифеста — откат структурный, даже без удалённых/пропавших файлов (критерий: line "Configuration.xml в корне" в rollbackToEtalons)', async () => {
+    const harness = createHarness();
+    const configXmlPath = path.join(harness.configRoot, 'Configuration.xml');
+    const originalContent = fs.readFileSync(configXmlPath, 'utf-8');
+    harness.repositoryService.lockState.applyLock(harness.target, {
+      anchor: '__configuration_root__',
+      members: ['__configuration_root__'],
+      recursiveRoot: true,
+    });
+    harness.repositoryService.snapshots.captureRootManifest(harness.target);
+
+    // Локальная правка Configuration.xml ПОСЛЕ снятия манифеста.
+    fs.writeFileSync(configXmlPath, '<MetaDataObject changed="true"/>', 'utf-8');
+
+    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-unlock-root-configxml-'));
+    fs.writeFileSync(path.join(dumpDir, 'Configuration.xml'), originalContent, 'utf-8');
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      dumpToTemp: () => Promise.resolve({ ok: true, dir: dumpDir, dispose: () => fs.rmSync(dumpDir, { recursive: true, force: true }) }),
+      confirmRollback: () => Promise.resolve(true),
+    });
+
+    const outcome = await runRepositoryUnlockFlow(rootNode(harness), { recursive: true, force: false }, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(fs.readFileSync(configXmlPath, 'utf-8'), originalContent, 'Configuration.xml должен быть восстановлен к версии хранилища.');
+    assert.strictEqual(harness.reloadCalls, 1, 'Изменение самого Configuration.xml в корне обязано считаться структурным (reloadEntries), даже без удалённых/пропавших файлов.');
+  });
+
   test('нет манифеста (объект был захвачен ДО обновления расширения) — пропуск синхронизации файлов с логом, без исключения', async () => {
     const harness = createHarness();
     harness.repositoryService.lockState.applyLock(harness.target, {
@@ -453,6 +487,47 @@ suite('RepositoryUnlockSync — узел без валидной цели', () =
 
     assert.strictEqual(outcome, 'done');
     assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Товары'), false);
+  });
+
+  test('runRepositoryCommitFlow: node.label не задан для КОРНЯ — objectLabel резолвится из target.displayName (имени конфигурации)', async () => {
+    const harness = createHarness();
+    // <Name> обязателен: resolveTargetByConfigRoot()/resolveTargetByXmlPath() читают
+    // реальное имя конфигурации из файла — без тега узел резолвится в имя каталога.
+    fs.writeFileSync(path.join(harness.configRoot, 'Configuration.xml'), '<MetaDataObject><Name>ИмяИзФайла</Name></MetaDataObject>', 'utf-8');
+    const node: RepositoryNodeRef = { nodeKind: 'configuration', xmlPath: path.join(harness.configRoot, 'Configuration.xml') };
+    harness.repositoryService.lockState.applyLock(harness.target, { anchor: '__configuration_root__', members: ['__configuration_root__'] });
+    let notifyInfoMessage: string | undefined;
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      isFileSyncEnabled: () => false,
+      notifyInfo: (message: string) => { notifyInfoMessage = message; },
+    });
+
+    const outcome = await runRepositoryCommitFlow(node, formData({ keepLocked: false }), harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    // Для корня node.label не задаётся вызывающей стороной вовсе — objectLabel обязан
+    // резолвиться из target.displayName (имени конфигурации из <Name>), а не быть пустым.
+    assert.ok(notifyInfoMessage?.includes('ИмяИзФайла'), `сообщение обязано называть конфигурацию по имени: "${String(notifyInfoMessage)}"`);
+  });
+});
+
+suite('RepositoryUnlockSync — isRootNode: узел расширения (issue #1)', () => {
+  test('recursive unlock узла nodeKind:"extension" — хеш-кэш читается ДО аренды так же, как для "configuration" (ветка isRootNode)', async () => {
+    const harness = createHarness();
+    harness.repositoryService.lockState.applyLock(harness.target, {
+      anchor: '__configuration_root__',
+      members: ['__configuration_root__'],
+      recursiveRoot: true,
+    });
+    harness.repositoryService.snapshots.captureRootManifest(harness.target);
+    const node: RepositoryNodeRef = { nodeKind: 'extension', label: 'Расширение', xmlPath: path.join(harness.configRoot, 'Configuration.xml') };
+    const deps = baseDeps({ runRepositoryCli: () => Promise.resolve({ status: 'done' }), dumpToTemp: notCalled('dumpToTemp') });
+
+    const outcome = await runRepositoryUnlockFlow(node, { recursive: true, force: false }, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(harness.repositoryService.isRootLocked(harness.target), false);
   });
 });
 
@@ -588,6 +663,25 @@ suite('RepositoryUnlockSync — commit keepLocked с рекурсивным ко
 
     assert.strictEqual(outcome, 'done');
     assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Товары'), true);
+  });
+
+  test('keepLocked=true, корень захвачен НЕрекурсивно — recaptureSnapshotsFromProject идёт по members (сентинел, ветка isRootLockName)', async () => {
+    const harness = createHarness();
+    // Нерекурсивный захват корня — isRootRecursiveLocked=false, поэтому пересъём идёт
+    // НЕ хеш-манифестом (та ветка уже покрыта выше), а обычным циклом по members,
+    // где единственный member — сентинел корня (projectXml для него не резолвится —
+    // ветка subordinates:undefined).
+    harness.repositoryService.lockState.applyLock(harness.target, {
+      anchor: '__configuration_root__',
+      members: ['__configuration_root__'],
+    });
+    const deps = baseDeps({ runRepositoryCli: () => Promise.resolve({ status: 'done' }) });
+
+    const outcome = await runRepositoryCommitFlow(rootNode(harness), formData({ recursive: false, keepLocked: true }), harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(harness.repositoryService.isRootLocked(harness.target), true);
+    assert.strictEqual(harness.repositoryService.snapshots.readRootManifestHashes(harness.target), undefined, 'Хеш-манифест здесь не создаётся — снимок обычный, по scope "root".');
   });
 });
 
