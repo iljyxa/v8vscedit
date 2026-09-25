@@ -149,30 +149,55 @@ export function patchHashSnapshot(
 
 /**
  * Точечно обновляет хеш-кэш конфигурации/расширения по конкретным изменённым файлам —
- * в отличие от полного пересчёта всего `configDir` (используется для 100%-full импорта),
- * не трогает файлы вне `relativeFiles`. Кэш метаданных (структуру дерева объектов) не
- * обновляет: частичная выгрузка после захвата/получения из хранилища меняет содержимое
- * уже существующих объектов, а не состав дерева. Удаления в этом кэше не отражаются —
- * известное ограничение частичной выгрузки (см. `RepositoryService.buildPartialDumpPlan`).
- *
- * Общий для агентского (`AgentOperationService.importPartialFromDatabase`) и batch-пути
- * (`ExtensionCommandRunner.runBatchPartialDump`) частичной выгрузки — раньше эта логика
- * дублировалась в обоих местах.
+ * в отличие от полного пересчёта всего `configDir` не трогает файлы вне `relativeFiles`.
+ * Хеши читаются с диска; удалённые файлы передаются явно, т.к. по отсутствию файла
+ * нельзя отличить «удалён» от «не выгружался».
  */
 export function patchHashCacheForFiles(
   projectRoot: string,
   target: 'cf' | 'cfe',
   configDir: string,
   extensionName: string,
-  relativeFiles: readonly string[]
+  relativeFiles: readonly string[],
+  deletedFiles: readonly string[] = []
 ): void {
-  const scopeKey = buildScopeKey(target, configDir, extensionName);
-  const previous = loadHashCache(projectRoot, scopeKey);
   const supportedFiles = relativeFiles
     .map((relativeFile) => relativeFile.replace(/\\/g, '/'))
     .filter((relativeFile) => isSupportedConfigFile(relativeFile));
-  const changedHashes = collectCurrentHashes(configDir, supportedFiles);
-  saveHashCache(projectRoot, patchHashSnapshot(previous, changedHashes, []));
+  patchHashCacheEntries(
+    projectRoot,
+    target,
+    configDir,
+    extensionName,
+    collectCurrentHashes(configDir, supportedFiles),
+    deletedFiles
+  );
+}
+
+/**
+ * Вариант {@link patchHashCacheForFiles} с готовыми хешами: слияние с хранилищем
+ * фиксирует в кэше хеш версии хранилища (= состояния базы), даже если в проекте
+ * оставлен локальный вариант файла, поэтому хеш нельзя брать с диска.
+ */
+export function patchHashCacheEntries(
+  projectRoot: string,
+  target: 'cf' | 'cfe',
+  configDir: string,
+  extensionName: string,
+  entries: Readonly<Record<string, string>>,
+  deletedFiles: readonly string[]
+): void {
+  const scopeKey = buildScopeKey(target, configDir, extensionName);
+  const previous = loadHashCache(projectRoot, scopeKey);
+  const changedHashes: Record<string, string> = {};
+  for (const [relativeFile, hash] of Object.entries(entries)) {
+    const normalized = relativeFile.replace(/\\/g, '/');
+    if (isSupportedConfigFile(normalized)) {
+      changedHashes[normalized] = hash;
+    }
+  }
+  const deleted = deletedFiles.map((relativeFile) => relativeFile.replace(/\\/g, '/'));
+  saveHashCache(projectRoot, patchHashSnapshot(previous, changedHashes, deleted));
 }
 
 export function collectCurrentHashes(configDir: string, relativePaths: string[]): Record<string, string> {
@@ -205,7 +230,7 @@ function getCacheFilePath(projectRoot: string, scopeKey: string): string {
   return path.join(projectRoot, HASH_CACHE_DIR, `${hash}.json`);
 }
 
-function computeFileHash(filePath: string): string {
+export function computeFileHash(filePath: string): string {
   const content = fs.readFileSync(filePath);
   const oneShotHash = Reflect.get(crypto, 'hash');
   if (typeof oneShotHash === 'function') {
