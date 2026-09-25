@@ -247,8 +247,14 @@ suite('RepositoryCommandRunner — executeRepositoryCli: гарантирова�
     { label: 'cf (без -Extension)', configKind: 'cf' as const, extensionName: undefined },
     { label: 'cfe (с -Extension)', configKind: 'cfe' as const, extensionName: 'EVOLC' },
   ].forEach(({ label, configKind, extensionName }) => {
-    test(`env.json с привязкой есть, платформа 1С не установлена (${label}) → аргументы Конфигуратора собираются (includeChildObjects/-Extension), сбой только на поиске платформы`, async () => {
-      const defaults: Record<string, unknown> = { '--ibconnection': '/FC:\\Fake\\Base' };
+    test(`env.json с привязкой есть, исполняемый файл 1С не найден (${label}) → аргументы Конфигуратора собираются (includeChildObjects/-Extension), сбой только на поиске платформы`, async () => {
+      // Явный несуществующий `--path`: без него поиск берёт установленную платформу
+      // (/opt/1cv8, Program Files) и запускает настоящий Конфигуратор — исход зависел
+      // бы от машины, а не от кода.
+      const defaults: Record<string, unknown> = {
+        '--ibconnection': '/FC:\\Fake\\Base',
+        '--path': path.join(workspaceRoot, 'нет-платформы', '1cv8'),
+      };
       if (extensionName) {
         // Привязка расширения хранится в собственной секции env.json (RepositoryBindingStore.saveBinding).
         defaults.extension = { [extensionName]: { 'repo-path': 'http://fake-repo', 'repo-user': 'Administrator' } };
@@ -264,8 +270,8 @@ suite('RepositoryCommandRunner — executeRepositoryCli: гарантирова�
         services
       );
 
-      // Тестовое окружение заведомо без установленной платформы 1С — единственный
-      // детерминированный исход дальше сборки аргументов (сам запуск процесса — c8 ignore).
+      // Единственный детерминированный исход дальше сборки аргументов (сам запуск
+      // процесса — c8 ignore).
       assert.strictEqual(result.status, 'failed');
       assert.ok('message' in result && result.message.includes('Не найден исполняемый файл 1С'));
     });
