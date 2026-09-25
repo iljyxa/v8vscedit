@@ -160,6 +160,103 @@ suite('RepositoryLockSnapshotStore — captureFromDirectory/readSnapshotHashes/r
     }
   });
 
+  test('restoreToProject без снимка (fullName не захватывался) — пустой результат, без ошибки', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-restore-nosnap-'));
+    try {
+      const store = new RepositoryLockSnapshotStore(workspaceRoot);
+      const configRoot = path.join(workspaceRoot, 'src', 'cf');
+      const target: RepositoryTarget = { configRoot, configKind: 'cf', displayName: 'Тест' };
+      writeConfigurationXml(configRoot, fixtureUuid('snap-restore-nosnap-config'));
+      writeObjectXml(configRoot, 'Catalogs', 'Объект', 'Catalog', fixtureUuid('snap-restore-nosnap-object'), 'flat');
+      const scope = resolveObjectScope(configRoot, 'Справочник.Объект', target) as Extract<ObjectScope, { kind: 'object' }>;
+
+      const result = store.restoreToProject(target, 'Справочник.Объект', scope, path.join(workspaceRoot, 'backup'));
+
+      assert.deepStrictEqual(result, { restored: [], deleted: [], backups: [] });
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('restoreToProject восстанавливает НОВЫЙ (ещё не существующий в проекте) файл без бэкапа', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-restore-new-'));
+    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-restore-new-dump-'));
+    try {
+      const store = new RepositoryLockSnapshotStore(workspaceRoot);
+      const configRoot = path.join(workspaceRoot, 'src', 'cf');
+      const target: RepositoryTarget = { configRoot, configKind: 'cf', displayName: 'Тест' };
+      writeConfigurationXml(dumpDir, fixtureUuid('snap-restore-new-dump-config'));
+      writeObjectXml(dumpDir, 'Catalogs', 'Объект', 'Catalog', fixtureUuid('snap-restore-new-object-dump'), 'flat');
+      const dumpScope = resolveObjectScope(dumpDir, 'Справочник.Объект', target) as Extract<ObjectScope, { kind: 'object' }>;
+      store.captureFromDirectory(target, 'Справочник.Объект', dumpDir, dumpScope);
+
+      // Проект ещё не содержит объект вовсе (например, он появился только в хранилище).
+      writeConfigurationXml(configRoot, fixtureUuid('snap-restore-new-project-config'));
+      const projectXmlPath = path.join(configRoot, 'Catalogs', 'Объект.xml');
+      const projectScope = resolveObjectScope(dumpDir, 'Справочник.Объект', target) as Extract<ObjectScope, { kind: 'object' }>;
+
+      const result = store.restoreToProject(target, 'Справочник.Объект', projectScope, path.join(workspaceRoot, 'backup'));
+
+      assert.ok(result.restored.some((f: string) => path.resolve(f) === path.resolve(projectXmlPath)));
+      assert.strictEqual(result.backups.length, 0, 'Файла раньше не было в проекте — бэкапировать нечего.');
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+      fs.rmSync(dumpDir, { recursive: true, force: true });
+    }
+  });
+
+  test('манифест ссылается на файл, чья копия отсутствует в files/<rel> (повреждённое хранилище снимков) — запись пропускается', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-restore-missingcopy-'));
+    try {
+      const store = new RepositoryLockSnapshotStore(workspaceRoot);
+      const configRoot = path.join(workspaceRoot, 'src', 'cf');
+      const target: RepositoryTarget = { configRoot, configKind: 'cf', displayName: 'Тест' };
+      const fullName = 'Справочник.Повреждённый';
+      const snapshotDir = legacySnapshotDir(workspaceRoot, target, fullName);
+      fs.mkdirSync(snapshotDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(snapshotDir, 'manifest.json'),
+        `${JSON.stringify({ version: 3, files: ['Catalogs/Повреждённый.xml'], hashes: {}, depth: 'unit' }, null, 2)}\n`,
+        'utf-8'
+      );
+      // files/Catalogs/Повреждённый.xml сознательно НЕ создан — снимок повреждён.
+      writeConfigurationXml(configRoot, fixtureUuid('snap-restore-missingcopy-config'));
+      writeObjectXml(configRoot, 'Catalogs', 'Повреждённый', 'Catalog', fixtureUuid('snap-restore-missingcopy-object'), 'flat');
+      const scope = resolveObjectScope(configRoot, fullName, target) as Extract<ObjectScope, { kind: 'object' }>;
+
+      const result = store.restoreToProject(target, fullName, scope, path.join(workspaceRoot, 'backup'));
+
+      assert.deepStrictEqual(result.restored, [], 'Без копии в files/<rel> восстанавливать нечего — запись пропускается.');
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('манифест v1 (без хешей) ссылается на файл, чья копия исчезла из files/<rel> — readSnapshotInfo пропускает запись', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-legacy-missing-'));
+    try {
+      const store = new RepositoryLockSnapshotStore(workspaceRoot);
+      const configRoot = path.join(workspaceRoot, 'src', 'cf');
+      const target: RepositoryTarget = { configRoot, configKind: 'cf', displayName: 'Тест' };
+      const fullName = 'Справочник.ЛегасиПропавший';
+      const snapshotDir = legacySnapshotDir(workspaceRoot, target, fullName);
+      fs.mkdirSync(snapshotDir, { recursive: true });
+      // Манифест перечисляет файл, но копии в files/<rel> нет — hashIfExists должен
+      // молча вернуть undefined, а не бросить исключение из computeFileHash.
+      fs.writeFileSync(
+        path.join(snapshotDir, 'manifest.json'),
+        `${JSON.stringify({ files: ['Catalogs/Пропавший.xml'] }, null, 2)}\n`,
+        'utf-8'
+      );
+
+      const hashes = store.readSnapshotHashes(target, fullName);
+
+      assert.deepStrictEqual(hashes, {}, 'Запись без копии файла и без хеша в манифесте не попадает в результат.');
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   test('манифест v1 ({files}, без хешей, с копией содержимого в files/<rel>) читается корректно', () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-legacy-'));
     try {
@@ -239,6 +336,24 @@ suite('RepositoryLockSnapshotStore — captureRootManifest/diffRootManifest (iss
       const target: RepositoryTarget = { configRoot, configKind: 'cf', displayName: 'Тест' };
       const diff = store.diffRootManifest(target);
       assert.deepStrictEqual(diff, { owners: [], hasManifest: false });
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('root-manifest.json не объект (JSON-массив) → readRootManifestHashes/diffRootManifest трактуют его как отсутствие манифеста', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-root-notobject-'));
+    try {
+      const store = new RepositoryLockSnapshotStore(workspaceRoot);
+      const configRoot = path.join(workspaceRoot, 'src', 'cf');
+      writeConfigurationXml(configRoot, fixtureUuid('snap-root-notobject-config'));
+      const target: RepositoryTarget = { configRoot, configKind: 'cf', displayName: 'Тест' };
+      const manifestPath = path.join(workspaceRoot, '.v8vscedit', 'repository', 'snapshots', buildScopeKey(target), 'root-manifest.json');
+      fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+      fs.writeFileSync(manifestPath, '["не объект"]', 'utf-8');
+
+      assert.strictEqual(store.readRootManifestHashes(target), undefined);
+      assert.deepStrictEqual(store.diffRootManifest(target), { owners: [], hasManifest: false });
     } finally {
       fs.rmSync(workspaceRoot, { recursive: true, force: true });
     }

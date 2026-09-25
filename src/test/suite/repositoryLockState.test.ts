@@ -168,6 +168,49 @@ suite('RepositoryLockState — таблица переходов (план ар�
     state.applyUnlock(target, { anchor: 'Справочник.А', members: ['Справочник.А'], recursive: false, isRoot: false });
     assert.strictEqual(state.isLocked(target, 'Справочник.А'), false);
   });
+
+  test('unlock recursive:true якоря БЕЗ существующей группы (одиночный объект) — снимается только сам якорь (fallback ?? [])', () => {
+    const { state, target } = createState();
+    state.applyLock(target, { anchor: 'Справочник.А', members: ['Справочник.А'] });
+
+    const removed = state.applyUnlock(target, { anchor: 'Справочник.А', members: ['Справочник.А'], recursive: true, isRoot: false });
+
+    assert.deepStrictEqual(removed, ['Справочник.А']);
+    assert.strictEqual(state.isLocked(target, 'Справочник.А'), false);
+  });
+
+  test('unlock рекурсивно одной группы не трогает lockGroups ДРУГОЙ, не связанной с ней группы', () => {
+    const { state, target } = createState();
+    state.applyLock(target, { anchor: 'Подсистема.Продажи', members: ['Подсистема.Продажи', 'Справочник.Товары'] });
+    state.applyLock(target, { anchor: 'Подсистема.Закупки', members: ['Подсистема.Закупки', 'Справочник.Поставщики'] });
+
+    state.applyUnlock(target, { anchor: 'Подсистема.Продажи', members: ['Подсистема.Продажи', 'Справочник.Товары'], recursive: true, isRoot: false });
+
+    assert.strictEqual(state.isLocked(target, 'Подсистема.Продажи'), false);
+    assert.strictEqual(state.isLocked(target, 'Подсистема.Закупки'), true, 'Другая группа не должна пострадать от отмены соседней.');
+    assert.strictEqual(state.isLocked(target, 'Справочник.Поставщики'), true);
+    assert.deepStrictEqual(
+      [...(state.getLockGroup(target, 'Подсистема.Закупки') ?? [])].sort(),
+      ['Подсистема.Закупки', 'Справочник.Поставщики'].sort()
+    );
+  });
+
+  test('setLocked с пустым списком — no-op, состояние не меняется', () => {
+    const { state, target } = createState();
+    state.applyLock(target, { anchor: 'Справочник.А', members: ['Справочник.А'] });
+    state.setLocked(target, [], true);
+    assert.strictEqual(state.isLocked(target, 'Справочник.А'), true, 'Пустой список не должен ничего менять.');
+  });
+
+  test('setLocked(..., false) снимает явный захват (ветка locked=false)', () => {
+    const { state, target } = createState();
+    state.setLocked(target, ['Справочник.А'], true);
+    assert.strictEqual(state.isLocked(target, 'Справочник.А'), true);
+
+    state.setLocked(target, ['Справочник.А'], false);
+
+    assert.strictEqual(state.isLocked(target, 'Справочник.А'), false);
+  });
 });
 
 suite('RepositoryLockState — миграция и устойчивость state.json', () => {
@@ -238,6 +281,100 @@ suite('RepositoryLockState — миграция и устойчивость stat
 
       const second = new RepositoryLockState(workspaceRoot);
       assert.strictEqual(second.isLocked(target, 'Справочник.А'), true);
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('state.json — не JSON (синтаксически битый файл) → трактуется как пустое состояние', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lockstate-notjson-'));
+    try {
+      const target: RepositoryTarget = { configRoot: path.join(workspaceRoot, 'src', 'cf'), configKind: 'cf', displayName: 'Тест' };
+      fs.mkdirSync(path.dirname(stateFilePath(workspaceRoot)), { recursive: true });
+      fs.writeFileSync(stateFilePath(workspaceRoot), '{ не json вовсе', 'utf-8');
+
+      const state = new RepositoryLockState(workspaceRoot);
+
+      assert.doesNotThrow(() => state.isLocked(target, 'Справочник.Что-либо'));
+      assert.strictEqual(state.isLocked(target, 'Справочник.Что-либо'), false);
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('state.json — валидный JSON неверной формы (версия/scopes) → трактуется как пустое состояние', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lockstate-badshape-'));
+    try {
+      const target: RepositoryTarget = { configRoot: path.join(workspaceRoot, 'src', 'cf'), configKind: 'cf', displayName: 'Тест' };
+      fs.mkdirSync(path.dirname(stateFilePath(workspaceRoot)), { recursive: true });
+
+      // Корень — массив (не объект).
+      fs.writeFileSync(stateFilePath(workspaceRoot), JSON.stringify(['не', 'объект']), 'utf-8');
+      assert.strictEqual(new RepositoryLockState(workspaceRoot).isLocked(target, 'Справочник.Что-либо'), false);
+
+      // version не 2.
+      fs.writeFileSync(stateFilePath(workspaceRoot), JSON.stringify({ version: 1, scopes: {} }), 'utf-8');
+      assert.strictEqual(new RepositoryLockState(workspaceRoot).isLocked(target, 'Справочник.Что-либо'), false);
+
+      // scopes — не объект.
+      fs.writeFileSync(stateFilePath(workspaceRoot), JSON.stringify({ version: 2, scopes: ['не', 'объект'] }), 'utf-8');
+      assert.strictEqual(new RepositoryLockState(workspaceRoot).isLocked(target, 'Справочник.Что-либо'), false);
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('запись scope не объект (например, строка) — пропускается, остальные scope читаются', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lockstate-badscope-'));
+    try {
+      const target: RepositoryTarget = { configRoot: path.join(workspaceRoot, 'src', 'cf'), configKind: 'cf', displayName: 'Тест' };
+      const scopeKey = crypto.createHash('sha1').update(`cf|${path.resolve(target.configRoot)}|`).digest('hex');
+      fs.mkdirSync(path.dirname(stateFilePath(workspaceRoot)), { recursive: true });
+      fs.writeFileSync(
+        stateFilePath(workspaceRoot),
+        JSON.stringify({ version: 2, scopes: { 'посторонний-ключ': 'не объект', [scopeKey]: { lockedFullNames: ['Справочник.А'] } } }),
+        'utf-8'
+      );
+
+      const state = new RepositoryLockState(workspaceRoot);
+
+      assert.strictEqual(state.isLocked(target, 'Справочник.А'), true);
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('scope без lockedFullNames (fallback ?? []) и с валидными rootRecursive/lockGroups/releasedUnderRoot — читаются корректно', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lockstate-fullshape-'));
+    try {
+      const target: RepositoryTarget = { configRoot: path.join(workspaceRoot, 'src', 'cf'), configKind: 'cf', displayName: 'Тест' };
+      const scopeKey = crypto.createHash('sha1').update(`cf|${path.resolve(target.configRoot)}|`).digest('hex');
+      fs.mkdirSync(path.dirname(stateFilePath(workspaceRoot)), { recursive: true });
+      fs.writeFileSync(
+        stateFilePath(workspaceRoot),
+        JSON.stringify({
+          version: 2,
+          scopes: {
+            [scopeKey]: {
+              // lockedFullNames отсутствует вовсе — должен примениться fallback ?? [].
+              rootRecursive: true,
+              lockGroups: { 'Подсистема.Продажи': ['Подсистема.Продажи', 'Справочник.Товары'] },
+              releasedUnderRoot: ['Справочник.Освобождённый'],
+            },
+          },
+        }),
+        'utf-8'
+      );
+
+      const state = new RepositoryLockState(workspaceRoot);
+
+      assert.strictEqual(state.isRootRecursiveLocked(target), true);
+      assert.strictEqual(state.isLocked(target, 'Справочник.ЛюбойОбъект'), true, 'rootRecursive из персистентного файла должен применяться.');
+      assert.strictEqual(state.isLocked(target, 'Справочник.Освобождённый'), false, 'releasedUnderRoot из персистентного файла должен применяться.');
+      assert.deepStrictEqual(
+        [...(state.getLockGroup(target, 'Подсистема.Продажи') ?? [])].sort(),
+        ['Подсистема.Продажи', 'Справочник.Товары'].sort()
+      );
     } finally {
       fs.rmSync(workspaceRoot, { recursive: true, force: true });
     }
