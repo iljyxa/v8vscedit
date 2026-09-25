@@ -24,9 +24,11 @@
  * `example/2.21/src/cfe/EVOLC`.
  */
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { registerExtensionCommands } from '../../ui/commands/ext/ExtensionCommands';
+import { type ConnectExtensionDeps, registerExtensionCommands } from '../../ui/commands/ext/ExtensionCommands';
 import { disposeCachedAgentOperationServices } from '../../ui/commands/ext/ExtensionCommandRunner';
 import { registerRepositoryCommands } from '../../ui/commands/repository/RepositoryCommands';
 import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOperationGuard';
@@ -111,12 +113,32 @@ function createServicesProxy(): CommandServices {
   ) as CommandServices;
 }
 
+/**
+ * Запрос списка расширений и декомпиляция — запуск Конфигуратора 1С, которого
+ * нет в тестовом окружении, поэтому они подменяются. По умолчанию — throw-стабы:
+ * сценарии, не касающиеся `connectExtension`, не должны до них доходить.
+ */
+function createConnectDeps(overrides: Partial<ConnectExtensionDeps> = {}): ConnectExtensionDeps {
+  return {
+    listDatabaseExtensions: notCalled('listDatabaseExtensions'),
+    decompileExtension: notCalled('decompileExtension'),
+    ...overrides,
+  };
+}
+
+const connectDepsBox: { current: ConnectExtensionDeps } = { current: createConnectDeps() };
+
+const connectDepsProxy: ConnectExtensionDeps = {
+  listDatabaseExtensions: (...args) => connectDepsBox.current.listDatabaseExtensions(...args),
+  decompileExtension: (...args) => connectDepsBox.current.decompileExtension(...args),
+};
+
 suite('ConfigurationOperationGuard — интеграция ExtensionCommands/RepositoryCommands (issue #10)', () => {
   let context: vscode.ExtensionContext;
 
   suiteSetup(() => {
     context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
-    registerExtensionCommands(context, createServicesProxy());
+    registerExtensionCommands(context, createServicesProxy(), connectDepsProxy);
     registerRepositoryCommands(context, createServicesProxy());
   });
 
@@ -127,6 +149,7 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
 
   setup(() => {
     servicesBox.current = createServices();
+    connectDepsBox.current = createConnectDeps();
   });
 
   test('guard занят «Хранилище: синхронизация» — updateChangedConfigurations быстро разрешается в false, getChangedConfigurations/setTreeProcessingState не вызваны, аренда цела', async () => {
@@ -295,5 +318,195 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
 
     assert.strictEqual(showCalls, 1);
     assert.deepStrictEqual(events, []);
+  });
+
+  /**
+   * Issue #38: каталог `src/cfe/<имя>` создаётся только внутри захваченной
+   * операции. Иначе при занятом guard он оставался пустым, и повторное
+   * подключение того же расширения становилось невозможным.
+   */
+  suite('connectExtension — каталог расширения и общий guard (issue #38)', () => {
+    type WindowStubs = Pick<typeof vscode.window, 'showQuickPick' | 'showInformationMessage' | 'showErrorMessage'>;
+    const windowRef = vscode.window as WindowStubs;
+    let originals: WindowStubs;
+    let workspaceRoot: string;
+    let extensionRoot: string;
+    let informationMessages: string[];
+    let errorMessages: string[];
+    let quickPickCalls: number;
+    /** Что делает «пользователь» в QuickPick выбора расширения; по умолчанию выбирает EVOLC. */
+    let onQuickPick: () => void;
+
+    function createWorkspaceServices(overrides: Partial<CommandServices>): CommandServices {
+      return createServices({
+        workspaceFolder: { uri: vscode.Uri.file(workspaceRoot), name: 'connect-fixture', index: 0 },
+        ...overrides,
+      });
+    }
+
+    setup(() => {
+      workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-connect-extension-'));
+      extensionRoot = path.join(workspaceRoot, 'src', 'cfe', 'EVOLC');
+      informationMessages = [];
+      errorMessages = [];
+      quickPickCalls = 0;
+      onQuickPick = () => undefined;
+      originals = {
+        showQuickPick: vscode.window.showQuickPick,
+        showInformationMessage: vscode.window.showInformationMessage,
+        showErrorMessage: vscode.window.showErrorMessage,
+      };
+      windowRef.showQuickPick = ((items: readonly string[]) => {
+        quickPickCalls += 1;
+        onQuickPick();
+        return Promise.resolve(items.find((item) => item === 'EVOLC'));
+      }) as WindowStubs['showQuickPick'];
+      windowRef.showInformationMessage = ((message: string) => {
+        informationMessages.push(message);
+        return Promise.resolve(undefined);
+      });
+      windowRef.showErrorMessage = ((message: string) => {
+        errorMessages.push(message);
+        return Promise.resolve(undefined);
+      });
+    });
+
+    teardown(() => {
+      windowRef.showQuickPick = originals.showQuickPick;
+      windowRef.showInformationMessage = originals.showInformationMessage;
+      windowRef.showErrorMessage = originals.showErrorMessage;
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    });
+
+    test('guard занят до команды — список расширений из базы не запрашивается, каталог не создаётся', async () => {
+      const guard = new ConfigurationOperationGuard();
+      const lease = guard.tryAcquire('Импорт конфигураций');
+      let listCalls = 0;
+      servicesBox.current = createWorkspaceServices({ configurationOperationGuard: guard });
+      connectDepsBox.current = createConnectDeps({
+        listDatabaseExtensions: () => { listCalls += 1; return Promise.resolve(['EVOLC']); },
+      });
+
+      await vscode.commands.executeCommand('v8vscedit.connectExtension');
+
+      assert.strictEqual(listCalls, 0);
+      assert.strictEqual(quickPickCalls, 0);
+      assert.deepStrictEqual(informationMessages, ['Операция с конфигурацией уже выполняется. Дождитесь её завершения.']);
+      assert.strictEqual(fs.existsSync(extensionRoot), false);
+      assert.strictEqual(guard.heldBy, 'Импорт конфигураций');
+      lease?.release();
+    });
+
+    test('guard заняли, пока был открыт выбор расширения — каталог не создаётся, повторное подключение не блокируется', async () => {
+      const guard = new ConfigurationOperationGuard();
+      let foreignLease: ReturnType<ConfigurationOperationGuard['tryAcquire']>;
+      servicesBox.current = createWorkspaceServices({ configurationOperationGuard: guard });
+      connectDepsBox.current = createConnectDeps({
+        listDatabaseExtensions: () => Promise.resolve(['EVOLC']),
+      });
+      onQuickPick = () => { foreignLease = guard.tryAcquire('Синхронизация с хранилищем: Основная конфигурация'); };
+
+      await vscode.commands.executeCommand('v8vscedit.connectExtension');
+
+      assert.strictEqual(quickPickCalls, 1);
+      assert.deepStrictEqual(informationMessages, ['Операция с конфигурацией уже выполняется. Дождитесь её завершения.']);
+      assert.strictEqual(fs.existsSync(extensionRoot), false, 'пустой каталог расширения не должен оставаться');
+      assert.strictEqual(guard.heldBy, 'Синхронизация с хранилищем: Основная конфигурация');
+      foreignLease?.release();
+
+      // Каталог не остался, поэтому EVOLC снова предлагается к подключению,
+      // а не отбивается как «уже подключённое».
+      onQuickPick = () => undefined;
+      connectDepsBox.current = createConnectDeps({
+        listDatabaseExtensions: () => Promise.resolve(['EVOLC']),
+        decompileExtension: () => Promise.resolve(false),
+      });
+      servicesBox.current = createWorkspaceServices({
+        configurationOperationGuard: guard,
+        standaloneServerService: {
+          refreshHealth: () => Promise.resolve({ configured: false, state: 'stopped' }),
+        } as unknown as CommandServices['standaloneServerService'],
+        setTreeProcessingState: () => undefined,
+        reloadEntries: () => Promise.resolve(),
+      });
+
+      await vscode.commands.executeCommand('v8vscedit.connectExtension');
+
+      assert.strictEqual(quickPickCalls, 2);
+      assert.deepStrictEqual(errorMessages, []);
+    });
+
+    test('guard свободен, выгрузка удалась — каталог создан до запуска Конфигуратора и остаётся, конфигурация помечена чистой', async () => {
+      const guard = new ConfigurationOperationGuard();
+      const markCleanCalls: string[][] = [];
+      const updateSourceCalls: string[][] = [];
+      let observedDuringDecompile: { dirExists: boolean; heldBy: string | undefined } | undefined;
+      servicesBox.current = createWorkspaceServices({
+        configurationOperationGuard: guard,
+        standaloneServerService: {
+          refreshHealth: () => Promise.resolve({ configured: false, state: 'stopped' }),
+        } as unknown as CommandServices['standaloneServerService'],
+        setTreeProcessingState: () => undefined,
+        markConfigurationsClean: (roots: string[]) => { markCleanCalls.push(roots); },
+        reloadEntries: () => Promise.resolve(),
+        treeProvider: { getEntries: () => [] } as unknown as CommandServices['treeProvider'],
+        bslAnalyzerConfigService: {
+          updateSource: (roots: string[]) => { updateSourceCalls.push(roots); },
+        } as unknown as CommandServices['bslAnalyzerConfigService'],
+      });
+      connectDepsBox.current = createConnectDeps({
+        listDatabaseExtensions: () => Promise.resolve(['EVOLC']),
+        decompileExtension: (name, root) => {
+          observedDuringDecompile = { dirExists: fs.existsSync(root), heldBy: guard.heldBy };
+          // Результат выгрузки Конфигуратора — настоящее расширение EVOLC из example/.
+          fs.cpSync(EXAMPLE_CFE_EVOLC, root, { recursive: true });
+          assert.strictEqual(name, 'EVOLC');
+          return Promise.resolve(true);
+        },
+      });
+
+      await vscode.commands.executeCommand('v8vscedit.connectExtension');
+
+      assert.deepStrictEqual(observedDuringDecompile, { dirExists: true, heldBy: 'Подключение расширения EVOLC' });
+      assert.strictEqual(fs.existsSync(path.join(extensionRoot, 'Configuration.xml')), true);
+      assert.deepStrictEqual(markCleanCalls, [[extensionRoot]]);
+      assert.deepStrictEqual(updateSourceCalls, [[extensionRoot]]);
+      assert.strictEqual(guard.isBusy, false);
+    });
+
+    const FAILURE_CASES: { label: string; decompile: ConnectExtensionDeps['decompileExtension'] }[] = [
+      { label: 'выгрузка вернула false', decompile: () => Promise.resolve(false) },
+      { label: 'выгрузка бросила исключение', decompile: () => Promise.reject(new Error('Конфигуратор завершился с ошибкой')) },
+    ];
+
+    FAILURE_CASES.forEach(({ label, decompile }) => {
+      test(`guard свободен, ${label} — созданный каталог удаляется, guard освобождён`, async () => {
+        const guard = new ConfigurationOperationGuard();
+        let reloadCalls = 0;
+        let dirExistedDuringDecompile = false;
+        servicesBox.current = createWorkspaceServices({
+          configurationOperationGuard: guard,
+          standaloneServerService: {
+            refreshHealth: () => Promise.resolve({ configured: false, state: 'stopped' }),
+          } as unknown as CommandServices['standaloneServerService'],
+          setTreeProcessingState: () => undefined,
+          reloadEntries: () => { reloadCalls += 1; return Promise.resolve(); },
+        });
+        connectDepsBox.current = createConnectDeps({
+          listDatabaseExtensions: () => Promise.resolve(['EVOLC']),
+          decompileExtension: (...args) => {
+            dirExistedDuringDecompile = fs.existsSync(args[1]);
+            return decompile(...args);
+          },
+        });
+
+        await vscode.commands.executeCommand('v8vscedit.connectExtension');
+
+        assert.strictEqual(dirExistedDuringDecompile, true);
+        assert.strictEqual(fs.existsSync(extensionRoot), false);
+        assert.strictEqual(reloadCalls, 1);
+        assert.strictEqual(guard.isBusy, false);
+      });
+    });
   });
 });

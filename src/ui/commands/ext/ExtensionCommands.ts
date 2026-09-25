@@ -36,10 +36,26 @@ interface RootConfigurationTarget extends ImportTarget {
   extensionName?: string;
 }
 
+/**
+ * Точки запуска Конфигуратора в команде подключения расширения. Внедряются,
+ * чтобы захват общего guard'а и судьбу каталога `src/cfe/<имя>` можно было
+ * проверить без процесса 1С.
+ */
+export interface ConnectExtensionDeps {
+  readonly listDatabaseExtensions: typeof listConnectedDatabaseExtensions;
+  readonly decompileExtension: typeof runDecompileExtension;
+}
+
+export const DEFAULT_CONNECT_EXTENSION_DEPS: ConnectExtensionDeps = {
+  listDatabaseExtensions: listConnectedDatabaseExtensions,
+  decompileExtension: runDecompileExtension,
+};
+
 /** Регистрирует команды управления расширением 1С. */
 export function registerExtensionCommands(
   context: vscode.ExtensionContext,
-  services: CommandServices
+  services: CommandServices,
+  connectDeps: ConnectExtensionDeps = DEFAULT_CONNECT_EXTENSION_DEPS
 ): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('v8vscedit.importConfigurations', async () => {
@@ -213,8 +229,14 @@ export function registerExtensionCommands(
     }),
 
     vscode.commands.registerCommand('v8vscedit.connectExtension', async () => {
-      /* c8 ignore next -- строка вызова vscode-команды; не юнит-тестируется без полного харнесса CommandServices, ветвящаяся логика выбора имени — в planExtensionChoices (покрыта на 100%) */
-      const normalizedExtensionName = await resolveExtensionNameToConnect(services);
+      // Запрос списка расширений — отдельный запуск Конфигуратора и выбор
+      // пользователя; при занятом guard'е подключение всё равно не стартует.
+      if (services.configurationOperationGuard.isBusy) {
+        notifyConfigurationOperationBusy();
+        return;
+      }
+
+      const normalizedExtensionName = await resolveExtensionNameToConnect(services, connectDeps.listDatabaseExtensions);
       if (!normalizedExtensionName) {
         return;
       }
@@ -229,7 +251,6 @@ export function registerExtensionCommands(
         return;
       }
 
-      fs.mkdirSync(extensionRoot, { recursive: true });
       await runExclusiveConfigurationOperation(
         {
           title: `Подключение расширения ${normalizedExtensionName}`,
@@ -245,13 +266,18 @@ export function registerExtensionCommands(
             await services.reloadEntries();
           },
         },
-        () =>
-          runDecompileExtension(
+        () => {
+          // Каталог создаётся только под захваченным guard'ом: при отказе в
+          // захвате afterFailure не вызывается, и пустой src/cfe/<имя> остался
+          // бы, блокируя повторное подключение того же расширения.
+          fs.mkdirSync(extensionRoot, { recursive: true });
+          return connectDeps.decompileExtension(
             normalizedExtensionName,
             extensionRoot,
             services.workspaceFolder,
             services.outputChannel
-          )
+          );
+        }
       );
     }),
 
@@ -595,10 +621,13 @@ function isDirectory(directoryPath: string): boolean {
  * причина явно сообщается пользователю. Ветвящаяся логика выбора вынесена в
  * чистую `planExtensionChoices`; здесь — только диалоги vscode.
  */
-/* c8 ignore start -- диалоги vscode (QuickPick) и чтение ФС списка подключённых расширений; не юнит-тестируется (правило CLAUDE.md №4), решающая логика — в planExtensionChoices */
-async function resolveExtensionNameToConnect(services: CommandServices): Promise<string | undefined> {
+/* c8 ignore start -- диалоги vscode (QuickPick) и чтение ФС списка подключённых расширений; проверяется только интеграционно (suite issue #38 в configurationOperationGuardCommands.test.ts), решающая логика — в planExtensionChoices */
+async function resolveExtensionNameToConnect(
+  services: CommandServices,
+  listDatabaseExtensions: ConnectExtensionDeps['listDatabaseExtensions']
+): Promise<string | undefined> {
   const workspaceRoot = services.workspaceFolder.uri.fsPath;
-  const dbNames = await listConnectedDatabaseExtensions(services.workspaceFolder, services.outputChannel);
+  const dbNames = await listDatabaseExtensions(services.workspaceFolder, services.outputChannel);
 
   if (dbNames === undefined) {
     await vscode.window.showErrorMessage(
