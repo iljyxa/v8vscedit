@@ -53,6 +53,18 @@ export interface CollectMergeFileStatesOptions {
   baseHashes: Readonly<Record<string, string>>;
   snapshotHashes?: Readonly<Record<string, string>>;
   dirtyRelativePaths: readonly string[];
+  /**
+   * Области объектов, удалённых из хранилища (рекурсивное получение корня по
+   * ConfigDumpInfo): их файлов в выгрузке нет по определению, поэтому защита от
+   * неполной выгрузки к ним не применяется — все локальные файлы идут на удаление.
+   */
+  removedScopes?: readonly ObjectScope[];
+  /**
+   * Область без главного файла в выгрузке (XML объекта, Configuration.xml) считается
+   * выгруженной не полностью: так ведёт себя захват/получение существующих объектов,
+   * где пустая выгрузка — сбой списка объектов, а не удаление объекта из хранилища.
+   */
+  requirePrimaryFile?: boolean;
 }
 
 /**
@@ -63,7 +75,10 @@ const CHILD_ELEMENT_DIRS: Readonly<Record<string, string>> = {
   Form: 'Forms',
   Template: 'Templates',
   Command: 'Commands',
+  Subsystem: 'Subsystems',
 };
+
+const CONFIGURATION_XML_FILE = 'Configuration.xml';
 
 const TEXT_MERGE_EXTENSIONS: ReadonlySet<string> = new Set(['.bsl', '.xml', '.txt', '.html', '.json']);
 
@@ -132,6 +147,7 @@ export function collectMergeFileStates(options: CollectMergeFileStatesOptions): 
       dumpByProjectRel.set(toPosixRel(mapDumpPathToProject(dumpRel, scope, projectLayout)), dumpRel);
     }
     const projectFiles = collectScopeFiles(options.configRoot, scope);
+    const scopeIncomplete = options.requirePrimaryFile === true && !hasPrimaryDumpFile(scope, dumpFiles);
     for (const rel of new Set([...dumpByProjectRel.keys(), ...projectFiles])) {
       if (states.has(rel)) {
         continue;
@@ -147,7 +163,7 @@ export function collectMergeFileStates(options: CollectMergeFileStatesOptions): 
       if (dumpRel && dumpRel !== rel) {
         state.dumpRel = dumpRel;
       }
-      if (!dumpRel && incompleteDirs.some((dir) => rel === `${dir}.xml` || rel.startsWith(`${dir}/`))) {
+      if (!dumpRel && (scopeIncomplete || incompleteDirs.some((dir) => rel === `${dir}.xml` || rel.startsWith(`${dir}/`)))) {
         state.incomplete = true;
       }
       if (dirty.has(rel)) {
@@ -156,7 +172,32 @@ export function collectMergeFileStates(options: CollectMergeFileStatesOptions): 
       states.set(rel, state);
     }
   }
+  for (const scope of options.removedScopes ?? []) {
+    for (const rel of collectScopeFiles(options.configRoot, scope)) {
+      if (states.has(rel)) {
+        continue;
+      }
+      const state: MergeFileState = {
+        rel,
+        repositoryHash: null,
+        localHash: hashIfExists(path.join(options.configRoot, rel)),
+        baseHash: lookupHash(options.baseHashes, rel) ?? lookupHash(options.snapshotHashes, rel),
+        scope,
+      };
+      if (dirty.has(rel)) {
+        state.forceConflict = true;
+      }
+      states.set(rel, state);
+    }
+  }
   return [...states.values()];
+}
+
+function hasPrimaryDumpFile(scope: ObjectScope, dumpFiles: readonly string[]): boolean {
+  if (scope.kind === 'object') {
+    return dumpFiles.some((rel) => isObjectXmlRel(rel, scope));
+  }
+  return dumpFiles.includes(CONFIGURATION_XML_FILE);
 }
 
 /**

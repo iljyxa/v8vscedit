@@ -66,6 +66,17 @@ export function resolveObjectScope(configRoot: string, fullName: string, target:
   return { kind: 'object', fullName, xmlRel, dirRel, excludeDirRels };
 }
 
+/**
+ * Область подсистемы вместе с вложенными подсистемами. Исключение `Subsystems/**`
+ * осмысленно только для подсистемы как отдельного объекта захвата; при рекурсивном
+ * захвате и при получении владельца `Subsystem.A` по ConfigDumpInfo (туда же
+ * сгруппированы записи `Subsystem.A.Subsystem.B`) вложенные подсистемы приходят в
+ * составе выгрузки родителя и без этого не применились бы.
+ */
+export function includeNestedSubsystems(scope: ObjectScope): ObjectScope {
+  return scope.kind === 'object' && scope.excludeDirRels.length > 0 ? { ...scope, excludeDirRels: [] } : scope;
+}
+
 function objectXmlForms(scope: Extract<ObjectScope, { kind: 'object' }>): { flat: string; deep: string } {
   const name = path.posix.basename(scope.dirRel);
   return {

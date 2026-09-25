@@ -56,21 +56,50 @@ const ALL_SCOPE: ObjectScope = { kind: 'all' };
 export class RepositoryLockSnapshotStore {
   constructor(private readonly workspaceRoot: string) {}
 
-  /** Снимок из каталога выгрузки (версия хранилища, полученная при захвате). */
-  captureFromDirectory(target: RepositoryTarget, fullName: string, sourceDir: string, scope: ObjectScope): void {
+  /**
+   * Снимок из каталога выгрузки (версия хранилища, полученная при захвате).
+   * `keepFromProject` — файлы проекта (пути проекта), которых нет в неполной выгрузке:
+   * версия хранилища для них неизвестна, и без них откат при отмене захвата удалил бы
+   * их как «лишние».
+   */
+  captureFromDirectory(
+    target: RepositoryTarget,
+    fullName: string,
+    sourceDir: string,
+    scope: ObjectScope,
+    keepFromProject: readonly string[] = []
+  ): void {
     const snapshotDir = this.getSnapshotDir(target, fullName);
     // Актуален только снимок последнего захвата — предыдущий затирается.
     fs.rmSync(snapshotDir, { recursive: true, force: true });
-    const files = collectScopeFiles(sourceDir, scope);
+    const sources = new Map<string, string>();
+    collectScopeFiles(sourceDir, scope).forEach((rel) => sources.set(rel, path.join(sourceDir, rel)));
+    keepFromProject
+      .filter((rel) => !sources.has(rel) && fs.existsSync(path.join(target.configRoot, rel)))
+      .forEach((rel) => sources.set(rel, path.join(target.configRoot, rel)));
+    const ordered = [...sources.entries()].sort(([left], [right]) => left.localeCompare(right));
+    const files = ordered.map(([rel]) => rel);
     const hashes: Record<string, string> = {};
-    for (const rel of files) {
-      const source = path.join(sourceDir, rel);
+    for (const [rel, source] of ordered) {
       const destination = path.join(snapshotDir, 'files', rel);
       fs.mkdirSync(path.dirname(destination), { recursive: true });
       fs.copyFileSync(source, destination);
       hashes[rel] = computeFileHash(source);
     }
-    const manifest: SnapshotManifest = { version: SNAPSHOT_MANIFEST_VERSION, files, hashes };
+    this.writeManifest(snapshotDir, { version: SNAPSHOT_MANIFEST_VERSION, files, hashes });
+  }
+
+  /**
+   * Пустой снимок: объект создан локально и в хранилище его нет, поэтому откат
+   * при отмене захвата удаляет все его файлы.
+   */
+  captureEmpty(target: RepositoryTarget, fullName: string): void {
+    const snapshotDir = this.getSnapshotDir(target, fullName);
+    fs.rmSync(snapshotDir, { recursive: true, force: true });
+    this.writeManifest(snapshotDir, { version: SNAPSHOT_MANIFEST_VERSION, files: [], hashes: {} });
+  }
+
+  private writeManifest(snapshotDir: string, manifest: SnapshotManifest): void {
     fs.mkdirSync(snapshotDir, { recursive: true });
     fs.writeFileSync(path.join(snapshotDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8');
   }
@@ -154,9 +183,13 @@ export class RepositoryLockSnapshotStore {
     fs.rmSync(this.getScopeDir(target), { recursive: true, force: true });
   }
 
-  /** Хеш-манифест всех файлов цели (без копий) — точка отсчёта рекурсивного захвата корня. */
-  captureRootManifest(target: RepositoryTarget): void {
-    const manifest: RootManifest = { version: 1, hashes: hashScopeFiles(target.configRoot, ALL_SCOPE) };
+  /**
+   * Хеш-манифест всех файлов цели (без копий) — точка отсчёта рекурсивного захвата корня.
+   * `overrides` — хеши версии хранилища для файлов, оставленных локальными при слиянии:
+   * манифест описывает хранилище, а не текущий проект.
+   */
+  captureRootManifest(target: RepositoryTarget, overrides: Readonly<Record<string, string>> = {}): void {
+    const manifest: RootManifest = { version: 1, hashes: { ...hashScopeFiles(target.configRoot, ALL_SCOPE), ...overrides } };
     const filePath = path.join(this.getScopeDir(target), ROOT_MANIFEST_FILE);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, `${JSON.stringify(manifest)}\n`, 'utf-8');
@@ -164,26 +197,16 @@ export class RepositoryLockSnapshotStore {
 
   /** Владельцы, чьи файлы изменились, появились или исчезли относительно манифеста корня. */
   diffRootManifest(target: RepositoryTarget): { owners: string[]; hasManifest: boolean } {
-    const manifest = readRootManifest(path.join(this.getScopeDir(target), ROOT_MANIFEST_FILE));
-    if (!manifest) {
+    const baseline = this.readRootManifestHashes(target);
+    if (!baseline) {
       return { owners: [], hasManifest: false };
     }
-    const current = hashScopeFiles(target.configRoot, ALL_SCOPE);
-    const changedRels = new Set<string>();
-    for (const [rel, hash] of Object.entries(current)) {
-      if (manifest.hashes[rel] !== hash) {
-        changedRels.add(rel);
-      }
-    }
-    Object.keys(manifest.hashes).filter((rel) => !(rel in current)).forEach((rel) => changedRels.add(rel));
-    const owners = new Set<string>();
-    for (const rel of changedRels) {
-      const owner = resolveOwnerFullNameByRelativePath(rel, target);
-      if (owner) {
-        owners.add(owner);
-      }
-    }
-    return { owners: [...owners].sort((left, right) => left.localeCompare(right)), hasManifest: true };
+    return { owners: diffOwnersAgainstBaseline(target, baseline, hashScopeFiles(target.configRoot, ALL_SCOPE)).owners, hasManifest: true };
+  }
+
+  /** Хеши манифеста корня; `undefined` — манифеста нет или он не читается. */
+  readRootManifestHashes(target: RepositoryTarget): Record<string, string> | undefined {
+    return readRootManifest(path.join(this.getScopeDir(target), ROOT_MANIFEST_FILE))?.hashes;
   }
 
   private backup(rel: string, projectPath: string, backupDir: string, result: SnapshotRestoreResult): void {
@@ -206,7 +229,43 @@ export class RepositoryLockSnapshotStore {
   }
 }
 
-function hashScopeFiles(baseDir: string, scope: ObjectScope): Record<string, string> {
+/**
+ * Владельцы, чьи файлы разошлись с эталонными хешами. `addedOwners` — владельцы без
+ * единого файла в эталоне: объект создан после снятия эталона, в хранилище его нет.
+ */
+export function diffOwnersAgainstBaseline(
+  target: RepositoryTarget,
+  baseline: Readonly<Record<string, string>>,
+  current: Readonly<Record<string, string>>
+): { owners: string[]; addedOwners: string[] } {
+  const changedRels = new Set<string>();
+  for (const [rel, hash] of Object.entries(current)) {
+    if (baseline[rel] !== hash) {
+      changedRels.add(rel);
+    }
+  }
+  Object.keys(baseline).filter((rel) => !(rel in current)).forEach((rel) => changedRels.add(rel));
+  const owners = new Set<string>();
+  for (const rel of changedRels) {
+    const owner = resolveOwnerFullNameByRelativePath(rel, target);
+    if (owner) {
+      owners.add(owner);
+    }
+  }
+  const baselineOwners = new Set<string>();
+  for (const rel of Object.keys(baseline)) {
+    const owner = resolveOwnerFullNameByRelativePath(rel, target);
+    if (owner) {
+      baselineOwners.add(owner);
+    }
+  }
+  const byName = (left: string, right: string): number => left.localeCompare(right);
+  const sortedOwners = [...owners].sort(byName);
+  return { owners: sortedOwners, addedOwners: sortedOwners.filter((owner) => !baselineOwners.has(owner)) };
+}
+
+/** Хеши файлов области в каталоге `baseDir` (пути POSIX относительно `baseDir`). */
+export function hashScopeFiles(baseDir: string, scope: ObjectScope): Record<string, string> {
   const hashes: Record<string, string> = {};
   for (const rel of collectScopeFiles(baseDir, scope)) {
     hashes[rel] = computeFileHash(path.join(baseDir, rel));

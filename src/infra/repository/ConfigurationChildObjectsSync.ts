@@ -1,5 +1,5 @@
 import * as path from 'path';
-import type { ConfigurationXmlEditor } from '../xml/ConfigurationXmlEditor';
+import { ConfigurationXmlEditor } from '../xml/ConfigurationXmlEditor';
 import { isRootLockName, toChildObjectRef } from './RepositoryObjectNames';
 
 export interface ChildObjectsSyncResult {
@@ -17,7 +17,7 @@ export interface ChildObjectsSyncResult {
 export function syncConfigurationChildObjects(
   configRoot: string,
   changes: { added: readonly string[]; removed: readonly string[] },
-  editor: ConfigurationXmlEditor
+  editor: ConfigurationXmlEditor = new ConfigurationXmlEditor()
 ): ChildObjectsSyncResult {
   const configXmlPath = path.join(configRoot, 'Configuration.xml');
   const changedFiles = new Set<string>();
