@@ -89,8 +89,9 @@ export function writeBslFile(bslPath: string, content = ''): string {
  * реального `Ext/ParentConfigurations.bin`, см. шапку
  * `example/tools/build-supported-cf.mjs`): 0 — объект поставщика не
  * редактируется, 1 — редактируется с сохранением поддержки, 2 — снят с
- * поддержки. Это НЕ значения `SupportMode` — трактовку кода в домен делает
- * `SupportInfoService` (0→Locked, 1→Editable, 2→None).
+ * поддержки (issue #21: отдельный режим `SupportMode.Removed`, а не «не на
+ * поддержке»). Это НЕ значения `SupportMode` — трактовку кода в домен делает
+ * `SupportInfoService` (0→Locked, 1→Editable, 2→Removed).
  */
 export const SUPPORT_BIN_CODE = { locked: 0, editable: 1, removed: 2 } as const;
 

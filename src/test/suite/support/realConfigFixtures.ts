@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { fixtureUuid, writeObjectXml } from './flatMetadataFixtures';
 
 /**
  * Пути к реальным выгрузкам платформы 1С в `example/`, используемым как эталон
@@ -70,6 +71,16 @@ export interface SupportFixtureRoot {
   readonly avansovyOtchetXmlPath: string;
   /** Реальный Document «ПриходТовара» — код `a=1` (редактируется с сохранением поддержки). */
   readonly prihodTovaraXmlPath: string;
+  /**
+   * Синтетический справочник вне поставки (issue #21): его uuid заведомо
+   * отсутствует в `ParentConfigurations.bin`. Реального такого объекта в
+   * `example/` нет ПО ПОСТРОЕНИЮ — `example/tools/build-supported-cf.mjs`
+   * формирует список поддержки из объектов ТЕКУЩЕЙ конфигурации, поэтому
+   * каждый реальный объект выгрузки неизбежно в нём числится. XML
+   * синтезирован через `writeObjectXml` — тот же приём, что и в
+   * `supportInfoService.test.ts` для теста «uuid не в списке поставки».
+   */
+  readonly unlistedCatalogXmlPath: string;
   dispose(): void;
 }
 
@@ -111,6 +122,15 @@ export function buildSupportFixtureRoot(variant: 'normal' | 'forbidden'): Suppor
     : path.join(source, 'Ext', 'ParentConfigurations.bin');
   fs.copyFileSync(binSource, path.join(configRoot, 'Ext', 'ParentConfigurations.bin'));
 
+  const unlistedCatalogXmlPath = writeObjectXml(
+    configRoot,
+    'Catalogs',
+    'СобственныйСправочник',
+    'Catalog',
+    fixtureUuid(`unlisted-catalog-${variant}`),
+    'flat'
+  );
+
   return {
     tempDir,
     configRoot,
@@ -118,6 +138,7 @@ export function buildSupportFixtureRoot(variant: 'normal' | 'forbidden'): Suppor
     kontragentyXmlPath,
     avansovyOtchetXmlPath,
     prihodTovaraXmlPath,
+    unlistedCatalogXmlPath,
     dispose(): void {
       fs.rmSync(tempDir, { recursive: true, force: true });
     },

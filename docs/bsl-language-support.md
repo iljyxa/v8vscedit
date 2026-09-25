@@ -74,8 +74,8 @@ Readonly для модулей под замком поддержки или х�
 
 ### Определение режима поддержки BSL-модуля
 
-Замок поддержки (`SupportMode`: `None`/`Editable`/`Locked` — трактовка кодов `ParentConfigurations.bin`
-и формат файла подробно описаны в
+Замок поддержки (`SupportMode`: `None`/`Editable`/`Locked`/`Removed` — трактовка кодов
+`ParentConfigurations.bin` и формат файла подробно описаны в
 [architecture.md](./architecture.md#режим-поддержки-поставщика-parentconfigurationsbin)) хранится по
 UUID объекта, а UUID нужно взять из XML — модуль сам по себе его не содержит.
 `SupportInfoService.resolveObjectXmlForBsl` (`infra/support/SupportInfoService.ts`) находит нужный XML

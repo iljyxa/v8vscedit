@@ -8,18 +8,20 @@ import { parseParentConfigurations, type ParentConfigurationsInfo } from './Pare
 /**
  * Доменный режим поддержки объекта метаданных 1С — НЕ коды файла
  * `ParentConfigurations.bin` (их трактовка — {@link BIN_CODE_TO_MODE}).
- *   - None — объект не на поддержке: его нет в списке поставки, он снят с
- *     поддержки или данных поддержки нет;
+ *   - None — объекта нет в поставке или данных поддержки нет;
  *   - Editable — редактируется с сохранением поддержки;
- *   - Locked — не редактируется.
+ *   - Locked — не редактируется;
+ *   - Removed — снят с поддержки (код 2): редактируется, но обновления
+ *     поставщика на объект не приходят.
  *
  * Числовые значения заморожены: они вшиты в суффикс contextValue `-support<n>`
- * (`MetadataTreeProvider`, разбор в `UniversalPanelViewProvider`).
+ * (формат — `supportModeSuffix`/`supportModeDtoOf` в `ui/support/supportLockReason`).
  */
 export const enum SupportMode {
   None = 0,
   Editable = 1,
   Locked = 2,
+  Removed = 3,
 }
 
 /**
@@ -32,17 +34,21 @@ export const enum SupportMode {
 const BIN_CODE_TO_MODE: Readonly<Partial<Record<number, SupportMode>>> = {
   0: SupportMode.Locked,
   1: SupportMode.Editable,
-  2: SupportMode.None,
+  2: SupportMode.Removed,
 };
 
 /**
  * Строгость режима для разрешения дублей uuid (объект у нескольких поставщиков):
  * берётся самый строгий, т.к. правка допустима, только если её разрешают все.
+ * Removed ниже Editable: если хоть один поставщик ещё поддерживает объект, его
+ * обновления придут, и «снят с поддержки» для объекта в целом неверно. Ранг
+ * None формальный — из `.bin` этот режим не получается.
  */
 const MODE_STRICTNESS: Readonly<Record<SupportMode, number>> = {
   [SupportMode.None]: 0,
-  [SupportMode.Editable]: 1,
-  [SupportMode.Locked]: 2,
+  [SupportMode.Removed]: 1,
+  [SupportMode.Editable]: 2,
+  [SupportMode.Locked]: 3,
 };
 
 function modeOfBinCode(code: number): SupportMode {
