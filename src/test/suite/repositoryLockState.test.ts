@@ -293,3 +293,120 @@ suite('RepositoryLockState — setConnected/isConnected (перенос суще
     assert.strictEqual(state.isConnected(target), true);
   });
 });
+
+/**
+ * Раздел 10, Р7: `lockModes` и единицы хранилища (подчинённые объекты с
+ * собственным XML — формы/макеты/…). Решение test-writer по неоднозначной
+ * сигнатуре (модуль не существует, план даёт только текстовое описание):
+ * `RepositoryLockRequest.mode?: 'recursive' | 'object'` — НЕОБЯЗАТЕЛЬНОЕ поле
+ * (в отличие от буквального `mode: 'recursive' | 'object'` из 10.2 Р7, который
+ * читаем как «тип значения», а не «обязательность параметра запроса»). Причина:
+ * десятки уже существующих вызовов `applyLock`/`applyUnlock` в этом и других
+ * файлах (`repositoryUnlockSync.test.ts`, `repositoryService.test.ts`) работают
+ * с обычными верхнеуровневыми объектами без единиц и не должны переписываться
+ * ради поля, которое для них не имеет смысла. Пропуск `mode` — ТОЧНЫЙ эквивалент
+ * критерия 10.1.9 «старая запись без lockModes»: вызывающий код, ещё не знающий
+ * о режимах, ведёт себя как раньше.
+ * `lockModes` заполняется по ВСЕМ `members` операции (10.2 Р7: «режим последнего
+ * захвата для всех members операции»), не только по `anchor`.
+ * `isLocked(target, unit)`: явно в lockedFullNames ИЛИ участник lockGroup ИЛИ
+ * rootRecursive-правило (без изменений) ИЛИ НОВОЕ «правило старых записей»:
+ * есть предок единицы (`getRepositoryUnitAncestors`, поиск от ближайшего к
+ * дальнему), который сам заблокирован (явно/через группу) И для него в
+ * `lockModes` НЕТ записи — тогда единица тоже считается заблокированной (as
+ * before, до появления единиц формы/макета захватывались вместе с владельцем).
+ */
+suite('RepositoryLockState — lockModes и единицы (issue #1, раздел 10, Р7)', () => {
+  test('applyLock БЕЗ mode (старый вызывающий код) — lockModes не пишется, подчинённая единица владельца считается заблокированной (обратная совместимость)', () => {
+    const { state, target } = createState();
+    state.applyLock(target, { anchor: 'Справочник.Контрагенты', members: ['Справочник.Контрагенты'] });
+    assert.strictEqual(state.isLocked(target, 'Справочник.Контрагенты.Форма.ФормаЭлемента'), true, 'Старая семантика: подчинённые формы считались частью захвата владельца.');
+  });
+
+  test('applyLock с mode:"object" (новый нерекурсивный захват) — подчинённая единица НЕ считается заблокированной', () => {
+    const { state, target } = createState();
+    state.applyLock(target, { anchor: 'Справочник.Контрагенты', members: ['Справочник.Контрагенты'], mode: 'object' });
+    assert.strictEqual(state.isLocked(target, 'Справочник.Контрагенты'), true);
+    assert.strictEqual(state.isLocked(target, 'Справочник.Контрагенты.Форма.ФормаЭлемента'), false, 'mode:"object" — правило старых записей не применяется, записан явный режим.');
+  });
+
+  test('applyLock с mode:"recursive" и явным составом подчинённых единиц — все они заблокированы напрямую (через lockGroups)', () => {
+    const { state, target } = createState();
+    const members = [
+      'Справочник.Контрагенты',
+      'Справочник.Контрагенты.Форма.ФормаЭлемента',
+      'Справочник.Контрагенты.Форма.ФормаСписка',
+      'Справочник.Контрагенты.Макет.ЗагрузкаИзФайла',
+    ];
+    state.applyLock(target, { anchor: 'Справочник.Контрагенты', members, mode: 'recursive' });
+    members.forEach((unit) => assert.strictEqual(state.isLocked(target, unit), true, `"${unit}" должен быть заблокирован.`));
+    assert.deepStrictEqual([...(state.getLockGroup(target, 'Справочник.Контрагенты') ?? [])].sort(), [...members].sort());
+  });
+
+  test('правило старых записей учитывает ВСЕ уровни предков (дважды вложенная единица — таблица измерения куба)', () => {
+    const { state, target } = createState();
+    state.applyLock(target, { anchor: 'ВнешнийИсточникДанных.ИнтернетМагазин', members: ['ВнешнийИсточникДанных.ИнтернетМагазин'] });
+    assert.strictEqual(
+      state.isLocked(target, 'ВнешнийИсточникДанных.ИнтернетМагазин.Куб.Продажи.ТаблицаИзмерения.Товары'),
+      true,
+      'Правило старых записей должно подниматься до самого дальнего предка (владельца), а не только до ближайшего.'
+    );
+  });
+
+  test('mode:"object" на владельце с многоуровневой единицей — ancestor-правило не срабатывает (единица считается незаблокированной)', () => {
+    const { state, target } = createState();
+    state.applyLock(target, { anchor: 'ВнешнийИсточникДанных.ИнтернетМагазин', members: ['ВнешнийИсточникДанных.ИнтернетМагазин'], mode: 'object' });
+    assert.strictEqual(state.isLocked(target, 'ВнешнийИсточникДанных.ИнтернетМагазин.Куб.Продажи.ТаблицаИзмерения.Товары'), false);
+  });
+
+  test('applyUnlock удаляет lockModes у освобождённых единиц: повторный старый захват владельца снова покрывает подчинённые (ancestor-правило вновь срабатывает)', () => {
+    const { state, target } = createState();
+    state.applyLock(target, { anchor: 'Справочник.Контрагенты', members: ['Справочник.Контрагенты'], mode: 'object' });
+    assert.strictEqual(state.isLocked(target, 'Справочник.Контрагенты.Форма.ФормаЭлемента'), false);
+
+    state.applyUnlock(target, { anchor: 'Справочник.Контрагенты', members: ['Справочник.Контрагенты'], recursive: false, isRoot: false });
+    assert.strictEqual(state.isLocked(target, 'Справочник.Контрагенты'), false);
+
+    // Повторный захват уже БЕЗ явного mode — lockModes должен быть удалён освобождением
+    // выше, иначе он «прилип» бы к объекту навсегда и ancestor-правило никогда не сработало.
+    state.applyLock(target, { anchor: 'Справочник.Контрагенты', members: ['Справочник.Контрагенты'] });
+    assert.strictEqual(state.isLocked(target, 'Справочник.Контрагенты.Форма.ФормаЭлемента'), true);
+  });
+
+  test('верхнеуровневый объект без подчинённых единиц — правило старых записей не применяется (getRepositoryUnitAncestors пуст), поведение не меняется', () => {
+    const { state, target } = createState();
+    state.applyLock(target, { anchor: 'Справочник.Товары', members: ['Справочник.Товары'] });
+    assert.strictEqual(state.isLocked(target, 'Справочник.Товары'), true);
+    assert.strictEqual(state.isLocked(target, 'Справочник.ДругойОбъект'), false);
+  });
+
+  test('mode с некорректным значением в state.json (сырой файл) отбрасывается при чтении, не роняет isLocked', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lockstate-badmode-'));
+    try {
+      const target: RepositoryTarget = { configRoot: path.join(workspaceRoot, 'src', 'cf'), configKind: 'cf', displayName: 'Тест' };
+      const scopeKey = crypto.createHash('sha1').update(`cf|${path.resolve(target.configRoot)}|`).digest('hex');
+      const filePath = path.join(workspaceRoot, '.v8vscedit', 'repository', 'state.json');
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(
+        filePath,
+        JSON.stringify({
+          version: 2,
+          scopes: {
+            [scopeKey]: {
+              lockedFullNames: ['Справочник.Контрагенты'],
+              lockModes: { 'Справочник.Контрагенты': 'НЕ_РЕЖИМ', 'Справочник.Другой': 42 },
+            },
+          },
+        }),
+        'utf-8'
+      );
+      const state = new RepositoryLockState(workspaceRoot);
+      assert.doesNotThrow(() => state.isLocked(target, 'Справочник.Контрагенты.Форма.ФормаЭлемента'));
+      // Некорректное значение отбрасывается → запись для "Справочник.Контрагенты"
+      // в lockModes отсутствует → правило старых записей срабатывает как обычно.
+      assert.strictEqual(state.isLocked(target, 'Справочник.Контрагенты.Форма.ФормаЭлемента'), true);
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});

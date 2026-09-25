@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import {
   extractDumpInfoOwner,
+  extractDumpInfoUnit,
   diffConfigDumpInfo,
   decideRootIncrementalStrategy,
   ROOT_INCREMENTAL_MAX_OWNERS,
@@ -175,5 +176,95 @@ suite('ConfigDumpInfoDiff — decideRootIncrementalStrategy', () => {
     };
     // 3 затронутых из 100 — заведомо ниже обоих порогов.
     assert.strictEqual(decideRootIncrementalStrategy(diff, 100), 'partial');
+  });
+});
+
+/**
+ * `extractDumpInfoUnit` — раздел 10, Р2: группировка ConfigDumpInfo по ЕДИНИЦЕ
+ * хранилища (не только владельцу верхнего уровня, как `extractDumpInfoOwner`):
+ * к `Kind.Name` добавляются пары `(Tag, Name)`, пока `Tag` — известный тег
+ * подчинённой единицы (Form/Template/Recalculation/Table/Cube/DimensionTable/
+ * Subsystem) И за ним есть очередной сегмент имени. Примеры — буквально из плана
+ * архитектора, раздел 10.2, Р2.
+ */
+suite('ConfigDumpInfoDiff — extractDumpInfoUnit (issue #1, раздел 10, Р2)', () => {
+  const UNIT_CASES: readonly [string, string][] = [
+    ['Catalog.Контрагенты.Form.ФормаЭлемента.Form', 'Catalog.Контрагенты.Form.ФормаЭлемента'],
+    ['Catalog.Контрагенты.Command.Покупатели.CommandModule', 'Catalog.Контрагенты'],
+    ['CommonForm.ОбщаяФорма.Form', 'CommonForm.ОбщаяФорма'],
+    [
+      'ExternalDataSource.ИнтернетМагазин.Cube.Продажи.DimensionTable.Товары.Field.Артикул',
+      'ExternalDataSource.ИнтернетМагазин.Cube.Продажи.DimensionTable.Товары',
+    ],
+    ['Configuration.ТорговыйУчет.SessionModule', 'Configuration.ТорговыйУчет'],
+    // Владелец без вложенности — единица совпадает с владельцем (как и extractDumpInfoOwner).
+    ['Catalog.Контрагенты', 'Catalog.Контрагенты'],
+    // Recalculation/Table/Cube — единица останавливается сразу после пары (Tag, Name).
+    ['CalculationRegister.Начисления.Recalculation.Перерасчеты.RecalculationModule', 'CalculationRegister.Начисления.Recalculation.Перерасчеты'],
+    ['ExternalDataSource.ИнтернетМагазин.Table.Заказы', 'ExternalDataSource.ИнтернетМагазин.Table.Заказы'],
+    // Неизвестный тег (Function — структурный дочерний элемент, не единица) — группировка останавливается ДО него, единица = владелец.
+    ['ExternalDataSource.ИнтернетМагазин.Function.ОстатокТовара', 'ExternalDataSource.ИнтернетМагазин'],
+    // D3: вложенная подсистема — единица включает оба сегмента (Subsystem, Имя).
+    ['Subsystem.Продажи.Subsystem.Розница', 'Subsystem.Продажи.Subsystem.Розница'],
+    ['Subsystem.Продажи.Subsystem.Розница.Subsystem.Интернет', 'Subsystem.Продажи.Subsystem.Розница.Subsystem.Интернет'],
+  ];
+
+  UNIT_CASES.forEach(([name, expectedUnit]) => {
+    test(`"${name}" → единица "${expectedUnit}"`, () => {
+      assert.strictEqual(extractDumpInfoUnit(name), expectedUnit);
+    });
+  });
+
+  test('имя без точки трактуется как единица самого себя (защитная ветка)', () => {
+    assert.strictEqual(extractDumpInfoUnit('БезТочки'), 'БезТочки');
+  });
+});
+
+/**
+ * `diffConfigDumpInfo(prev, next, keyOf)` — необязательный третий параметр
+ * (по умолчанию `extractDumpInfoOwner`, поведение существующих тестов раздела
+ * выше не меняется). В root-incremental используется `keyOf = extractDumpInfoUnit`,
+ * чтобы изменение МОДУЛЯ ФОРМЫ группировалось как отдельная единица, а не
+ * схлопывалось со всем объектом-владельцем (иначе частичная выгрузка root-
+ * incremental включала бы владельца целиком вместо одной формы — критерий 10.1.7).
+ */
+suite('ConfigDumpInfoDiff — diffConfigDumpInfo(prev, next, keyOf): группировка по единице', () => {
+  test('по умолчанию (без keyOf) поведение не меняется — группировка по владельцу', () => {
+    const prev = mapOf([['Catalog.Контрагенты.Form.ФормаЭлемента.Form', 'h1']]);
+    const next = mapOf([['Catalog.Контрагенты.Form.ФормаЭлемента.Form', 'h2']]);
+    assert.deepStrictEqual(diffConfigDumpInfo(prev, next), { changedOwners: ['Catalog.Контрагенты'], addedOwners: [], removedOwners: [] });
+  });
+
+  test('keyOf=extractDumpInfoUnit: изменена ТОЛЬКО форма → changedOwners содержит fullName формы, а не владельца', () => {
+    const prev = mapOf([
+      ['Catalog.Контрагенты', 'root-h1'],
+      ['Catalog.Контрагенты.Form.ФормаЭлемента.Form', 'form-h1'],
+    ]);
+    const next = mapOf([
+      ['Catalog.Контрагенты', 'root-h1'],
+      ['Catalog.Контрагенты.Form.ФормаЭлемента.Form', 'form-h2'],
+    ]);
+    const diff = diffConfigDumpInfo(prev, next, extractDumpInfoUnit);
+    assert.deepStrictEqual(diff, { changedOwners: ['Catalog.Контрагенты.Form.ФормаЭлемента'], addedOwners: [], removedOwners: [] });
+  });
+
+  test('keyOf=extractDumpInfoUnit: новая форма (объект уже существовал) → единица формы в addedOwners, владелец не затронут', () => {
+    const prev = mapOf([['Catalog.Контрагенты', 'root-h1']]);
+    const next = mapOf([
+      ['Catalog.Контрагенты', 'root-h1'],
+      ['Catalog.Контрагенты.Form.НоваяФорма.Form', 'form-new'],
+    ]);
+    const diff = diffConfigDumpInfo(prev, next, extractDumpInfoUnit);
+    assert.deepStrictEqual(diff, { changedOwners: [], addedOwners: ['Catalog.Контрагенты.Form.НоваяФорма'], removedOwners: [] });
+  });
+
+  test('keyOf=extractDumpInfoUnit: удалённая форма → единица формы в removedOwners, владелец не затронут', () => {
+    const prev = mapOf([
+      ['Catalog.Контрагенты', 'root-h1'],
+      ['Catalog.Контрагенты.Form.Старая.Form', 'form-old'],
+    ]);
+    const next = mapOf([['Catalog.Контрагенты', 'root-h1']]);
+    const diff = diffConfigDumpInfo(prev, next, extractDumpInfoUnit);
+    assert.deepStrictEqual(diff, { changedOwners: [], addedOwners: [], removedOwners: ['Catalog.Контрагенты.Form.Старая'] });
   });
 });

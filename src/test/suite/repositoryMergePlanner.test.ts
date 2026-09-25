@@ -356,6 +356,75 @@ suite('RepositoryMergePlanner — collectMergeFileStates (реальная ФС)
     }
   });
 
+  /**
+   * Регресс D2b (раздел 10 плана, критерий приёмки 10.1.4): раньше
+   * `collectIncompleteChildDirs`/`CHILD_ELEMENT_DIRS` защищали от удаления
+   * только Forms/Templates/Commands/Subsystems — файлы Recalculations/Tables/
+   * Cubes/DimensionTables считались сиротами и получали `conflict-delete`/
+   * `delete`. Раздел 10 чинит это НЕ добавлением новых тегов в старый механизм
+   * (он целиком удалён вместе с `parseObjectXml`-импортом из планировщика — Р6),
+   * а тем, что при `depth:'unit'` эти файлы вообще не входят в область владельца
+   * (см. `repositoryObjectScope.test.ts`) — соответственно, здесь проверяется,
+   * что `collectMergeFileStates` с `unit`-областью владельца не порождает для
+   * них НИКАКИХ состояний (не noop, не write, не delete — их там попросту нет).
+   */
+  test('Регресс D2b: Начисления (РегистрРасчета), depth:"unit" — Recalculations НЕ входит в состояния владельца (не удаляется как сирота)', () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-d2b-calc-'));
+    try {
+      fs.cpSync(EXAMPLE_CF, projectDir, { recursive: true });
+      const target: RepositoryTarget = { configRoot: projectDir, configKind: 'cf', displayName: 'ТорговыйУчет' };
+      const scope = resolveObjectScope(projectDir, 'РегистрРасчета.Начисления', target, 'unit') as Extract<ObjectScope, { kind: 'object' }>;
+      assert.ok(scope);
+      // «Выгрузка» — тот же проект БЕЗ Recalculations (имитация частичной выгрузки
+      // владельца, которая по факту платформы (10.12) никогда не содержит подчинённые).
+      const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-d2b-calc-dump-'));
+      fs.mkdirSync(path.join(dumpDir, 'CalculationRegisters'), { recursive: true });
+      fs.copyFileSync(path.join(EXAMPLE_CF, 'CalculationRegisters', 'Начисления.xml'), path.join(dumpDir, 'CalculationRegisters', 'Начисления.xml'));
+
+      const states = collectMergeFileStates({
+        configRoot: projectDir,
+        dumpDir,
+        scopes: [scope],
+        baseHashes: {},
+        dirtyRelativePaths: [],
+      });
+      const rels = states.map((s: MergeFileState) => s.rel.replace(/\\/g, '/'));
+      assert.ok(!rels.some((rel) => rel.includes('Recalculations')), 'Recalculations не должен входить в область владельца при depth:"unit" — файлы не тронуты, потому что их там вообще нет в списке.');
+      fs.rmSync(dumpDir, { recursive: true, force: true });
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test('Регресс D2b: ИнтернетМагазин (ВнешнийИсточникДанных), depth:"unit" — Tables/Cubes НЕ входят в состояния владельца', () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-d2b-eds-'));
+    try {
+      fs.cpSync(EXAMPLE_CF, projectDir, { recursive: true });
+      const target: RepositoryTarget = { configRoot: projectDir, configKind: 'cf', displayName: 'ТорговыйУчет' };
+      const scope = resolveObjectScope(projectDir, 'ВнешнийИсточникДанных.ИнтернетМагазин', target, 'unit') as Extract<ObjectScope, { kind: 'object' }>;
+      assert.ok(scope);
+      const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-d2b-eds-dump-'));
+      fs.mkdirSync(path.join(dumpDir, 'ExternalDataSources'), { recursive: true });
+      fs.copyFileSync(
+        path.join(EXAMPLE_CF, 'ExternalDataSources', 'ИнтернетМагазин.xml'),
+        path.join(dumpDir, 'ExternalDataSources', 'ИнтернетМагазин.xml')
+      );
+
+      const states = collectMergeFileStates({
+        configRoot: projectDir,
+        dumpDir,
+        scopes: [scope],
+        baseHashes: {},
+        dirtyRelativePaths: [],
+      });
+      const rels = states.map((s: MergeFileState) => s.rel.replace(/\\/g, '/'));
+      assert.ok(!rels.some((rel) => rel.includes('/Tables/') || rel.includes('/Cubes/')));
+      fs.rmSync(dumpDir, { recursive: true, force: true });
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   test('реальный объект из example/ (Валюты, Ext/Help) — область собирается без ошибок, ConfigDumpInfo.xml не участвует', () => {
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-real-'));
     try {

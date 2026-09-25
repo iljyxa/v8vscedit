@@ -11,11 +11,21 @@ import { planReadonlyTransitions } from '../../ui/readonly/readonlyTransitionPla
  *
  * Решение (неоднозначность плана — оба поля `changedOwnerFullNames`/`allObjects`
  * в одной сигнатуре без явного описания их взаимодействия): файл считается
- * затронутым, если его владелец (`ownerOf(path)`) присутствует ЛИБО в
- * `changedOwnerFullNames`, ЛИБО в `allObjects` — так поддерживается и точечное
- * событие (`changedOwnerFullNames` = один fullName), и «широкое» событие
- * рекурсивного тумблера корня, где конкретный список затронутых объектов не
- * перечисляется, а актуальный охват передаётся только через `allObjects`.
+ * затронутым, если ХОТЯ БЫ ОДИН элемент его цепочки владения
+ * (`ownerChainOf(path)`) присутствует ЛИБО в `changedOwnerFullNames`, ЛИБО в
+ * `allObjects` — так поддерживается и точечное событие (`changedOwnerFullNames`
+ * = один fullName), и «широкое» событие рекурсивного тумблера корня, где
+ * конкретный список затронутых объектов не перечисляется, а актуальный охват
+ * передаётся только через `allObjects`.
+ *
+ * Раздел 10, Р9: `ownerOf(path) => string | null` заменён на
+ * `ownerChainOf(path) => string[]` — единица (форма/макет/…), затем её предки
+ * до владельца верхнего уровня (`getRepositoryUnitAncestors`). Файл считается
+ * затронутым, если В ЦЕПОЧКЕ есть хотя бы один элемент из объединения
+ * `changedOwnerFullNames`/`allObjects` — событие владельца верхнего уровня
+ * затрагивает и его подчинённые единицы (их цепочка содержит владельца), а
+ * событие ОДНОЙ подчинённой единицы затрагивает только её собственные файлы
+ * (критерий приёмки 10.1.12).
  *
  * Сценарий «модифицированная сторона диффа» (упомянут в плане тестов пункта 16)
  * перенесён в `editorReadonlyController.test.ts` — это забота СБОРА открытых
@@ -28,9 +38,9 @@ function filePath(...segments: string[]): string {
   return path.join(CONFIG_ROOT, ...segments);
 }
 
-function ownerOfCatalog(p: string): string | null {
+function ownerChainOfCatalog(p: string): string[] {
   const match = /Catalogs[\\/]([^\\/]+)/.exec(p);
-  return match ? `Справочник.${match[1]}` : null;
+  return match ? [`Справочник.${match[1]}`] : [];
 }
 
 suite('readonlyTransitionPlan — planReadonlyTransitions', () => {
@@ -40,7 +50,7 @@ suite('readonlyTransitionPlan — planReadonlyTransitions', () => {
       changedOwnerFullNames: ['Справочник.А'],
       allObjects: ['Справочник.А'],
       configRoot: CONFIG_ROOT,
-      ownerOf: ownerOfCatalog,
+      ownerChainOf: ownerChainOfCatalog,
       isRestricted: () => false,
     });
     assert.deepStrictEqual(result.applyNow, [{ path: filePath('Catalogs', 'А', 'Ext', 'ObjectModule.bsl'), readonly: false }]);
@@ -53,7 +63,7 @@ suite('readonlyTransitionPlan — planReadonlyTransitions', () => {
       changedOwnerFullNames: ['Справочник.А'],
       allObjects: ['Справочник.А'],
       configRoot: CONFIG_ROOT,
-      ownerOf: ownerOfCatalog,
+      ownerChainOf: ownerChainOfCatalog,
       isRestricted: () => true,
     });
     assert.deepStrictEqual(result.applyNow, [{ path: filePath('Catalogs', 'А', 'Ext', 'ObjectModule.bsl'), readonly: true }]);
@@ -65,7 +75,7 @@ suite('readonlyTransitionPlan — planReadonlyTransitions', () => {
       changedOwnerFullNames: ['Справочник.А'],
       allObjects: [],
       configRoot: CONFIG_ROOT,
-      ownerOf: ownerOfCatalog,
+      ownerChainOf: ownerChainOfCatalog,
       isRestricted: () => true,
     });
     assert.deepStrictEqual(result.applyNow, [{ path: filePath('Catalogs', 'А', 'Ext', 'ObjectModule.bsl'), readonly: true }]);
@@ -77,7 +87,7 @@ suite('readonlyTransitionPlan — planReadonlyTransitions', () => {
       changedOwnerFullNames: ['Справочник.А'],
       allObjects: ['Справочник.А'],
       configRoot: CONFIG_ROOT,
-      ownerOf: ownerOfCatalog,
+      ownerChainOf: ownerChainOfCatalog,
       isRestricted: () => false,
     });
     assert.deepStrictEqual(result.applyNow, []);
@@ -90,7 +100,7 @@ suite('readonlyTransitionPlan — planReadonlyTransitions', () => {
       changedOwnerFullNames: [],
       allObjects: ['Справочник.В'],
       configRoot: CONFIG_ROOT,
-      ownerOf: ownerOfCatalog,
+      ownerChainOf: ownerChainOfCatalog,
       isRestricted: () => false,
     });
     assert.deepStrictEqual(result.applyNow, [{ path: filePath('Catalogs', 'В', 'Ext', 'ObjectModule.bsl'), readonly: false }]);
@@ -105,7 +115,7 @@ suite('readonlyTransitionPlan — planReadonlyTransitions', () => {
       changedOwnerFullNames: ['Справочник.А'],
       allObjects: ['Справочник.А'],
       configRoot: CONFIG_ROOT,
-      ownerOf: ownerOfCatalog,
+      ownerChainOf: ownerChainOfCatalog,
       isRestricted: () => false,
     });
     assert.strictEqual(result.applyNow.length, 1);
@@ -121,20 +131,20 @@ suite('readonlyTransitionPlan — planReadonlyTransitions', () => {
       changedOwnerFullNames: ['Справочник.А'],
       allObjects: ['Справочник.А'],
       configRoot: CONFIG_ROOT,
-      ownerOf: ownerOfCatalog,
+      ownerChainOf: ownerChainOfCatalog,
       isRestricted: () => false,
     });
     assert.deepStrictEqual(result.applyNow, []);
     assert.deepStrictEqual(result.defer, []);
   });
 
-  test('владелец не резолвится (ownerOf возвращает null) — файл не трогается', () => {
+  test('владелец не резолвится (ownerChainOf возвращает пустую цепочку) — файл не трогается', () => {
     const result = planReadonlyTransitions({
       openFiles: [{ path: filePath('Ext', 'SessionModule.bsl'), visible: true }],
       changedOwnerFullNames: ['Справочник.А'],
       allObjects: ['Справочник.А'],
       configRoot: CONFIG_ROOT,
-      ownerOf: () => null,
+      ownerChainOf: () => [],
       isRestricted: () => false,
     });
     assert.deepStrictEqual(result.applyNow, []);
@@ -147,7 +157,7 @@ suite('readonlyTransitionPlan — planReadonlyTransitions', () => {
       changedOwnerFullNames: ['Справочник.А'],
       allObjects: ['Справочник.А'],
       configRoot: CONFIG_ROOT,
-      ownerOf: ownerOfCatalog,
+      ownerChainOf: ownerChainOfCatalog,
       isRestricted: () => false,
     });
     assert.deepStrictEqual(result, { applyNow: [], defer: [] });
@@ -162,7 +172,7 @@ suite('readonlyTransitionPlan — planReadonlyTransitions', () => {
       changedOwnerFullNames: ['Справочник.А'],
       allObjects: ['Справочник.А'],
       configRoot: CONFIG_ROOT,
-      ownerOf: ownerOfCatalog,
+      ownerChainOf: ownerChainOfCatalog,
       isRestricted: () => false,
     });
     assert.deepStrictEqual(result.applyNow, [{ path: filePath('Catalogs', 'А', 'Ext', 'ObjectModule.bsl'), readonly: false }]);
@@ -178,9 +188,59 @@ suite('readonlyTransitionPlan — planReadonlyTransitions', () => {
       changedOwnerFullNames: ['Справочник.А'],
       allObjects: ['Справочник.А'],
       configRoot: CONFIG_ROOT,
-      ownerOf: ownerOfCatalog,
+      ownerChainOf: ownerChainOfCatalog,
       isRestricted: () => false,
     });
     assert.strictEqual(result.applyNow.length, 2);
+  });
+});
+
+/**
+ * Раздел 10, Р9 / критерий приёмки 10.1.12: цепочка владения из нескольких
+ * уровней (форма → владелец). `ownerChainOfForm` возвращает `[formUnit,
+ * ownerUnit]` для файлов внутри `Catalogs/<Owner>/Forms/<Form>/**`, иначе —
+ * `[ownerUnit]` (файл самого владельца, например Ext/ObjectModule.bsl).
+ */
+function ownerChainOfForm(p: string): string[] {
+  const formMatch = /Catalogs[\\/]([^\\/]+)[\\/]Forms[\\/]([^\\/]+)[\\/]/.exec(p);
+  if (formMatch) {
+    return [`Справочник.${formMatch[1]}.Форма.${formMatch[2]}`, `Справочник.${formMatch[1]}`];
+  }
+  const ownerMatch = /Catalogs[\\/]([^\\/]+)/.exec(p);
+  return ownerMatch ? [`Справочник.${ownerMatch[1]}`] : [];
+}
+
+suite('readonlyTransitionPlan — ownerChainOf: многоуровневая цепочка владения (issue #1, раздел 10, критерий 10.1.12)', () => {
+  test('событие владельца верхнего уровня затрагивает И его собственные файлы, И файлы подчинённой единицы (формы)', () => {
+    const ownerFile = filePath('Catalogs', 'Контрагенты', 'Ext', 'ObjectModule.bsl');
+    const formFile = filePath('Catalogs', 'Контрагенты', 'Forms', 'ФормаЭлемента', 'Ext', 'Form', 'Module.bsl');
+    const result = planReadonlyTransitions({
+      openFiles: [{ path: ownerFile, visible: true }, { path: formFile, visible: true }],
+      changedOwnerFullNames: ['Справочник.Контрагенты'],
+      allObjects: ['Справочник.Контрагенты'],
+      configRoot: CONFIG_ROOT,
+      ownerChainOf: ownerChainOfForm,
+      isRestricted: () => false,
+    });
+    assert.strictEqual(result.applyNow.length, 2, 'Событие владельца должно затронуть и владельца, и подчинённую единицу.');
+  });
+
+  test('событие ОДНОЙ подчинённой единицы (формы) затрагивает ТОЛЬКО её файлы, не остальные файлы владельца', () => {
+    const ownerFile = filePath('Catalogs', 'Контрагенты', 'Ext', 'ObjectModule.bsl');
+    const formFile = filePath('Catalogs', 'Контрагенты', 'Forms', 'ФормаЭлемента', 'Ext', 'Form', 'Module.bsl');
+    const otherFormFile = filePath('Catalogs', 'Контрагенты', 'Forms', 'ФормаСписка', 'Ext', 'Form', 'Module.bsl');
+    const result = planReadonlyTransitions({
+      openFiles: [
+        { path: ownerFile, visible: true },
+        { path: formFile, visible: true },
+        { path: otherFormFile, visible: true },
+      ],
+      changedOwnerFullNames: ['Справочник.Контрагенты.Форма.ФормаЭлемента'],
+      allObjects: ['Справочник.Контрагенты.Форма.ФормаЭлемента'],
+      configRoot: CONFIG_ROOT,
+      ownerChainOf: ownerChainOfForm,
+      isRestricted: () => false,
+    });
+    assert.deepStrictEqual(result.applyNow.map((t) => t.path), [formFile]);
   });
 });

@@ -36,6 +36,30 @@ import type { MetadataTreeProvider } from '../../ui/tree/MetadataTreeProvider';
  * (`configDumpInfoDiff.test.ts`, `repositoryDumpPlan.test.ts`) и должны быть
  * доведены до сквозного сценария здесь отдельным заходом, если разработка
  * вскроет реальное расхождение — см. итоговый отчёт test-writer.
+ *
+ * Раздел 10 (подчинённые объекты с собственным XML, D1–D3): та же оговорка —
+ * критерии приёмки 10.1.2/10.1.3/10.1.5/10.1.6/10.1.7 (оптимистичная выгрузка
+ * подчинённых единиц раундами, root-incremental по единицам, D3 для рекурсивной
+ * подсистемы) целиком зависят от НОВОГО внутреннего контракта между
+ * `RepositoryLockSync` и `RepositoryDumpRounds`/`RepositoryDumpPlan.anchors`/
+ * `expansion` (см. решение test-writer в `repositoryDumpPlan.test.ts` — форма
+ * плана намеренно не зафиксирована синтетическим тестом заранее). Сами
+ * строительные блоки (раскрытие подчинённых единиц, раунды, откат до якорей,
+ * `MAX_DUMP_ROUNDS`, D1/D3 грамматика имён) уже покрыты ПОЛНОСТЬЮ и
+ * параметризованно на уровне чистых функций: `repositoryObjectNames.test.ts`
+ * (D1, D3, единицы), `repositoryDumpRounds.test.ts` (раунды, guard.isBusy,
+ * оптимистичный список, откат до якорей, missing), `repositoryObjectScope.test.ts`
+ * (`depth:'unit'`/`'tree'`, единицы в `resolveObjectScope`/`resolveUnitXmlRel`/
+ * `resolveLockUnitByRelativePath`), `repositoryMergePlanner.test.ts` (регресс
+ * D2b), `repositoryLockState.test.ts` (`lockModes`, правило старых записей),
+ * `repositoryService.test.ts` (`isEditRestricted` по единицам, критерии
+ * 10.1.3/10.1.9). Сквозная сборка этих блоков в наблюдаемое число вызовов
+ * `dumpToTemp` для конкретных узлов (Контрагенты/Начисления/ИнтернетМагазин) —
+ * предмет отдельного захода после того, как разработчик реализует конкретную
+ * внутреннюю комбинацию (`RepositoryDumpPlan.buildRepositoryDumpPlan` →
+ * `RepositoryLockSync.acquireObjectsDump` → `runDumpRounds`), а не до неё.
+ * `partialDumpFixture` (`support/partialDumpFixture.ts`) — готовый детерминированный
+ * дабл выгрузки для этих будущих сценариев, независимый от production-кода.
  */
 
 function createFakeSecretStore(): SecretStore {

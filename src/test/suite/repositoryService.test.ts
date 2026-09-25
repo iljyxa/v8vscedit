@@ -411,6 +411,80 @@ suite('RepositoryService — плоская и вложенная расклад
   }
 });
 
+/**
+ * Раздел 10, Р9: `isEditRestricted` учитывает суффикс ЕДИНИЦЫ (форма/макет/…)
+ * после каталога объекта — критерии приёмки 10.1.3/10.1.9. Используется
+ * отдельная (не временная, реальная) копия `example/2.21/src/cf/Catalogs/
+ * Контрагенты` — предсказуемый состав (2 формы + 1 макет), не совпадающий по
+ * структуре с объектами, которые мог найти `findFirstCatalogWithModule`/
+ * `findFirstCatalogWithForm` в 2.20 (эти helper'ы используются test'ами выше
+ * и не меняются).
+ */
+suite('RepositoryService — isEditRestricted: суффикс единицы (issue #1, раздел 10, Р9)', () => {
+  const EXAMPLE_CF_21 = path.resolve(__dirname, '../../../example/2.21/src/cf');
+  const KONTRAGENTY_XML = path.join(EXAMPLE_CF_21, 'Catalogs', 'Контрагенты.xml');
+  const FORM_MODULE = path.join(EXAMPLE_CF_21, 'Catalogs', 'Контрагенты', 'Forms', 'ФормаЭлемента', 'Ext', 'Form', 'Module.bsl');
+  const OWNER_MODULE = path.join(EXAMPLE_CF_21, 'Catalogs', 'Контрагенты', 'Ext', 'ObjectModule.bsl');
+  const COMMAND_MODULE = path.join(EXAMPLE_CF_21, 'Catalogs', 'Контрагенты', 'Commands', 'Покупатели', 'Ext', 'CommandModule.bsl');
+
+  async function connectedService(): Promise<{ service: RepositoryService; target: RepositoryTarget }> {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-repo-unit-suffix-'));
+    const service = new RepositoryService(workspaceRoot, new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot));
+    const target = service.resolveTargetByXmlPath(KONTRAGENTY_XML);
+    assert.ok(target, 'Не удалось определить цель хранилища для example/2.21/src/cf.');
+    await service.saveBinding(target, { repoPath: '\\\\repo\\storage', repoUser: 'tester', repoPassword: 'secret' });
+    service.setConnected(target, true);
+    return { service, target };
+  }
+
+  test('критерий 10.1.3: нерекурсивный захват (mode:"object") владельца — файл формы остаётся restricted, файл владельца и Commands — нет', async () => {
+    const { service, target } = await connectedService();
+    assert.strictEqual(service.isEditRestricted(FORM_MODULE), true);
+    assert.strictEqual(service.isEditRestricted(OWNER_MODULE), true);
+
+    service.lockState.applyLock(target, { anchor: 'Справочник.Контрагенты', members: ['Справочник.Контрагенты'], mode: 'object' });
+
+    assert.strictEqual(service.isEditRestricted(OWNER_MODULE), false, 'Файл владельца (не единицы) должен стать редактируемым.');
+    assert.strictEqual(service.isEditRestricted(COMMAND_MODULE), false, 'Command не является отдельной единицей — редактируем вместе с владельцем.');
+    assert.strictEqual(service.isEditRestricted(FORM_MODULE), true, 'Форма — отдельная единица, нерекурсивный захват её не открывает.');
+  });
+
+  test('критерий 10.1.2/10.1.9: рекурсивный захват (mode:"recursive", подчинённые в составе) — форма тоже редактируема', async () => {
+    const { service, target } = await connectedService();
+    service.lockState.applyLock(target, {
+      anchor: 'Справочник.Контрагенты',
+      members: ['Справочник.Контрагенты', 'Справочник.Контрагенты.Форма.ФормаЭлемента', 'Справочник.Контрагенты.Форма.ФормаСписка', 'Справочник.Контрагенты.Макет.ЗагрузкаИзФайла'],
+      mode: 'recursive',
+    });
+    assert.strictEqual(service.isEditRestricted(FORM_MODULE), false);
+    assert.strictEqual(service.isEditRestricted(OWNER_MODULE), false);
+  });
+
+  test('критерий 10.1.9: старая запись (setLocked, без mode) — форма редактируема, как раньше (правило старых записей)', async () => {
+    const { service, target } = await connectedService();
+    service.setLocked(target, ['Справочник.Контрагенты'], true);
+    assert.strictEqual(service.isEditRestricted(FORM_MODULE), false, 'Обратная совместимость: старый (плоский) захват владельца исторически открывал и его формы.');
+  });
+
+  test('критерий 10.1.9: нерекурсивная отмена после рекурсивного захвата (P4) — владелец снова restricted, формы остаются редактируемыми', async () => {
+    const { service, target } = await connectedService();
+    const members = [
+      'Справочник.Контрагенты',
+      'Справочник.Контрагенты.Форма.ФормаЭлемента',
+      'Справочник.Контрагенты.Форма.ФормаСписка',
+      'Справочник.Контрагенты.Макет.ЗагрузкаИзФайла',
+    ];
+    service.lockState.applyLock(target, { anchor: 'Справочник.Контрагенты', members, mode: 'recursive' });
+    assert.strictEqual(service.isEditRestricted(FORM_MODULE), false);
+
+    // Нерекурсивная отмена якоря с группой: из группы убирается только якорь (P4).
+    service.lockState.applyUnlock(target, { anchor: 'Справочник.Контрагенты', members: ['Справочник.Контрагенты'], recursive: false, isRoot: false });
+
+    assert.strictEqual(service.isEditRestricted(OWNER_MODULE), true, 'Владелец должен снова требовать захвата (P4: на сервере остался незахваченным).');
+    assert.strictEqual(service.isEditRestricted(FORM_MODULE), false, 'Форма должна остаться редактируемой — на сервере она осталась захваченной (P4).');
+  });
+});
+
 function restoreFile(filePath: string, backup: string | undefined): void {
   if (backup === undefined) {
     if (fs.existsSync(filePath)) {

@@ -21,6 +21,23 @@ import type { MetadataTreeProvider } from '../../ui/tree/MetadataTreeProvider';
  * буквально «в лоб» — базовые, однозначно специфицированные ветки покрыты
  * полностью; глубокие количественные пороги уже проверены на уровне чистых
  * функций.
+ *
+ * Раздел 10 (подчинённые объекты с собственным XML, D1–D3): критерии приёмки
+ * 10.1.8/10.1.9/10.1.10 (алгоритм эталонов отмены по Р8 — снимок/dump/empty/
+ * missing с обходом от предков к потомкам, единицы под рекурсивным корнем по
+ * манифесту) целиком зависят от НОВОГО внутреннего контракта
+ * `RepositoryDumpRounds`/`RepositoryLockSnapshotStore` (манифест v3,
+ * `readSnapshotInfo`, `diffOwnersAgainstBaseline` по единицам — все уже
+ * покрыты юнит-тестами `repositoryDumpRounds.test.ts`/
+ * `repositoryLockSnapshotStore.test.ts`) и от способа, которым
+ * `RepositoryUnlockSync` их скомбинирует (порядок вызовов, какая структура
+ * данных описывает «4 источника эталона» из Р8). Синтетический сквозной тест
+ * здесь заранее угадывал бы эту внутреннюю комбинацию — решается и фиксируется
+ * отдельным заходом test-writer/developer/qa, когда реализация раздела 10
+ * появится и можно будет писать тест по НАБЛЮДАЕМОМУ поведению, а не по
+ * догадке. `RepositoryLockState`-уровневые критерии (`lockModes`, правило
+ * старых записей, P4 — частичное усечение группы) уже покрыты полностью в
+ * `repositoryLockState.test.ts`/`repositoryService.test.ts` (isEditRestricted).
  */
 
 function createFakeSecretStore(): SecretStore {

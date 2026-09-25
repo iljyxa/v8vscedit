@@ -8,6 +8,8 @@ import {
   collectScopeFiles,
   mapDumpPathToProject,
   resolveOwnerFullNameByRelativePath,
+  resolveUnitXmlRel,
+  resolveLockUnitByRelativePath,
   type ObjectScope,
 } from '../../infra/repository/RepositoryObjectScope';
 import { CONFIGURATION_ROOT_LOCK_NAME, getRootLockName } from '../../infra/repository/RepositoryObjectNames';
@@ -117,7 +119,7 @@ suite('RepositoryObjectScope — resolveObjectScope', () => {
     assert.strictEqual(isPathInScope('ConfigDumpInfo.xml', scope), false);
   });
 
-  test('подсистема с вложенными подсистемами — вложенная ветка Subsystems/** исключается из области', () => {
+  test('подсистема с вложенными подсистемами, depth="unit" — вложенная ветка Subsystems/** исключается из области (issue #1, раздел 10, Р3)', () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-scope-subsystem-'));
     try {
       fs.mkdirSync(path.join(tempDir, 'Subsystems', 'Родитель', 'Subsystems'), { recursive: true });
@@ -129,10 +131,13 @@ suite('RepositoryObjectScope — resolveObjectScope', () => {
       );
 
       const target: RepositoryTarget = { configRoot: tempDir, configKind: 'cf', displayName: 'Тест' };
-      const scope = resolveObjectScope(tempDir, 'Подсистема.Родитель', target);
+      // Раздел 10, Р3: НОВОЕ поведение по умолчанию (без depth) — 'tree' (весь каталог,
+      // без исключений, см. отдельный тест ниже); исключение вложенных подсистем — это
+      // теперь СПЕЦИФИЧНОЕ поведение depth:'unit' (обычная операция слияния/снимка/сравнения).
+      const scope = resolveObjectScope(tempDir, 'Подсистема.Родитель', target, 'unit');
       assert.ok(scope?.kind === 'object');
       const objectScope = scope;
-      assert.ok(objectScope.excludeDirRels.length > 0, 'excludeDirRels должен содержать вложенную ветку Subsystems/**.');
+      assert.ok(objectScope.excludeDirRels.length > 0, 'excludeDirRels должен содержать вложенную ветку Subsystems/** при depth:"unit".');
 
       assert.strictEqual(isPathInScope('Subsystems/Родитель.xml', scope), true);
       assert.strictEqual(isPathInScope('Subsystems/Родитель/Subsystems/Дочерняя.xml', scope), false);
@@ -143,6 +148,107 @@ suite('RepositoryObjectScope — resolveObjectScope', () => {
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  test('подсистема с вложенными подсистемами, depth="tree" (и умолчание) — весь каталог, БЕЗ исключений (issue #1, раздел 10, Р3)', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-scope-subsystem-tree-'));
+    try {
+      fs.mkdirSync(path.join(tempDir, 'Subsystems', 'Родитель', 'Subsystems'), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, 'Subsystems', 'Родитель.xml'), '<MetaDataObject/>', 'utf-8');
+      fs.writeFileSync(
+        path.join(tempDir, 'Subsystems', 'Родитель', 'Subsystems', 'Дочерняя.xml'),
+        '<MetaDataObject/>',
+        'utf-8'
+      );
+
+      const target: RepositoryTarget = { configRoot: tempDir, configKind: 'cf', displayName: 'Тест' };
+      const explicitTreeScope = resolveObjectScope(tempDir, 'Подсистема.Родитель', target, 'tree');
+      const defaultScope = resolveObjectScope(tempDir, 'Подсистема.Родитель', target);
+      assert.ok(explicitTreeScope?.kind === 'object' && defaultScope?.kind === 'object');
+      assert.deepStrictEqual(explicitTreeScope.excludeDirRels, [], 'depth:"tree" — весь каталог, ничего не исключается.');
+      assert.deepStrictEqual(defaultScope.excludeDirRels, [], 'depth по умолчанию должен совпадать с "tree" (сохранение обратной совместимости для необновлённых вызывающих).');
+
+      assert.strictEqual(isPathInScope('Subsystems/Родитель/Subsystems/Дочерняя.xml', explicitTreeScope), true);
+      const files = collectScopeFiles(tempDir, explicitTreeScope).map(posix);
+      assert.ok(files.includes('Subsystems/Родитель/Subsystems/Дочерняя.xml'));
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('реальный объект (Контрагенты), depth="unit" — Forms/Templates исключены, Commands (не в REPOSITORY_SUBORDINATE_LAYOUT) остаётся (issue #1, раздел 10, Р3/Р6)', () => {
+    const scope = resolveObjectScope(EXAMPLE_CF, 'Справочник.Контрагенты', cfTarget, 'unit');
+    assert.ok(scope?.kind === 'object');
+    const files = collectScopeFiles(EXAMPLE_CF, scope).map(posix);
+    assert.ok(files.includes('Catalogs/Контрагенты.xml'));
+    assert.ok(files.includes('Catalogs/Контрагенты/Ext/ObjectModule.bsl'));
+    assert.ok(!files.some((file) => file.startsWith('Catalogs/Контрагенты/Forms/')), 'Formsне должны входить в область владельца при depth:"unit" — форма выгружается как отдельная единица (D2).');
+    assert.ok(!files.some((file) => file.startsWith('Catalogs/Контрагенты/Templates/')), 'Templates не должны входить в область владельца при depth:"unit".');
+    assert.ok(files.some((file) => file.startsWith('Catalogs/Контрагенты/Commands/')), 'Command НЕ входит в REPOSITORY_SUBORDINATE_LAYOUT (выгружается вместе с владельцем) — Commands/** остаётся в области.');
+  });
+
+  test('реальный объект (Начисления, РегистрРасчета), depth="unit" — Recalculations исключён', () => {
+    const target: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'ТорговыйУчет' };
+    const scope = resolveObjectScope(EXAMPLE_CF, 'РегистрРасчета.Начисления', target, 'unit');
+    assert.ok(scope?.kind === 'object');
+    const files = collectScopeFiles(EXAMPLE_CF, scope).map(posix);
+    assert.ok(files.includes('CalculationRegisters/Начисления.xml'));
+    assert.ok(!files.some((file) => file.startsWith('CalculationRegisters/Начисления/Recalculations/')));
+  });
+
+  test('реальный объект (ИнтернетМагазин, ВнешнийИсточникДанных), depth="unit" — Tables/Cubes исключены; depth="tree" — включены', () => {
+    const target: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'ТорговыйУчет' };
+    const unitScope = resolveObjectScope(EXAMPLE_CF, 'ВнешнийИсточникДанных.ИнтернетМагазин', target, 'unit');
+    assert.ok(unitScope?.kind === 'object');
+    const unitFiles = collectScopeFiles(EXAMPLE_CF, unitScope).map(posix);
+    assert.ok(!unitFiles.some((file) => file.startsWith('ExternalDataSources/ИнтернетМагазин/Tables/')));
+    assert.ok(!unitFiles.some((file) => file.startsWith('ExternalDataSources/ИнтернетМагазин/Cubes/')));
+
+    const treeScope = resolveObjectScope(EXAMPLE_CF, 'ВнешнийИсточникДанных.ИнтернетМагазин', target, 'tree');
+    assert.ok(treeScope?.kind === 'object');
+    const treeFiles = collectScopeFiles(EXAMPLE_CF, treeScope).map(posix);
+    assert.ok(treeFiles.includes('ExternalDataSources/ИнтернетМагазин/Tables/Заказы.xml'));
+    assert.ok(treeFiles.includes('ExternalDataSources/ИнтернетМагазин/Cubes/Продажи.xml'));
+    // depth:"tree" — весь каталог рекурсивно, включая таблицы измерения куба.
+    assert.ok(treeFiles.includes('ExternalDataSources/ИнтернетМагазин/Cubes/Продажи/DimensionTables/Товары.xml'));
+  });
+
+  test('resolveObjectScope понимает имена ЕДИНИЦ (не только верхнеуровневых объектов): форма Контрагенты — область = её собственный каталог', () => {
+    const scope = resolveObjectScope(EXAMPLE_CF, 'Справочник.Контрагенты.Форма.ФормаЭлемента', cfTarget, 'unit');
+    assert.ok(scope?.kind === 'object');
+    assert.strictEqual(scope.fullName, 'Справочник.Контрагенты.Форма.ФормаЭлемента');
+    assert.strictEqual(posix(scope.xmlRel), 'Catalogs/Контрагенты/Forms/ФормаЭлемента.xml');
+    const files = collectScopeFiles(EXAMPLE_CF, scope).map(posix);
+    assert.deepStrictEqual(
+      [...files].sort(),
+      ['Catalogs/Контрагенты/Forms/ФормаЭлемента.xml', 'Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/Form.xml', 'Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/Form/Module.bsl'].sort()
+    );
+  });
+
+  test('resolveObjectScope понимает дважды вложенную единицу: таблица измерения куба ИнтернетМагазин', () => {
+    const target: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'ТорговыйУчет' };
+    const scope = resolveObjectScope(
+      EXAMPLE_CF,
+      'ВнешнийИсточникДанных.ИнтернетМагазин.Куб.Продажи.ТаблицаИзмерения.Товары',
+      target,
+      'unit'
+    );
+    assert.ok(scope?.kind === 'object');
+    assert.strictEqual(posix(scope.xmlRel), 'ExternalDataSources/ИнтернетМагазин/Cubes/Продажи/DimensionTables/Товары.xml');
+  });
+
+  test('resolveObjectScope для куба (единицы с собственными подчинёнными таблицами измерения), depth="unit" — DimensionTables исключены из СВОЕЙ области', () => {
+    const target: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'ТорговыйУчет' };
+    const scope = resolveObjectScope(EXAMPLE_CF, 'ВнешнийИсточникДанных.ИнтернетМагазин.Куб.Продажи', target, 'unit');
+    assert.ok(scope?.kind === 'object');
+    const files = collectScopeFiles(EXAMPLE_CF, scope).map(posix);
+    assert.ok(files.includes('ExternalDataSources/ИнтернетМагазин/Cubes/Продажи.xml'));
+    assert.ok(!files.some((file) => file.startsWith('ExternalDataSources/ИнтернетМагазин/Cubes/Продажи/DimensionTables/')));
+  });
+
+  test('resolveObjectScope: неизвестная единица (нераспознанный подчинённый тег) → null', () => {
+    const scope = resolveObjectScope(EXAMPLE_CF, 'Справочник.Контрагенты.НеизвестныйТег.Х', cfTarget, 'unit');
+    assert.strictEqual(scope, null);
   });
 });
 
@@ -255,5 +361,103 @@ suite('RepositoryObjectScope — resolveOwnerFullNameByRelativePath', () => {
     const evolcTarget: RepositoryTarget = { configRoot: EXAMPLE_EVOLC, configKind: 'cfe', extensionName: 'EVOLC', displayName: 'EVOLC' };
     assert.strictEqual(resolveOwnerFullNameByRelativePath('Catalogs/Контрагенты.xml', evolcTarget), 'Справочник.Контрагенты');
     assert.strictEqual(resolveOwnerFullNameByRelativePath('Configuration.xml', evolcTarget), getRootLockName(evolcTarget));
+  });
+});
+
+/**
+ * `resolveUnitXmlRel` — раздел 10, Р3/Р8: путь к ОСНОВНОМУ XML единицы (владельца
+ * или подчинённого) относительно `baseDir`, без сборки полного `ObjectScope`.
+ * Нужен планировщику раундов выгрузки (`RepositoryDumpRounds`), чтобы найти XML
+ * найденной единицы в каталоге очередного раунда и прочитать её собственные
+ * дочерние ссылки (`ChildObjectRefsReader`).
+ */
+suite('RepositoryObjectScope — resolveUnitXmlRel (issue #1, раздел 10, Р3/Р8)', () => {
+  test('владелец верхнего уровня (плоская раскладка)', () => {
+    assert.strictEqual(posix(resolveUnitXmlRel(EXAMPLE_CF, 'Справочник.Контрагенты') ?? ''), 'Catalogs/Контрагенты.xml');
+  });
+
+  test('форма — подчинённая единица', () => {
+    assert.strictEqual(
+      posix(resolveUnitXmlRel(EXAMPLE_CF, 'Справочник.Контрагенты.Форма.ФормаЭлемента') ?? ''),
+      'Catalogs/Контрагенты/Forms/ФормаЭлемента.xml'
+    );
+  });
+
+  test('таблица измерения куба — дважды вложенная единица', () => {
+    assert.strictEqual(
+      posix(resolveUnitXmlRel(EXAMPLE_CF, 'ВнешнийИсточникДанных.ИнтернетМагазин.Куб.Продажи.ТаблицаИзмерения.Регионы') ?? ''),
+      'ExternalDataSources/ИнтернетМагазин/Cubes/Продажи/DimensionTables/Регионы.xml'
+    );
+  });
+
+  test('единица не существует в baseDir (нет файла) → null', () => {
+    assert.strictEqual(resolveUnitXmlRel(EXAMPLE_CF, 'Справочник.Контрагенты.Форма.НетТакойФормы'), null);
+  });
+
+  test('неизвестная единица (нераспознанное имя) → null', () => {
+    assert.strictEqual(resolveUnitXmlRel(EXAMPLE_CF, 'БезТочки'), null);
+  });
+});
+
+/**
+ * `resolveLockUnitByRelativePath` — раздел 10, Р8: аналог
+ * `resolveOwnerFullNameByRelativePath`, но резолвит САМУЮ КОНКРЕТНУЮ единицу
+ * (с учётом подчинённых) по пути файла — используется группировкой владельцев
+ * рекурсивного корня по единицам (`diffOwnersAgainstBaseline`) и раундами
+ * выгрузки. Для файла САМОГО владельца (не внутри подчинённой папки) единица
+ * совпадает с владельцем — так же, как `resolveOwnerFullNameByRelativePath`.
+ */
+suite('RepositoryObjectScope — resolveLockUnitByRelativePath (issue #1, раздел 10, Р8)', () => {
+  test('файл владельца (Ext/ObjectModule.bsl) → сама единица-владелец', () => {
+    assert.strictEqual(resolveLockUnitByRelativePath('Catalogs/Контрагенты/Ext/ObjectModule.bsl', cfTarget), 'Справочник.Контрагенты');
+  });
+
+  test('файл внутри формы → единица формы, а не владелец', () => {
+    assert.strictEqual(
+      resolveLockUnitByRelativePath('Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/Form/Module.bsl', cfTarget),
+      'Справочник.Контрагенты.Форма.ФормаЭлемента'
+    );
+  });
+
+  test('сам XML формы → единица формы', () => {
+    assert.strictEqual(
+      resolveLockUnitByRelativePath('Catalogs/Контрагенты/Forms/ФормаЭлемента.xml', cfTarget),
+      'Справочник.Контрагенты.Форма.ФормаЭлемента'
+    );
+  });
+
+  test('файл внутри Commands (НЕ единица — Command выгружается с владельцем) → владелец', () => {
+    assert.strictEqual(
+      resolveLockUnitByRelativePath('Catalogs/Контрагенты/Commands/Покупатели/Ext/CommandModule.bsl', cfTarget),
+      'Справочник.Контрагенты'
+    );
+  });
+
+  test('файл дважды вложенной единицы (таблица измерения куба) → полное имя единицы с двумя сегментами', () => {
+    const target: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'ТорговыйУчет' };
+    assert.strictEqual(
+      resolveLockUnitByRelativePath('ExternalDataSources/ИнтернетМагазин/Cubes/Продажи/DimensionTables/Товары.xml', target),
+      'ВнешнийИсточникДанных.ИнтернетМагазин.Куб.Продажи.ТаблицаИзмерения.Товары'
+    );
+  });
+
+  test('файл самого куба (не внутри DimensionTables) → единица куба', () => {
+    const target: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'ТорговыйУчет' };
+    assert.strictEqual(
+      resolveLockUnitByRelativePath('ExternalDataSources/ИнтернетМагазин/Cubes/Продажи.xml', target),
+      'ВнешнийИсточникДанных.ИнтернетМагазин.Куб.Продажи'
+    );
+  });
+
+  test('Configuration.xml → сентинел корня (как resolveOwnerFullNameByRelativePath)', () => {
+    assert.strictEqual(resolveLockUnitByRelativePath('Configuration.xml', cfTarget), getRootLockName(cfTarget));
+  });
+
+  test('ConfigDumpInfo.xml → null', () => {
+    assert.strictEqual(resolveLockUnitByRelativePath('ConfigDumpInfo.xml', cfTarget), null);
+  });
+
+  test('неизвестная папка верхнего уровня → null', () => {
+    assert.strictEqual(resolveLockUnitByRelativePath('НеизвестнаяПапка/Файл.xml', cfTarget), null);
   });
 });

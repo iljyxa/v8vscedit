@@ -341,3 +341,132 @@ suite('RepositoryCommandRunner — runRepositoryCliCommand: обёртка с UI
     assert.ok(String(errorMessageCalls[0][0]).startsWith('Ошибка захвата\n'));
   });
 });
+
+/**
+ * Раздел 10.6 «Ранее непокрытые ветки»: `runRepositoryCliCommand(options,
+ * services, execute = executeRepositoryCli)` — внедрение `execute` вместо
+ * c8-ignore на реальном процессе Конфигуратора. Позволяет детерминированно
+ * проверить ветки `done`/`showSuccessMessage:false`/`afterSuccess` бросает/
+ * `interrupted`/`failed`, для которых раньше требовался реальный процесс 1С
+ * (см. предыдущий suite, ограничение задокументировано выше).
+ * Решение test-writer по сигнатуре (план 10.3 указывает только сам факт
+ * внедрения, не точную позицию параметра): третий необязательный параметр
+ * `execute` со значением по умолчанию `executeRepositoryCli` — обратная
+ * совместимость с уже написанными выше вызовами `runRepositoryCliCommand(options, services)`.
+ */
+suite('RepositoryCommandRunner — runRepositoryCliCommand: внедрение execute (issue #1, раздел 10.6)', () => {
+  let workspaceRoot: string;
+  let repositoryService: RepositoryService;
+  let target: RepositoryTarget;
+  let services: RepositoryCliServices;
+  let infoMessageCalls: unknown[][];
+  let errorMessageCalls: unknown[][];
+  let originalShowInformationMessage: typeof vscode.window.showInformationMessage;
+  let originalShowErrorMessage: typeof vscode.window.showErrorMessage;
+
+  setup(() => {
+    workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-runclicmd-inject-'));
+    repositoryService = new RepositoryService(workspaceRoot, new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot));
+    target = { configRoot: path.join(workspaceRoot, 'src', 'cf'), configKind: 'cf', displayName: 'Тест' };
+    services = {
+      workspaceFolder: { uri: vscode.Uri.file(workspaceRoot), name: 'test', index: 0 },
+      outputChannel: { appendLine: () => undefined } as unknown as vscode.OutputChannel,
+      repositoryService,
+      projectSecretStorage: new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot),
+    };
+    infoMessageCalls = [];
+    errorMessageCalls = [];
+    originalShowInformationMessage = vscode.window.showInformationMessage;
+    originalShowErrorMessage = vscode.window.showErrorMessage;
+    (vscode.window as { showInformationMessage: (...args: unknown[]) => Thenable<undefined> }).showInformationMessage = (...args: unknown[]) => {
+      infoMessageCalls.push(args);
+      return Promise.resolve(undefined);
+    };
+    (vscode.window as { showErrorMessage: (...args: unknown[]) => Thenable<undefined> }).showErrorMessage = (...args: unknown[]) => {
+      errorMessageCalls.push(args);
+      return Promise.resolve(undefined);
+    };
+  });
+
+  teardown(() => {
+    (vscode.window as { showInformationMessage: typeof vscode.window.showInformationMessage }).showInformationMessage = originalShowInformationMessage;
+    (vscode.window as { showErrorMessage: typeof vscode.window.showErrorMessage }).showErrorMessage = originalShowErrorMessage;
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  });
+
+  function baseOptions(): Parameters<typeof runRepositoryCliCommand>[0] {
+    return {
+      command: 'repository-bind',
+      target,
+      extraArgs: [],
+      progressTitle: 'Привязка',
+      progressStartMessage: 'Привязка...',
+      successMessage: 'Готово',
+      errorTitle: 'Ошибка привязки',
+    };
+  }
+
+  test('execute → {status:"done"}, showSuccessMessage не указан (по умолчанию true) — successMessage показан, afterSuccess вызван, результат true', async () => {
+    let afterSuccessCalls = 0;
+    const result = await runRepositoryCliCommand(
+      { ...baseOptions(), afterSuccess: () => { afterSuccessCalls += 1; } },
+      services,
+      () => Promise.resolve({ status: 'done' })
+    );
+    assert.strictEqual(result, true);
+    assert.strictEqual(afterSuccessCalls, 1);
+    assert.strictEqual(infoMessageCalls.length, 1);
+    assert.strictEqual(infoMessageCalls[0][0], 'Готово');
+  });
+
+  test('execute → {status:"done"}, showSuccessMessage:false — успех, но successMessage НЕ показывается', async () => {
+    const result = await runRepositoryCliCommand(
+      { ...baseOptions(), showSuccessMessage: false },
+      services,
+      () => Promise.resolve({ status: 'done' })
+    );
+    assert.strictEqual(result, true);
+    assert.strictEqual(infoMessageCalls.length, 0);
+  });
+
+  test('execute → {status:"done"}, afterSuccess бросает исключение — showErrorMessage с errorTitle, результат false, successMessage не показан', async () => {
+    const result = await runRepositoryCliCommand(
+      { ...baseOptions(), afterSuccess: () => { throw new Error('сбой после успешной команды'); } },
+      services,
+      () => Promise.resolve({ status: 'done' })
+    );
+    assert.strictEqual(result, false);
+    assert.strictEqual(infoMessageCalls.length, 0);
+    assert.strictEqual(errorMessageCalls.length, 1);
+    assert.ok(String(errorMessageCalls[0][0]).includes('сбой после успешной команды'));
+  });
+
+  test('execute → {status:"interrupted"} — showInformationMessage с сообщением прерывания, результат false (не showErrorMessage)', async () => {
+    const result = await runRepositoryCliCommand(
+      baseOptions(),
+      services,
+      () => Promise.resolve({ status: 'interrupted', message: 'отменено пользователем' })
+    );
+    assert.strictEqual(result, false);
+    assert.strictEqual(errorMessageCalls.length, 0);
+    assert.strictEqual(infoMessageCalls.length, 1);
+    assert.ok(String(infoMessageCalls[0][0]).includes('отменено пользователем'));
+  });
+
+  test('execute → {status:"failed"} — showErrorMessage с errorTitle и сообщением, результат false', async () => {
+    const result = await runRepositoryCliCommand(
+      baseOptions(),
+      services,
+      () => Promise.resolve({ status: 'failed', message: 'сбой сети' })
+    );
+    assert.strictEqual(result, false);
+    assert.strictEqual(errorMessageCalls.length, 1);
+    assert.ok(String(errorMessageCalls[0][0]).includes('сбой сети'));
+  });
+
+  test('execute не передан — по умолчанию используется executeRepositoryCli (совпадает с прежним поведением: нет env.json → failed)', async () => {
+    const result = await runRepositoryCliCommand(baseOptions(), services);
+    assert.strictEqual(result, false);
+    assert.strictEqual(errorMessageCalls.length, 1);
+  });
+});

@@ -8,6 +8,7 @@ import {
   finishPostMutation,
   reportFlowError,
   reportMergeOutcome,
+  resolveMergeScope,
   resolveSubjectTarget,
   type MergeApplicationResult,
   type PlannedMergeSource,
@@ -166,6 +167,57 @@ suite('RepositoryFileSyncShared — resolveSubjectTarget', () => {
 
     assert.strictEqual(result, null);
     assert.strictEqual(notifiedMessage, 'Не удалось определить конфигурацию для выбранного узла.');
+  });
+});
+
+const cfTarget: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'ТорговыйУчет' };
+
+/**
+ * Раздел 10.6 «Ранее непокрытые ветки»: `resolveMergeScope` без `dumpDir` для
+ * объекта, которого нет в проекте, — раньше не было отдельного unit-теста (эта
+ * ветка проверялась только косвенно через сквозные сценарии lock/unlock).
+ * Решение test-writer по сигнатуре (раздел 10, Р3/Р6: `includeNestedSubsystems`
+ * удалён, вложенность теперь регулируется `depth` области, а не отдельным
+ * булевым флагом): четвёртый параметр — `depth: ScopeDepth` вместо
+ * `withNestedSubsystems: boolean`.
+ */
+suite('RepositoryFileSyncShared — resolveMergeScope (issue #1, раздел 10.6, Р3/Р6)', () => {
+  test('без dumpDir, объекта нет в проекте → null (10.6: ранее не покрытая ветка)', () => {
+    assert.strictEqual(resolveMergeScope(cfTarget, 'Справочник.НетТакогоВПроекте', undefined, 'unit'), null);
+  });
+
+  test('без dumpDir, объект есть в проекте (Контрагенты) → область по проекту', () => {
+    const scope = resolveMergeScope(cfTarget, 'Справочник.Контрагенты', undefined, 'unit');
+    assert.ok(scope?.kind === 'object');
+  });
+
+  test('объекта нет в проекте, но есть в dumpDir (новый в хранилище) → область по выгрузке', () => {
+    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-resolve-merge-scope-dump-'));
+    try {
+      fs.mkdirSync(path.join(dumpDir, 'Catalogs'), { recursive: true });
+      fs.copyFileSync(path.join(EXAMPLE_CF, 'Catalogs', 'Контрагенты.xml'), path.join(dumpDir, 'Catalogs', 'НовыйВХранилище.xml'));
+      const scope = resolveMergeScope(cfTarget, 'Справочник.НовыйВХранилище', dumpDir, 'unit');
+      assert.ok(scope?.kind === 'object');
+    } finally {
+      fs.rmSync(dumpDir, { recursive: true, force: true });
+    }
+  });
+
+  test('нет ни в проекте, ни в dumpDir → null', () => {
+    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-resolve-merge-scope-empty-'));
+    try {
+      assert.strictEqual(resolveMergeScope(cfTarget, 'Справочник.НигдеНет', dumpDir, 'unit'), null);
+    } finally {
+      fs.rmSync(dumpDir, { recursive: true, force: true });
+    }
+  });
+
+  test('depth:"unit" — область не включает Forms/Templates владельца; depth:"tree" — включает', () => {
+    const unitScope = resolveMergeScope(cfTarget, 'Справочник.Контрагенты', undefined, 'unit');
+    const treeScope = resolveMergeScope(cfTarget, 'Справочник.Контрагенты', undefined, 'tree');
+    assert.ok(unitScope?.kind === 'object' && treeScope?.kind === 'object');
+    assert.ok(unitScope.excludeDirRels.length > 0);
+    assert.deepStrictEqual(treeScope.excludeDirRels, []);
   });
 });
 

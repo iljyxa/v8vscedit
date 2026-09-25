@@ -441,6 +441,240 @@ suite('BslReadonlyGuard — forget(uri)', () => {
   });
 });
 
+/**
+ * Раздел 10, Р9/10.3: `EditorReadonlyController` получает публичные
+ * `onActiveEditorChanged(editor)`/`onDocumentClosed(document)` — раньше это были
+ * приватные замыкания внутри `register()`. Прямой вызов делает переход
+ * скрытой вкладки в writable/readonly детерминированным без ожидания реального
+ * события `vscode.window.onDidChangeActiveTextEditor` (10.6: «ожидание по
+ * эффекту, не по таймеру») — обработчик идемпотентен (после первого успешного
+ * применения запись в `pending` удаляется), поэтому безопасен даже если
+ * `register()` тоже подписан на то же самое реальное событие.
+ */
+suite('EditorReadonlyController — публичные onActiveEditorChanged/onDocumentClosed (issue #1, раздел 10, 10.6)', () => {
+  let tmpDir: string;
+  let filePathA: string;
+  let filePathB: string;
+
+  setup(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-editor-readonly-public-'));
+    filePathA = path.join(tmpDir, 'А.bsl');
+    filePathB = path.join(tmpDir, 'Б.bsl');
+    fs.writeFileSync(filePathA, 'Процедура А() КонецПроцедуры\n', 'utf-8');
+    fs.writeFileSync(filePathB, 'Процедура Б() КонецПроцедуры\n', 'utf-8');
+  });
+
+  teardown(async () => {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  test('скрытая вкладка: pending выставлен событием → прямой onActiveEditorChanged() применяет readonly-команду сразу, без ожидания реального события', async function () {
+    this.timeout(10_000);
+    const uriA = vscode.Uri.file(filePathA);
+    const uriB = vscode.Uri.file(filePathB);
+    const docA = await vscode.workspace.openTextDocument(uriA);
+    const docB = await vscode.workspace.openTextDocument(uriB);
+    // Обе вкладки в ОДНОЙ группе: активна станет последняя открытая (Б); А остаётся
+    // существующей, но НЕ активной ("скрытой") вкладкой той же группы.
+    await vscode.window.showTextDocument(docA, { preview: false });
+    await vscode.window.showTextDocument(docB, { preview: false });
+
+    let listener: ChangeLocksListener | undefined;
+    const repositoryService = fakeRepositoryService({
+      isEditRestricted: () => false,
+      onDidChangeLocks: (l: ChangeLocksListener) => { listener = l; return { dispose: () => { listener = undefined; } }; },
+    });
+    const supportService = fakeSupportService(() => false);
+    const guard = new BslReadonlyGuard(supportService, repositoryService, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const controller = new EditorReadonlyController(repositoryService, supportService, guard, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const disposable = controller.register();
+
+    let resetCallsForA = 0;
+    const originalExecuteCommand = vscode.commands.executeCommand;
+    (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = ((command: string, ...rest: unknown[]) => {
+      if (command === 'workbench.action.files.resetActiveEditorReadonlyInSession' && vscode.window.activeTextEditor?.document.uri.toString() === uriA.toString()) {
+        resetCallsForA += 1;
+      }
+      return (originalExecuteCommand as (c: string, ...r: unknown[]) => Thenable<unknown>)(command, ...rest);
+    }) as typeof vscode.commands.executeCommand;
+
+    try {
+      assert.ok(listener);
+      // А сейчас СКРЫТА (не активна) — событие должно уйти в defer/pending, а не applyNow.
+      listener({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: ['Справочник.А'] });
+
+      // Активируем А по-настоящему (нужен реальный TextEditor — команда readonly работает
+      // с текущим активным редактором) и СРАЗУ вызываем публичный метод напрямую —
+      // без опроса/ожидания: идемпотентность гарантирует корректный результат независимо
+      // от того, успел ли к этому моменту сработать и реальный обработчик register().
+      const editorA = await vscode.window.showTextDocument(docA, { preview: false });
+      controller.onActiveEditorChanged(editorA);
+
+      assert.strictEqual(resetCallsForA, 1, 'Прямой вызов onActiveEditorChanged должен немедленно применить readonly-переход из pending.');
+    } finally {
+      disposable.dispose();
+      (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = originalExecuteCommand;
+    }
+  });
+
+  test('onDocumentClosed(document) очищает pending: последующий onActiveEditorChanged для того же файла уже ничего не применяет', async function () {
+    this.timeout(10_000);
+    const uriA = vscode.Uri.file(filePathA);
+    const uriB = vscode.Uri.file(filePathB);
+    const docA = await vscode.workspace.openTextDocument(uriA);
+    const docB = await vscode.workspace.openTextDocument(uriB);
+    await vscode.window.showTextDocument(docA, { preview: false });
+    await vscode.window.showTextDocument(docB, { preview: false });
+
+    let listener: ChangeLocksListener | undefined;
+    const repositoryService = fakeRepositoryService({
+      isEditRestricted: () => false,
+      onDidChangeLocks: (l: ChangeLocksListener) => { listener = l; return { dispose: () => { listener = undefined; } }; },
+    });
+    const supportService = fakeSupportService(() => false);
+    const guard = new BslReadonlyGuard(supportService, repositoryService, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const controller = new EditorReadonlyController(repositoryService, supportService, guard, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const disposable = controller.register();
+
+    let resetCallsForA = 0;
+    const originalExecuteCommand = vscode.commands.executeCommand;
+    (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = ((command: string, ...rest: unknown[]) => {
+      if (command === 'workbench.action.files.resetActiveEditorReadonlyInSession' && vscode.window.activeTextEditor?.document.uri.toString() === uriA.toString()) {
+        resetCallsForA += 1;
+      }
+      return (originalExecuteCommand as (c: string, ...r: unknown[]) => Thenable<unknown>)(command, ...rest);
+    }) as typeof vscode.commands.executeCommand;
+
+    try {
+      assert.ok(listener);
+      listener({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: ['Справочник.А'] });
+
+      // Пользователь закрывает вкладку А ДО того, как она стала активной снова.
+      controller.onDocumentClosed(docA);
+
+      const editorA = await vscode.window.showTextDocument(docA, { preview: false });
+      controller.onActiveEditorChanged(editorA);
+
+      assert.strictEqual(resetCallsForA, 0, 'После onDocumentClosed отложенный переход должен быть забыт — команда readonly не должна вызываться.');
+    } finally {
+      disposable.dispose();
+      (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = originalExecuteCommand;
+    }
+  });
+
+  test('onActiveEditorChanged(undefined) — защитная ветка, не бросает исключение', () => {
+    const repositoryService = fakeRepositoryService({ isEditRestricted: () => false, onDidChangeLocks: () => ({ dispose: () => undefined }) });
+    const supportService = fakeSupportService(() => false);
+    const guard = new BslReadonlyGuard(supportService, repositoryService, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const controller = new EditorReadonlyController(repositoryService, supportService, guard, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    assert.doesNotThrow(() => controller.onActiveEditorChanged(undefined));
+  });
+});
+
+/**
+ * Критерий приёмки 10.1.12: событие с единицей-подчинённым (форма) пересчитывает
+ * только вкладки файлов ЭТОЙ формы; событие с владельцем верхнего уровня —
+ * вкладки владельца И его подчинённых единиц. Реальная структура путей
+ * (`Catalogs/<Owner>/Ext/ObjectModule.bsl`, `Catalogs/<Owner>/Forms/<Form>/Ext/
+ * Form/Module.bsl`) — та же, что использует production-резолвер путей
+ * (`resolveLockUnitByRelativePath`/`resolveOwnerFullNameByRelativePath`), без
+ * заглушек этой логики.
+ */
+suite('EditorReadonlyController — цепочка единиц (issue #1, раздел 10, критерий 10.1.12)', () => {
+  let tmpDir: string;
+  let ownerModulePath: string;
+  let formModulePath: string;
+
+  setup(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-editor-readonly-chain-'));
+    ownerModulePath = path.join(tmpDir, 'Catalogs', 'Тест', 'Ext', 'ObjectModule.bsl');
+    formModulePath = path.join(tmpDir, 'Catalogs', 'Тест', 'Forms', 'Форма', 'Ext', 'Form', 'Module.bsl');
+    fs.mkdirSync(path.dirname(ownerModulePath), { recursive: true });
+    fs.mkdirSync(path.dirname(formModulePath), { recursive: true });
+    fs.writeFileSync(ownerModulePath, 'Процедура Владелец() КонецПроцедуры\n', 'utf-8');
+    fs.writeFileSync(formModulePath, 'Процедура Форма() КонецПроцедуры\n', 'utf-8');
+  });
+
+  teardown(async () => {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  async function openBothVisible(): Promise<{ ownerUri: vscode.Uri; formUri: vscode.Uri }> {
+    const ownerUri = vscode.Uri.file(ownerModulePath);
+    const formUri = vscode.Uri.file(formModulePath);
+    const ownerDoc = await vscode.workspace.openTextDocument(ownerUri);
+    const formDoc = await vscode.workspace.openTextDocument(formUri);
+    await vscode.window.showTextDocument(ownerDoc, { viewColumn: vscode.ViewColumn.One, preview: false });
+    await vscode.window.showTextDocument(formDoc, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+    return { ownerUri, formUri };
+  }
+
+  function countResetCallsFor(uris: readonly vscode.Uri[]): { counts: Map<string, number>; restore: () => void } {
+    const counts = new Map<string, number>(uris.map((u) => [u.toString(), 0]));
+    const originalExecuteCommand = vscode.commands.executeCommand;
+    (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = ((command: string, ...rest: unknown[]) => {
+      const activeUri = vscode.window.activeTextEditor?.document.uri.toString();
+      if (command === 'workbench.action.files.resetActiveEditorReadonlyInSession' && activeUri && counts.has(activeUri)) {
+        counts.set(activeUri, (counts.get(activeUri) ?? 0) + 1);
+      }
+      return (originalExecuteCommand as (c: string, ...r: unknown[]) => Thenable<unknown>)(command, ...rest);
+    }) as typeof vscode.commands.executeCommand;
+    return { counts, restore: () => { (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = originalExecuteCommand; } };
+  }
+
+  test('событие с единицей-формой (Справочник.Тест.Форма.Форма) — обработана только вкладка формы', async function () {
+    this.timeout(10_000);
+    const { ownerUri, formUri } = await openBothVisible();
+    let listener: ChangeLocksListener | undefined;
+    const repositoryService = fakeRepositoryService({
+      isEditRestricted: () => false,
+      onDidChangeLocks: (l: ChangeLocksListener) => { listener = l; return { dispose: () => { listener = undefined; } }; },
+    });
+    const supportService = fakeSupportService(() => false);
+    const guard = new BslReadonlyGuard(supportService, repositoryService, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const controller = new EditorReadonlyController(repositoryService, supportService, guard, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const disposable = controller.register();
+    const spy = countResetCallsFor([ownerUri, formUri]);
+    try {
+      assert.ok(listener);
+      listener({ target: { configRoot: tmpDir }, fullNames: ['Справочник.Тест.Форма.Форма'], allObjects: ['Справочник.Тест.Форма.Форма'] });
+      await waitUntil(() => (spy.counts.get(formUri.toString()) ?? 0) >= 1, 3000);
+      assert.strictEqual(spy.counts.get(formUri.toString()), 1);
+      assert.strictEqual(spy.counts.get(ownerUri.toString()) ?? 0, 0, 'Файл владельца НЕ должен обрабатываться — событие затронуло только форму.');
+    } finally {
+      spy.restore();
+      disposable.dispose();
+    }
+  });
+
+  test('событие с владельцем (Справочник.Тест) — обработаны обе вкладки: владелец И подчинённая форма', async function () {
+    this.timeout(10_000);
+    const { ownerUri, formUri } = await openBothVisible();
+    let listener: ChangeLocksListener | undefined;
+    const repositoryService = fakeRepositoryService({
+      isEditRestricted: () => false,
+      onDidChangeLocks: (l: ChangeLocksListener) => { listener = l; return { dispose: () => { listener = undefined; } }; },
+    });
+    const supportService = fakeSupportService(() => false);
+    const guard = new BslReadonlyGuard(supportService, repositoryService, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const controller = new EditorReadonlyController(repositoryService, supportService, guard, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const disposable = controller.register();
+    const spy = countResetCallsFor([ownerUri, formUri]);
+    try {
+      assert.ok(listener);
+      listener({ target: { configRoot: tmpDir }, fullNames: ['Справочник.Тест'], allObjects: ['Справочник.Тест'] });
+      await waitUntil(() => (spy.counts.get(ownerUri.toString()) ?? 0) >= 1 && (spy.counts.get(formUri.toString()) ?? 0) >= 1, 3000);
+      assert.strictEqual(spy.counts.get(ownerUri.toString()), 1);
+      assert.strictEqual(spy.counts.get(formUri.toString()), 1, 'Форма — подчинённая единица владельца, событие владельца должно затронуть и её.');
+    } finally {
+      spy.restore();
+      disposable.dispose();
+    }
+  });
+});
+
 async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<void> {
   const start = Date.now();
   while (!predicate()) {

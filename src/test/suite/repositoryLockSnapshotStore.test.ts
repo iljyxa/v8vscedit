@@ -3,7 +3,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { RepositoryLockSnapshotStore } from '../../infra/repository/RepositoryLockSnapshotStore';
+import { RepositoryLockSnapshotStore, diffOwnersAgainstBaseline } from '../../infra/repository/RepositoryLockSnapshotStore';
 import { resolveObjectScope, type ObjectScope } from '../../infra/repository/RepositoryObjectScope';
 import { computeFileHash } from '../../infra/cache/HashCache';
 import type { RepositoryTarget } from '../../infra/repository/RepositoryService';
@@ -305,4 +305,169 @@ suite('RepositoryLockSnapshotStore — captureRootManifest/diffRootManifest (iss
       fs.rmSync(workspaceRoot, { recursive: true, force: true });
     }
   });
+});
+
+const EXAMPLE_CF = path.resolve(__dirname, '../../../example/2.21/src/cf');
+
+/**
+ * Раздел 10, Р8: манифест снимка v3 (`{version:3, files, hashes, depth,
+ * subordinates?}`). `readSnapshotInfo` — новый экспорт (см. 10.3): в отличие от
+ * `readSnapshotHashes` (только хеши, для обратной совместимости), возвращает
+ * ещё и `depth`, и (для владельцев с подчинёнными единицами) список
+ * `subordinates`, известных на момент захвата — нужен для «эталона empty без
+ * Конфигуратора» (Р8, п.3: у ближайшего предка снимок v3 с `subordinates` БЕЗ
+ * этой единицы → единица создана локально, эталон «пусто»).
+ * Манифесты v1/v2 (без поля `depth`) читаются как `depth:'tree'`, без
+ * `subordinates` — тест на реальном примере из `example/2.21/src/cf`
+ * (Контрагенты) с уже существующей глубокой раскладкой.
+ */
+suite('RepositoryLockSnapshotStore — readSnapshotInfo и манифест v3 (issue #1, раздел 10, Р8)', () => {
+  test('captureFromDirectory с явным depth:"unit" и subordinates — readSnapshotInfo возвращает их обратно', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-v3-'));
+    try {
+      const store = new RepositoryLockSnapshotStore(workspaceRoot);
+      const target: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'ТорговыйУчет' };
+      const scope = resolveObjectScope(EXAMPLE_CF, 'Справочник.Контрагенты', target, 'unit') as Extract<ObjectScope, { kind: 'object' }>;
+      const subordinates = [
+        'Справочник.Контрагенты.Форма.ФормаЭлемента',
+        'Справочник.Контрагенты.Форма.ФормаСписка',
+        'Справочник.Контрагенты.Макет.ЗагрузкаИзФайла',
+      ];
+      store.captureFromDirectory(target, 'Справочник.Контрагенты', EXAMPLE_CF, scope, [], 'unit', subordinates);
+
+      const info = store.readSnapshotInfo(target, 'Справочник.Контрагенты');
+      assert.ok(info);
+      assert.strictEqual(info.depth, 'unit');
+      assert.deepStrictEqual([...(info.subordinates ?? [])].sort(), [...subordinates].sort());
+      assert.strictEqual(info.hashes['Catalogs/Контрагенты.xml'], computeFileHash(path.join(EXAMPLE_CF, 'Catalogs', 'Контрагенты.xml')));
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('captureFromDirectory БЕЗ явного depth — по умолчанию "unit" (единицы — обычный современный случай)', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-v3-default-'));
+    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-v3-default-dump-'));
+    try {
+      const store = new RepositoryLockSnapshotStore(workspaceRoot);
+      const configRoot = path.join(workspaceRoot, 'src', 'cf');
+      const target: RepositoryTarget = { configRoot, configKind: 'cf', displayName: 'Тест' };
+      writeConfigurationXml(dumpDir, fixtureUuid('snap-v3-default-config'));
+      writeObjectXml(dumpDir, 'Catalogs', 'Объект', 'Catalog', fixtureUuid('snap-v3-default-object'), 'flat');
+      const scope = resolveObjectScope(dumpDir, 'Справочник.Объект', target) as Extract<ObjectScope, { kind: 'object' }>;
+
+      store.captureFromDirectory(target, 'Справочник.Объект', dumpDir, scope);
+      const info = store.readSnapshotInfo(target, 'Справочник.Объект');
+      assert.ok(info);
+      assert.strictEqual(info.depth, 'unit');
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+      fs.rmSync(dumpDir, { recursive: true, force: true });
+    }
+  });
+
+  test('манифест v1 (легаси, без depth) — readSnapshotInfo отдаёт depth:"tree", subordinates отсутствует', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-v3-legacy-'));
+    try {
+      const store = new RepositoryLockSnapshotStore(workspaceRoot);
+      const target: RepositoryTarget = { configRoot: path.join(workspaceRoot, 'src', 'cf'), configKind: 'cf', displayName: 'Тест' };
+      const fullName = 'Справочник.Легаси';
+      const snapshotDir = legacySnapshotDir(workspaceRoot, target, fullName);
+      fs.mkdirSync(path.join(snapshotDir, 'files', 'Catalogs'), { recursive: true });
+      fs.writeFileSync(path.join(snapshotDir, 'files', 'Catalogs', 'Легаси.xml'), '<MetaDataObject legacy="true"/>', 'utf-8');
+      fs.writeFileSync(path.join(snapshotDir, 'manifest.json'), `${JSON.stringify({ files: ['Catalogs/Легаси.xml'] }, null, 2)}\n`, 'utf-8');
+
+      const info = store.readSnapshotInfo(target, fullName);
+      assert.ok(info);
+      assert.strictEqual(info.depth, 'tree');
+      assert.strictEqual(info.subordinates, undefined);
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('нет снимка — readSnapshotInfo отдаёт undefined (как readSnapshotHashes)', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-v3-missing-'));
+    try {
+      const store = new RepositoryLockSnapshotStore(workspaceRoot);
+      const target: RepositoryTarget = { configRoot: path.join(workspaceRoot, 'src', 'cf'), configKind: 'cf', displayName: 'Тест' };
+      assert.strictEqual(store.readSnapshotInfo(target, 'Справочник.Нет'), undefined);
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Раздел 10, Р8: `restoreToProject` и сравнение отбрасывают файлы снимка вне
+ * ТЕКУЩЕЙ (переданной вызывающим кодом) области — важно для старых глубоких
+ * снимков (v1/v2, записанных до появления единиц: содержат файлы форм внутри
+ * каталога владельца), которые при отмене захвата теперь сравниваются/
+ * восстанавливаются С `unit`-областью (без форм) — иначе откат стал бы трогать
+ * файлы форм, которые к этому моменту относятся к ДРУГИМ единицам со своими
+ * снимками.
+ */
+suite('RepositoryLockSnapshotStore — restoreToProject отбрасывает файлы снимка вне текущей области (issue #1, раздел 10, Р8)', () => {
+  test('старый (глубокий) снимок содержит файл формы — restoreToProject с unit-областью его игнорирует (не восстанавливает и не удаляет как лишний)', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-restore-scope-'));
+    try {
+      const store = new RepositoryLockSnapshotStore(workspaceRoot);
+      const target: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'ТорговыйУчет' };
+      // "Легаси"-снимок v2 — целиком копия каталога Контрагенты (включая Forms), как
+      // было ДО раздела 10 (depth:'tree' по умолчанию у прежней реализации).
+      const legacyScope = resolveObjectScope(EXAMPLE_CF, 'Справочник.Контрагенты', target, 'tree') as Extract<ObjectScope, { kind: 'object' }>;
+      store.captureFromDirectory(target, 'Справочник.Контрагенты', EXAMPLE_CF, legacyScope, [], 'tree');
+
+      // Проект — временная копия, где форма ФормаЭлемента изменена ЛОКАЛЬНО (владелец не тронут).
+      const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-restore-scope-project-'));
+      try {
+        fs.cpSync(EXAMPLE_CF, projectDir, { recursive: true });
+        const formModulePath = path.join(projectDir, 'Catalogs', 'Контрагенты', 'Forms', 'ФормаЭлемента', 'Ext', 'Form', 'Module.bsl');
+        fs.writeFileSync(formModulePath, `${fs.readFileSync(formModulePath, 'utf-8')}\n// локальная правка формы`, 'utf-8');
+
+        const projectTarget: RepositoryTarget = { configRoot: projectDir, configKind: 'cf', displayName: 'ТорговыйУчет' };
+        // Восстанавливаем ТОЛЬКО область владельца (unit) — форма ей больше не принадлежит.
+        const unitScope = resolveObjectScope(projectDir, 'Справочник.Контрагенты', projectTarget, 'unit') as Extract<ObjectScope, { kind: 'object' }>;
+        const backupDir = path.join(workspaceRoot, '.v8vscedit', 'repository', 'merge', 'test', 'unlock');
+        const result = store.restoreToProject(target, 'Справочник.Контрагенты', unitScope, backupDir);
+
+        assert.ok(!result.restored.some((f: string) => path.resolve(f) === path.resolve(formModulePath)), 'Файл формы не должен восстанавливаться — он вне unit-области владельца.');
+        assert.ok(!result.deleted.some((f: string) => path.resolve(f) === path.resolve(formModulePath)), 'Файл формы не должен считаться лишним — он вне unit-области владельца.');
+        assert.ok(fs.readFileSync(formModulePath, 'utf-8').includes('локальная правка формы'), 'Локальная правка формы должна остаться нетронутой.');
+      } finally {
+        fs.rmSync(projectDir, { recursive: true, force: true });
+      }
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * `diffOwnersAgainstBaseline` — раздел 10, Р8: теперь группирует изменения по
+ * ЕДИНИЦЕ (`resolveLockUnitByRelativePath`), а не только по владельцу верхнего
+ * уровня (`resolveOwnerFullNameByRelativePath`) — иначе изменение ОДНОЙ формы
+ * при рекурсивном захвате корня заставило бы root-incremental перевыгружать
+ * владельца целиком вместо одной формы (критерий приёмки 10.1.7/10.1.8).
+ */
+suite('RepositoryLockSnapshotStore — diffOwnersAgainstBaseline: группировка по единицам (issue #1, раздел 10, Р8)', () => {
+  test('изменился файл ВНУТРИ формы — owners содержит fullName формы, а не только владельца', () => {
+    const formModuleRel = 'Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/Form/Module.bsl';
+    const baseline = { [formModuleRel]: 'старый-хеш' };
+    const current = { [formModuleRel]: 'новый-хеш' };
+    const diff = diffOwnersAgainstBaseline(cfTargetForDiff(), baseline, current);
+    assert.deepStrictEqual(diff.owners, ['Справочник.Контрагенты.Форма.ФормаЭлемента']);
+  });
+
+  test('изменился файл владельца (не внутри подчинённой единицы) — owners содержит владельца, как раньше', () => {
+    const ownerModuleRel = 'Catalogs/Контрагенты/Ext/ObjectModule.bsl';
+    const baseline = { [ownerModuleRel]: 'старый-хеш' };
+    const current = { [ownerModuleRel]: 'новый-хеш' };
+    const diff = diffOwnersAgainstBaseline(cfTargetForDiff(), baseline, current);
+    assert.deepStrictEqual(diff.owners, ['Справочник.Контрагенты']);
+  });
+
+  function cfTargetForDiff(): RepositoryTarget {
+    return { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'ТорговыйУчет' };
+  }
 });

@@ -5,7 +5,6 @@ import * as path from 'path';
 import {
   resolveSubsystemMemberFullNames,
   resolveXmlPathByFullName,
-  resolveNewSubsystemMembers,
 } from '../../infra/repository/RepositoryDumpPlan';
 
 /**
@@ -22,6 +21,21 @@ import {
  * (`repositoryLockSync.test.ts`, сценарии корня и рекурсивной подсистемы),
  * поэтому дублирующий здесь тест рисковал бы зафиксировать неверно угаданную
  * внутреннюю форму раньше, чем реальный вызывающий код.
+ *
+ * Раздел 10 (Р2/Р4/Р10): по той же причине здесь НЕ фиксируется новая форма
+ * `{kind:'objects'; anchors; fullNames; expansion}` и новая сигнатура
+ * `buildRepositoryDumpPlan(node, objects, recursive, configRoot)` — поле
+ * `expansion` целиком зависит от контракта `RepositoryDumpRounds.UnitExpansion`
+ * (см. `repositoryDumpRounds.test.ts`, где раскрытие подчинённых единиц уже
+ * покрыто параметризованно), а `anchors`/`fullNames` наблюдаемы только через
+ * реальный вызов `RepositoryLockSync`/`RepositoryUnlockSync`. Синтетический тест
+ * здесь заранее угадывал бы, ЧТО именно `buildRepositoryDumpPlan` кладёт в
+ * `fullNames` для рекурсивного/нерекурсивного захвата верхнеуровневого объекта
+ * (список полностью раскрытых подчинённых по проекту? только якорь? частично?)
+ * — эта развилка прямо влияет на число вызовов `dumpToTemp` в
+ * `RepositoryLockSync`, поэтому решается и фиксируется тестами ТАМ, а не тут.
+ * D3 (см. `resolveSubsystemMemberFullNames` выше) — фиксируется здесь, так как
+ * это точечное исправление уже существующей, наблюдаемой в этом файле функции.
  */
 
 suite('RepositoryDumpPlan — resolveXmlPathByFullName', () => {
@@ -95,11 +109,14 @@ suite('RepositoryDumpPlan — resolveSubsystemMemberFullNames', () => {
       const nonRecursive = resolveSubsystemMemberFullNames(subsystemXmlPath, false);
       assert.deepStrictEqual([...nonRecursive].sort(), ['Подсистема.Продажи', 'Справочник.Товары'].sort());
 
+      // D3 (раздел 10, Р10): вложенная подсистема называется "Подсистема.Продажи.Подсистема.Розница",
+      // а НЕ просто "Подсистема.Розница" — платформа отклоняет короткое имя (10.12 «Имена подчинённых»).
       const recursive = resolveSubsystemMemberFullNames(subsystemXmlPath, true);
       assert.deepStrictEqual(
         [...recursive].sort(),
-        ['Подсистема.Продажи', 'Справочник.Товары', 'Подсистема.Розница', 'Документ.ЗаказПокупателя'].sort()
+        ['Подсистема.Продажи', 'Справочник.Товары', 'Подсистема.Продажи.Подсистема.Розница', 'Документ.ЗаказПокупателя'].sort()
       );
+      assert.ok(!recursive.includes('Подсистема.Розница'), 'Регресс D3: короткое имя вложенной подсистемы платформа отклоняет.');
     } finally {
       fs.rmSync(configRoot, { recursive: true, force: true });
     }
@@ -116,47 +133,13 @@ suite('RepositoryDumpPlan — resolveSubsystemMemberFullNames', () => {
   });
 });
 
-suite('RepositoryDumpPlan — resolveNewSubsystemMembers (issue #1, п.2.7 — довыгрузка недостающих участников)', () => {
-  test('владелец из Content подсистемы, ещё не выгруженный локально, попадает в результат', () => {
-    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-dumpplan-newmembers-'));
-    try {
-      fs.mkdirSync(path.join(dumpDir, 'Subsystems'), { recursive: true });
-      fs.writeFileSync(
-        path.join(dumpDir, 'Subsystems', 'Продажи.xml'),
-        buildSubsystemXml('Продажи', ['Catalog.Товары', 'Document.Заказ'], []),
-        'utf-8'
-      );
-
-      const newMembers = resolveNewSubsystemMembers(dumpDir, ['Подсистема.Продажи'], new Set(['Справочник.Товары']));
-      assert.deepStrictEqual(newMembers, ['Документ.Заказ']);
-    } finally {
-      fs.rmSync(dumpDir, { recursive: true, force: true });
-    }
-  });
-
-  test('все участники уже известны — пустой результат', () => {
-    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-dumpplan-newmembers-empty-'));
-    try {
-      fs.mkdirSync(path.join(dumpDir, 'Subsystems'), { recursive: true });
-      fs.writeFileSync(
-        path.join(dumpDir, 'Subsystems', 'Продажи.xml'),
-        buildSubsystemXml('Продажи', ['Catalog.Товары'], []),
-        'utf-8'
-      );
-
-      const newMembers = resolveNewSubsystemMembers(dumpDir, ['Подсистема.Продажи'], new Set(['Справочник.Товары', 'Подсистема.Продажи']));
-      assert.deepStrictEqual(newMembers, []);
-    } finally {
-      fs.rmSync(dumpDir, { recursive: true, force: true });
-    }
-  });
-
-  test('подсистема из списка ещё не выгружена в dumpDir (будет довыгружена в следующем раунде) — пропускается без исключения', () => {
-    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-dumpplan-newmembers-notyet-'));
-    try {
-      assert.deepStrictEqual(resolveNewSubsystemMembers(dumpDir, ['Подсистема.ЕщёНеВыгружена'], new Set()), []);
-    } finally {
-      fs.rmSync(dumpDir, { recursive: true, force: true });
-    }
-  });
-});
+/*
+ * `resolveNewSubsystemMembers` УДАЛЁН этой задачей (раздел 10, Р10:
+ * «resolveNewSubsystemMembers, isNestedSubsystemMember, includeNestedSubsystems
+ * удаляются») — довыгрузка недостающих участников рекурсивной подсистемы
+ * теперь ведётся раундами через `RepositoryDumpRounds.runDumpRounds` с
+ * `createSubsystemExpansion`, см. `repositoryDumpRounds.test.ts`
+ * (`createSubsystemExpansion`, `runDumpRounds: раунд 0 успешен`). Прежние три
+ * теста этого suite дублировали бы то же поведение через удалённую функцию —
+ * не переносятся, а заменяются эквивалентными сценариями там.
+ */
