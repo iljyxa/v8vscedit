@@ -1,3 +1,5 @@
+import { isRepositorySubordinateTag } from './RepositoryObjectNames';
+
 /**
  * Сравнение двух `ConfigDumpInfo.xml` (проектного и свежего `-configDumpInfoOnly`)
  * с группировкой по объектам-владельцам — основа инкрементального получения корня:
@@ -30,10 +32,28 @@ export function extractDumpInfoOwner(name: string): string {
   return secondDot < 0 ? name : name.slice(0, secondDot);
 }
 
-function groupByOwner(map: ReadonlyMap<string, string>): Map<string, Map<string, string>> {
+/**
+ * `Catalog.X.Form.Y.Form` → `Catalog.X.Form.Y`: к владельцу добавляются пары
+ * «вид/имя», пока вид — подчинённая единица хранилища и за ним есть имя. Так
+ * изменение одной формы группируется отдельно от владельца и получается одной
+ * строкой `-listFile`, а не выгрузкой всего объекта.
+ */
+export function extractDumpInfoUnit(name: string): string {
+  const parts = name.split('.');
+  let length = Math.min(parts.length, 2);
+  while (length + 1 < parts.length && isRepositorySubordinateTag(parts[length])) {
+    length += 2;
+  }
+  return parts.slice(0, length).join('.');
+}
+
+function groupByOwner(
+  map: ReadonlyMap<string, string>,
+  keyOf: (name: string) => string
+): Map<string, Map<string, string>> {
   const result = new Map<string, Map<string, string>>();
   for (const [name, version] of map) {
-    const owner = extractDumpInfoOwner(name);
+    const owner = keyOf(name);
     let entries = result.get(owner);
     if (!entries) {
       entries = new Map<string, string>();
@@ -56,12 +76,14 @@ function sameEntries(left: ReadonlyMap<string, string>, right: ReadonlyMap<strin
   return true;
 }
 
+/** `keyOf` задаёт группировку: по владельцу верхнего уровня или по единице хранилища. */
 export function diffConfigDumpInfo(
   previous: ReadonlyMap<string, string>,
-  next: ReadonlyMap<string, string>
+  next: ReadonlyMap<string, string>,
+  keyOf: (name: string) => string = extractDumpInfoOwner
 ): ConfigDumpInfoDiffResult {
-  const previousOwners = groupByOwner(previous);
-  const nextOwners = groupByOwner(next);
+  const previousOwners = groupByOwner(previous, keyOf);
+  const nextOwners = groupByOwner(next, keyOf);
   const changedOwners: string[] = [];
   const addedOwners: string[] = [];
   const removedOwners: string[] = [];

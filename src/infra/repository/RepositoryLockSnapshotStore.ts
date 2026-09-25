@@ -6,10 +6,12 @@ import { buildRepositoryScopeKey } from './RepositoryLockState';
 import {
   collectScopeFiles,
   detectScopeLayout,
+  isPathInScope,
   mapDumpPathToProject,
   removeEmptyParentDirs,
-  resolveOwnerFullNameByRelativePath,
+  resolveLockUnitByRelativePath,
   type ObjectScope,
+  type ScopeDepth,
 } from './RepositoryObjectScope';
 import type { RepositoryTarget } from './RepositoryService';
 
@@ -22,12 +24,23 @@ import type { RepositoryTarget } from './RepositoryService';
  *
  * Раскладка: `.v8vscedit/repository/snapshots/<scopeKey>/<sha1(fullName)>/{manifest.json,files/<rel>}`
  * — совпадает с прежней, чтобы снимки, снятые до обновления, оставались читаемыми
- * (манифест v1 — `{files}` без хешей).
+ * (манифест v1 — `{files}` без хешей, v2 — с хешами). Манифест v3 хранит глубину
+ * области и подчинённые единицы, известные на момент захвата; v1/v2 сняты со всего
+ * каталога объекта и читаются как `tree`.
  */
 interface SnapshotManifest {
   version?: number;
   files: string[];
   hashes?: Record<string, string>;
+  depth?: ScopeDepth;
+  subordinates?: string[];
+}
+
+export interface SnapshotInfo {
+  hashes: Record<string, string>;
+  depth: ScopeDepth;
+  /** Подчинённые единицы в версии хранилища на момент захвата (только манифест v3). */
+  subordinates?: string[];
 }
 
 interface RootManifest {
@@ -49,7 +62,7 @@ export interface SnapshotRestoreResult {
   backups: SnapshotBackupEntry[];
 }
 
-const SNAPSHOT_MANIFEST_VERSION = 2;
+const SNAPSHOT_MANIFEST_VERSION = 3;
 const ROOT_MANIFEST_FILE = 'root-manifest.json';
 const ALL_SCOPE: ObjectScope = { kind: 'all' };
 
@@ -60,15 +73,19 @@ export class RepositoryLockSnapshotStore {
    * Снимок из каталога выгрузки (версия хранилища, полученная при захвате).
    * `keepFromProject` — файлы проекта (пути проекта), которых нет в неполной выгрузке:
    * версия хранилища для них неизвестна, и без них откат при отмене захвата удалил бы
-   * их как «лишние».
+   * их как «лишние». `subordinates` — подчинённые единицы версии хранилища: единица,
+   * которой среди них нет, при отмене захвата считается созданной локально.
+   * Возвращает хеши снятых файлов.
    */
   captureFromDirectory(
     target: RepositoryTarget,
     fullName: string,
     sourceDir: string,
     scope: ObjectScope,
-    keepFromProject: readonly string[] = []
-  ): void {
+    keepFromProject: readonly string[] = [],
+    depth: ScopeDepth = 'unit',
+    subordinates?: readonly string[]
+  ): Record<string, string> {
     const snapshotDir = this.getSnapshotDir(target, fullName);
     // Актуален только снимок последнего захвата — предыдущий затирается.
     fs.rmSync(snapshotDir, { recursive: true, force: true });
@@ -86,7 +103,14 @@ export class RepositoryLockSnapshotStore {
       fs.copyFileSync(source, destination);
       hashes[rel] = computeFileHash(source);
     }
-    this.writeManifest(snapshotDir, { version: SNAPSHOT_MANIFEST_VERSION, files, hashes });
+    this.writeManifest(snapshotDir, {
+      version: SNAPSHOT_MANIFEST_VERSION,
+      files,
+      hashes,
+      depth,
+      ...(subordinates ? { subordinates: [...subordinates] } : {}),
+    });
+    return hashes;
   }
 
   /**
@@ -96,7 +120,7 @@ export class RepositoryLockSnapshotStore {
   captureEmpty(target: RepositoryTarget, fullName: string): void {
     const snapshotDir = this.getSnapshotDir(target, fullName);
     fs.rmSync(snapshotDir, { recursive: true, force: true });
-    this.writeManifest(snapshotDir, { version: SNAPSHOT_MANIFEST_VERSION, files: [], hashes: {} });
+    this.writeManifest(snapshotDir, { version: SNAPSHOT_MANIFEST_VERSION, files: [], hashes: {}, depth: 'unit' });
   }
 
   private writeManifest(snapshotDir: string, manifest: SnapshotManifest): void {
@@ -105,12 +129,23 @@ export class RepositoryLockSnapshotStore {
   }
 
   /** Пересъём снимка из проекта — после помещения с сохранением захвата версия хранилища = проект. */
-  captureFromProject(target: RepositoryTarget, fullName: string, scope: ObjectScope): void {
-    this.captureFromDirectory(target, fullName, target.configRoot, scope);
+  captureFromProject(
+    target: RepositoryTarget,
+    fullName: string,
+    scope: ObjectScope,
+    depth: ScopeDepth = 'unit',
+    subordinates?: readonly string[]
+  ): void {
+    this.captureFromDirectory(target, fullName, target.configRoot, scope, [], depth, subordinates);
   }
 
   /** Хеши файлов снимка; `undefined` — снимка нет или манифест не читается. */
   readSnapshotHashes(target: RepositoryTarget, fullName: string): Record<string, string> | undefined {
+    return this.readSnapshotInfo(target, fullName)?.hashes;
+  }
+
+  /** Хеши, глубина и подчинённые снимка; `undefined` — снимка нет или манифест не читается. */
+  readSnapshotInfo(target: RepositoryTarget, fullName: string): SnapshotInfo | undefined {
     const snapshotDir = this.getSnapshotDir(target, fullName);
     const manifest = readSnapshotManifest(snapshotDir);
     if (!manifest) {
@@ -123,13 +158,19 @@ export class RepositoryLockSnapshotStore {
         hashes[rel] = hash;
       }
     }
-    return hashes;
+    return {
+      hashes,
+      depth: manifest.depth ?? 'tree',
+      ...(manifest.subordinates ? { subordinates: manifest.subordinates } : {}),
+    };
   }
 
   /**
    * Возвращает область объекта к снимку: изменённые/удалённые файлы восстанавливаются,
    * лишние (появившиеся после захвата) удаляются. Всё, что перезаписывается или
-   * удаляется, предварительно копируется в `backupDir`.
+   * удаляется, предварительно копируется в `backupDir`. Файлы снимка вне области не
+   * трогаются: старый глубокий снимок содержит файлы подчинённых, у которых теперь
+   * свои снимки и своя отмена захвата.
    */
   restoreToProject(
     target: RepositoryTarget,
@@ -151,6 +192,9 @@ export class RepositoryLockSnapshotStore {
         continue;
       }
       const rel = mapDumpPathToProject(snapshotRel, scope, projectLayout);
+      if (!isPathInScope(rel, scope)) {
+        continue;
+      }
       expected.add(rel);
       const projectPath = path.join(target.configRoot, rel);
       if (fs.existsSync(projectPath) && filesAreEqual(projectPath, source)) {
@@ -230,8 +274,9 @@ export class RepositoryLockSnapshotStore {
 }
 
 /**
- * Владельцы, чьи файлы разошлись с эталонными хешами. `addedOwners` — владельцы без
- * единого файла в эталоне: объект создан после снятия эталона, в хранилище его нет.
+ * Единицы хранилища, чьи файлы разошлись с эталонными хешами: изменение одной формы
+ * даёт единицу формы, а не всего владельца. `addedOwners` — единицы без единого файла
+ * в эталоне: созданы после снятия эталона, в хранилище их нет.
  */
 export function diffOwnersAgainstBaseline(
   target: RepositoryTarget,
@@ -247,14 +292,14 @@ export function diffOwnersAgainstBaseline(
   Object.keys(baseline).filter((rel) => !(rel in current)).forEach((rel) => changedRels.add(rel));
   const owners = new Set<string>();
   for (const rel of changedRels) {
-    const owner = resolveOwnerFullNameByRelativePath(rel, target);
+    const owner = resolveLockUnitByRelativePath(rel, target);
     if (owner) {
       owners.add(owner);
     }
   }
   const baselineOwners = new Set<string>();
   for (const rel of Object.keys(baseline)) {
-    const owner = resolveOwnerFullNameByRelativePath(rel, target);
+    const owner = resolveLockUnitByRelativePath(rel, target);
     if (owner) {
       baselineOwners.add(owner);
     }
@@ -288,7 +333,16 @@ function readSnapshotManifest(snapshotDir: string): SnapshotManifest | null {
   }
   const files = parsed.files.filter((item): item is string => typeof item === 'string');
   const hashes = isStringRecord(parsed.hashes) ? parsed.hashes : undefined;
-  return { files, hashes };
+  // У v1/v2 поля глубины нет: они сняты со всего каталога объекта (см. readSnapshotInfo).
+  const depth = isScopeDepth(parsed.depth) ? parsed.depth : undefined;
+  const subordinates = Array.isArray(parsed.subordinates)
+    ? parsed.subordinates.filter((item): item is string => typeof item === 'string')
+    : undefined;
+  return { files, hashes, depth, subordinates };
+}
+
+function isScopeDepth(value: unknown): value is ScopeDepth {
+  return value === 'unit' || value === 'tree';
 }
 
 function readRootManifest(filePath: string): RootManifest | null {

@@ -1,10 +1,13 @@
 import * as path from 'path';
-import { isSupportedConfigFile, patchHashCacheEntries } from '../../../infra/cache/HashCache';
-import { diffOwnersAgainstBaseline, hashScopeFiles } from '../../../infra/repository/RepositoryLockSnapshotStore';
-import { collectMergeFileStates, diffScopeAgainstEtalon, planRepositoryMerge } from '../../../infra/repository/RepositoryMergePlanner';
+import { patchHashCacheEntries } from '../../../infra/cache/HashCache';
+import { resolveXmlPathByFullName } from '../../../infra/repository/RepositoryDumpPlan';
+import { expandSubordinateUnits } from '../../../infra/repository/RepositoryDumpRounds';
+import { hashScopeFiles } from '../../../infra/repository/RepositoryLockSnapshotStore';
+import { diffScopeAgainstEtalon } from '../../../infra/repository/RepositoryMergePlanner';
 import { isRootLockName } from '../../../infra/repository/RepositoryObjectNames';
 import {
   detectScopeLayout,
+  isPathInScope,
   mapDumpPathToProject,
   type ObjectScope,
 } from '../../../infra/repository/RepositoryObjectScope';
@@ -14,7 +17,6 @@ import {
   buildOperationBackupDir,
   DEFAULT_REPOSITORY_FILE_SYNC_DEPS,
   finishPostMutation,
-  isNestedSubsystemMember,
   loadBaseHashes,
   prepareRepositorySubject,
   reportCliOutcome,
@@ -22,27 +24,12 @@ import {
   resolveMergeScope,
   resolveSubjectTarget,
   runRepositoryExclusive,
-  skippedRelsOfScope,
-  toDumpListName,
   type RepositoryFileSyncDeps,
   type RepositoryFileSyncServices,
   type RepositoryFlowOutcome,
   type RepositorySubject,
-  type RepositoryTempDump,
 } from './RepositoryFileSyncShared';
-
-/**
- * Эталон объекта при отмене захвата: снимок захвата, свежая выгрузка версии
- * хранилища (снимка нет) или «пусто» (объект создан локально, в хранилище его нет).
- */
-interface UnlockEtalonRequest {
-  fullName: string;
-  source: 'snapshot' | 'dump' | 'empty';
-}
-
-type UnlockEtalons =
-  | { status: 'ready'; objects: UnlockEtalonRequest[]; dump?: RepositoryTempDump }
-  | { status: 'failed'; reason: string };
+import { acquireUnlockEtalons, type UnlockEtalonRequest, type UnlockEtalons } from './RepositoryUnlockEtalons';
 
 interface UnlockLeaseResult {
   cli: Awaited<ReturnType<RepositoryFileSyncDeps['runRepositoryCli']>>;
@@ -69,6 +56,8 @@ export async function runRepositoryUnlockFlow(
   const objectLabel = node.label ?? target.displayName;
   const label = `Освобождение «${objectLabel}»`;
   const syncEnabled = deps.isFileSyncEnabled();
+  // Хеш-кэш нужен только рекурсивному корню без манифеста; читается до аренды guard'а.
+  const baseHashes = syncEnabled && options.recursive && isRootNode(node) ? loadBaseHashes(services, target) : {};
   let leased: Awaited<ReturnType<typeof runRepositoryExclusive<UnlockLeaseResult>>>;
   try {
     leased = await runRepositoryExclusive<UnlockLeaseResult>(services, deps, label, async () => {
@@ -84,7 +73,7 @@ export async function runRepositoryUnlockFlow(
       if (!syncEnabled) {
         return { cli, subject, released };
       }
-      const etalons = await acquireUnlockEtalons(subject, released, options.recursive, services, deps);
+      const etalons = await acquireUnlockEtalons(subject, released, options.recursive, baseHashes, services, deps);
       return { cli, subject, released, etalons };
     });
   } catch (error) {
@@ -106,7 +95,7 @@ export async function runRepositoryUnlockFlow(
       reportFlowError(services, deps, `${label}: синхронизация файлов`, error);
     } finally {
       if (etalons?.status === 'ready') {
-        etalons.dump?.dispose();
+        etalons.dispose();
       }
       discardSubjectSnapshots(services, subject, released, options.recursive);
     }
@@ -177,6 +166,11 @@ function isRootRecursive(subject: RepositorySubject, recursive: boolean): boolea
   return subject.isRoot && recursive;
 }
 
+/** Корень определяется по виду узла ещё до аренды — так же, как в createObjectsFileForNode. */
+function isRootNode(node: RepositoryNodeRef): boolean {
+  return node.nodeKind === 'configuration' || node.nodeKind === 'extension';
+}
+
 function discardSubjectSnapshots(
   services: RepositoryFileSyncServices,
   subject: RepositorySubject,
@@ -191,6 +185,7 @@ function discardSubjectSnapshots(
   released.forEach((fullName) => snapshots.discard(subject.target, fullName));
 }
 
+/** Помещение с сохранением захвата: версия хранилища = проект, снимок каждой захваченной единицы — из проекта. */
 function recaptureSnapshotsFromProject(services: RepositoryFileSyncServices, subject: RepositorySubject): void {
   const { target } = subject;
   const repository = services.repositoryService;
@@ -200,76 +195,13 @@ function recaptureSnapshotsFromProject(services: RepositoryFileSyncServices, sub
   }
   for (const fullName of subject.members) {
     const locked = isRootLockName(fullName) ? repository.isRootLocked(target) : repository.isLocked(target, fullName);
-    const scope = locked && !isNestedSubsystemMember(subject, fullName)
-      ? resolveMergeScope(target, fullName, undefined, subject.subsystemRecursive && fullName === subject.anchor)
-      : null;
+    const scope = locked ? resolveMergeScope(target, fullName, undefined, 'unit') : null;
     if (scope) {
-      repository.snapshots.captureFromProject(target, fullName, scope);
+      const projectXml = resolveXmlPathByFullName(target.configRoot, fullName);
+      const subordinates = projectXml ? expandSubordinateUnits(fullName, projectXml) : undefined;
+      repository.snapshots.captureFromProject(target, fullName, scope, 'unit', subordinates);
     }
   }
-}
-
-/**
- * Эталоны в аренде: выгрузка нужна только объектам без снимка. Для рекурсивного
- * корня изменённые владельцы находятся по хеш-манифесту (или по хеш-кэшу, если
- * манифеста нет) — выгружаются только они.
- */
-async function acquireUnlockEtalons(
-  subject: RepositorySubject,
-  released: readonly string[],
-  recursive: boolean,
-  services: RepositoryFileSyncServices,
-  deps: RepositoryFileSyncDeps
-): Promise<UnlockEtalons> {
-  const { target } = subject;
-  let objects: UnlockEtalonRequest[];
-  if (isRootRecursive(subject, recursive)) {
-    const owners = collectRootOwnersToRestore(services, target);
-    if (!owners) {
-      return { status: 'ready', objects: [] };
-    }
-    objects = [
-      ...owners.changed.map((fullName): UnlockEtalonRequest => ({ fullName, source: 'dump' })),
-      ...owners.added.map((fullName): UnlockEtalonRequest => ({ fullName, source: 'empty' })),
-    ];
-  } else {
-    const snapshots = services.repositoryService.snapshots;
-    objects = released
-      .filter((fullName) => !isNestedSubsystemMember(subject, fullName))
-      .map((fullName) => ({ fullName, source: snapshots.readSnapshotHashes(target, fullName) ? 'snapshot' : 'dump' }));
-  }
-  const toDump = objects.filter((item) => item.source === 'dump').map((item) => toDumpListName(item.fullName, target));
-  if (toDump.length === 0) {
-    return { status: 'ready', objects };
-  }
-  const dump = await deps.dumpToTemp(target, { mode: 'partial', fullNames: toDump }, services);
-  if (!dump.ok) {
-    return { status: 'failed', reason: dump.reason };
-  }
-  return { status: 'ready', objects, dump };
-}
-
-function collectRootOwnersToRestore(
-  services: RepositoryFileSyncServices,
-  target: RepositoryTarget
-): { changed: string[]; added: string[] } | null {
-  const manifest = services.repositoryService.snapshots.readRootManifestHashes(target);
-  let baseline = manifest;
-  let current = hashScopeFiles(target.configRoot, { kind: 'all' });
-  if (!baseline) {
-    const cached = loadBaseHashes(services, target);
-    if (Object.keys(cached).length === 0) {
-      services.outputChannel.appendLine(
-        `[repository][file-sync] «${target.displayName}»: нет хеш-манифеста захвата и хеш-кэша — откат файлов пропущен.`
-      );
-      return null;
-    }
-    // Хеш-кэш хранит только файлы конфигурации — остальные в сравнении не участвуют.
-    baseline = cached;
-    current = Object.fromEntries(Object.entries(current).filter(([rel]) => isSupportedConfigFile(rel)));
-  }
-  const diff = diffOwnersAgainstBaseline(target, baseline, current);
-  return { changed: diff.owners.filter((owner) => !diff.addedOwners.includes(owner)), added: diff.addedOwners };
 }
 
 interface EtalonComparison {
@@ -296,52 +228,53 @@ async function completeUnlockSync(
   const { target } = subject;
   const comparisons: EtalonComparison[] = [];
   for (const item of etalons.objects) {
-    const withNested = subject.isRoot || (subject.subsystemRecursive && item.fullName === subject.anchor);
-    const scope = resolveMergeScope(target, item.fullName, etalons.dump?.dir, withNested);
+    const scope = resolveMergeScope(target, item.fullName, item.source === 'dump' ? item.dir : undefined, item.depth);
     if (!scope) {
       services.outputChannel.appendLine(`[repository][file-sync] «${item.fullName}»: область файлов не определена — пропущено.`);
       continue;
     }
-    prepareSnapshotEtalon(services, target, item, scope, etalons.dump);
-    comparisons.push(compareWithEtalon(services, target, item.fullName, scope));
+    const snapshotHashes = prepareSnapshotEtalon(services, target, item, scope);
+    comparisons.push(compareWithEtalon(target, item.fullName, scope, snapshotHashes));
   }
   await rollbackToEtalons(services, deps, target, comparisons, objectLabel);
 }
 
-/** Выгрузка и «пусто» превращаются в снимки, чтобы откат шёл одним путём restoreToProject. */
+/**
+ * Выгрузка и «пусто» превращаются в снимки, чтобы откат шёл одним путём restoreToProject.
+ * Проектные файлы в эталон не подмешиваются: откат возвращает именно версию хранилища.
+ */
 function prepareSnapshotEtalon(
   services: RepositoryFileSyncServices,
   target: RepositoryTarget,
   item: UnlockEtalonRequest,
-  scope: ObjectScope,
-  dump: RepositoryTempDump | undefined
-): void {
+  scope: ObjectScope
+): Record<string, string> {
   const snapshots = services.repositoryService.snapshots;
-  if (item.source === 'empty') {
-    snapshots.captureEmpty(target, item.fullName);
-  } else if (item.source === 'dump' && dump) {
-    const plan = planRepositoryMerge(collectMergeFileStates({
-      configRoot: target.configRoot,
-      dumpDir: dump.dir,
-      scopes: [scope],
-      baseHashes: {},
-      dirtyRelativePaths: [],
-      requirePrimaryFile: true,
-    }));
-    snapshots.captureFromDirectory(target, item.fullName, dump.dir, scope, skippedRelsOfScope(plan, scope));
+  switch (item.source) {
+    case 'snapshot':
+      return item.hashes;
+    case 'dump':
+      return snapshots.captureFromDirectory(target, item.fullName, item.dir, scope, [], item.depth);
+    case 'empty':
+      snapshots.captureEmpty(target, item.fullName);
+      return {};
   }
 }
 
 function compareWithEtalon(
-  services: RepositoryFileSyncServices,
   target: RepositoryTarget,
   fullName: string,
-  scope: ObjectScope
+  scope: ObjectScope,
+  snapshotHashes: Readonly<Record<string, string>>
 ): EtalonComparison {
   const layout = detectScopeLayout(target.configRoot, scope);
   const etalon: Record<string, string> = {};
-  for (const [rel, hash] of Object.entries(services.repositoryService.snapshots.readSnapshotHashes(target, fullName) ?? {})) {
-    etalon[mapDumpPathToProject(rel, scope, layout)] = hash;
+  for (const [rel, hash] of Object.entries(snapshotHashes)) {
+    const projectRel = mapDumpPathToProject(rel, scope, layout);
+    // Старый глубокий снимок содержит файлы подчинённых единиц — они сравниваются своими эталонами.
+    if (isPathInScope(projectRel, scope)) {
+      etalon[projectRel] = hash;
+    }
   }
   const diff = diffScopeAgainstEtalon(etalon, hashScopeFiles(target.configRoot, scope));
   return { fullName, scope, etalon, ...diff };

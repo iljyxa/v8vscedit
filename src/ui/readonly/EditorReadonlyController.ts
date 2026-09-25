@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { isRootLockName } from '../../infra/repository/RepositoryObjectNames';
-import { resolveOwnerFullNameByRelativePath } from '../../infra/repository/RepositoryObjectScope';
+import { getRepositoryUnitAncestors, isRootLockName } from '../../infra/repository/RepositoryObjectNames';
+import { resolveLockUnitByRelativePath } from '../../infra/repository/RepositoryObjectScope';
 import type { RepositoryLocksChangedNotice, RepositoryService, RepositoryTarget } from '../../infra/repository/RepositoryService';
 import type { SupportInfoService } from '../../infra/support/SupportInfoService';
 import type { BslReadonlyGuard } from './BslReadonlyGuard';
@@ -31,7 +31,7 @@ interface OpenTab {
  * Переводит уже открытые вкладки файлов объектов в readonly/редактируемые после
  * захвата/отмены захвата без переоткрытия. Readonly в VS Code 1.85 ставится только
  * командой для активного редактора, поэтому видимые вкладки ненадолго активируются
- * (без кражи фокуса), а скрытые — ждут собственной активации.
+ * (фокус затем возвращается исходному редактору), а скрытые — ждут собственной активации.
  */
 export class EditorReadonlyController {
   private readonly pending = new Map<string, boolean>();
@@ -45,31 +45,69 @@ export class EditorReadonlyController {
   ) {}
 
   register(): vscode.Disposable {
-    const locks = this.repositoryService.onDidChangeLocks((event) => {
-      this.enqueue(() => this.handleLocksChanged(event));
-    });
-    const active = vscode.window.onDidChangeActiveTextEditor((editor) => {
-      const readonly = editor ? this.pending.get(editor.document.uri.toString()) : undefined;
-      if (editor && readonly !== undefined) {
-        this.pending.delete(editor.document.uri.toString());
-        this.enqueue(() => this.applyToActive(editor.document.uri, readonly));
-      }
-    });
-    const close = vscode.workspace.onDidCloseTextDocument((document) => {
-      this.pending.delete(document.uri.toString());
-    });
+    const locks = this.repositoryService.onDidChangeLocks((event) => { this.onLocksChanged(event); });
+    const active = vscode.window.onDidChangeActiveTextEditor((editor) => { this.onActiveEditorChanged(editor); });
+    const close = vscode.workspace.onDidCloseTextDocument((document) => { this.onDocumentClosed(document); });
     return vscode.Disposable.from({ dispose: () => locks.dispose() }, active, close);
+  }
+
+  /**
+   * Применяет отложенный переход скрытой вкладки при её активации. Идемпотентен:
+   * запись снимается при первом применении, повторный вызов ничего не делает.
+   */
+  onActiveEditorChanged(editor: vscode.TextEditor | undefined): void {
+    if (!editor) {
+      return;
+    }
+    const key = editor.document.uri.toString();
+    const readonly = this.pending.get(key);
+    if (readonly === undefined) {
+      return;
+    }
+    this.pending.delete(key);
+    // Вкладка уже активна: команда readonly действует на активный редактор, поэтому
+    // применяется сразу — ожидание очереди дало бы другому переходу сменить активный
+    // редактор. Последующие переходы очереди всё равно дождутся этого.
+    this.track(Promise.all([this.queue, this.applyToActive(editor.document.uri, readonly)]).then(() => undefined));
+  }
+
+  /** Закрытая вкладка больше не ждёт перехода. */
+  onDocumentClosed(document: vscode.TextDocument): void {
+    this.pending.delete(document.uri.toString());
   }
 
   /** Переходы выполняются последовательно: каждый временно меняет активный редактор. */
   private enqueue(task: () => Promise<void>): void {
-    this.queue = this.queue.then(task).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      this.log.appendLine(`[readonly][error] ${message}`);
-    });
+    this.track(this.queue.then(task));
   }
 
-  private async handleLocksChanged(event: RepositoryLocksChangedNotice): Promise<void> {
+  private track(operation: Promise<void>): void {
+    this.queue = operation.catch((error: unknown) => { this.logError(error); });
+  }
+
+  private logError(error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.log.appendLine(`[readonly][error] ${message}`);
+  }
+
+  /**
+   * Отложенные переходы скрытых вкладок фиксируются сразу — вкладку могут активировать
+   * или закрыть раньше, чем до события дойдёт очередь; активация видимых — в очереди.
+   */
+  private onLocksChanged(event: RepositoryLocksChangedNotice): void {
+    let planned: { tabs: OpenTab[]; applyNow: ReadonlyTransition[] };
+    try {
+      planned = this.planTransitions(event);
+    } catch (error) {
+      this.logError(error);
+      return;
+    }
+    if (planned.applyNow.length > 0) {
+      this.enqueue(() => this.applyToVisibleTabs(planned.tabs, planned.applyNow));
+    }
+  }
+
+  private planTransitions(event: RepositoryLocksChangedNotice): { tabs: OpenTab[]; applyNow: ReadonlyTransition[] } {
     const tabs = collectOpenTabs();
     const touchesRoot = event.fullNames.some(isRootLockName);
     // Цель события известна только по корню; вид цели нужен лишь для имени корня,
@@ -80,12 +118,12 @@ export class EditorReadonlyController {
       changedOwnerFullNames: [...event.fullNames, TARGET_WIDE_OWNER],
       allObjects: event.allObjects,
       configRoot: event.target.configRoot,
-      ownerOf: (filePath) => {
+      ownerChainOf: (filePath) => {
         if (touchesRoot) {
-          return TARGET_WIDE_OWNER;
+          return [TARGET_WIDE_OWNER];
         }
-        const owner = resolveOwnerFullNameByRelativePath(path.relative(event.target.configRoot, filePath), target);
-        return owner === null || isRootLockName(owner) ? TARGET_WIDE_OWNER : owner;
+        const unit = resolveLockUnitByRelativePath(path.relative(event.target.configRoot, filePath), target);
+        return unit === null || isRootLockName(unit) ? [TARGET_WIDE_OWNER] : [unit, ...getRepositoryUnitAncestors(unit)];
       },
       isRestricted: (filePath) => this.supportService.isLocked(filePath) || this.repositoryService.isEditRestricted(filePath),
     });
@@ -95,33 +133,35 @@ export class EditorReadonlyController {
         this.pending.set(tab.uri.toString(), transition.readonly);
       }
     }
-    if (plan.applyNow.length === 0) {
-      return;
-    }
+    return { tabs, applyNow: plan.applyNow };
+  }
+
+  private async applyToVisibleTabs(tabs: readonly OpenTab[], transitions: readonly ReadonlyTransition[]): Promise<void> {
     const originalEditor = vscode.window.activeTextEditor;
-    for (const transition of plan.applyNow) {
+    for (const transition of transitions) {
       const tab = findTab(tabs, transition.path);
       if (tab) {
         await this.applyToVisibleTab(tab, transition);
       }
     }
     if (originalEditor && vscode.window.activeTextEditor?.document !== originalEditor.document) {
-      await vscode.window.showTextDocument(originalEditor.document, {
-        viewColumn: originalEditor.viewColumn,
-        preserveFocus: true,
-      });
+      await vscode.window.showTextDocument(originalEditor.document, { viewColumn: originalEditor.viewColumn });
     }
   }
 
+  /**
+   * Вкладка активируется с фокусом: команда readonly действует на активный редактор, а
+   * без фокуса вкладка другой группы активной не становится. Фокус возвращается
+   * исходному редактору после всех переходов.
+   */
   private async applyToVisibleTab(tab: OpenTab, transition: ReadonlyTransition): Promise<void> {
     if (tab.diff) {
       await vscode.commands.executeCommand('vscode.diff', tab.diff.original, tab.uri, tab.diff.label, {
         viewColumn: tab.diff.viewColumn,
-        preserveFocus: true,
       });
     } else {
       const document = await vscode.workspace.openTextDocument(tab.uri);
-      await vscode.window.showTextDocument(document, { viewColumn: tab.viewColumn, preserveFocus: true });
+      await vscode.window.showTextDocument(document, { viewColumn: tab.viewColumn });
     }
     await this.applyToActive(tab.uri, transition.readonly);
   }

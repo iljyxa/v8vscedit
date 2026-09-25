@@ -7,7 +7,8 @@ import { escapeXmlAttribute as escapeXml, parseConfigXml, parseObjectXml } from 
 import { RepositoryBindingStore } from './RepositoryBindingStore';
 import { buildRepositoryScopeKey, RepositoryLockState } from './RepositoryLockState';
 import { RepositoryLockSnapshotStore } from './RepositoryLockSnapshotStore';
-import { getRootLockName, ONE_C_TYPE_NAMES } from './RepositoryObjectNames';
+import { getRootLockName, ONE_C_TYPE_NAMES, subordinateUnitFullName } from './RepositoryObjectNames';
+import { resolveUnitSuffixByRelativePath } from './RepositoryObjectScope';
 
 export interface RepositoryBinding {
   repoPath: string;
@@ -260,7 +261,9 @@ export class RepositoryService {
 
   /**
    * Возвращает `true`, если редактирование файла должно быть запрещено из-за
-   * активного подключения к хранилищу без локального захвата объекта.
+   * активного подключения к хранилищу без локального захвата объекта. Файлы
+   * подчинённых единиц (форм, макетов и т.п.) проверяются по захвату самой единицы:
+   * нерекурсивный захват владельца их не захватывает.
    */
   isEditRestricted(filePath: string): boolean {
     const ownerObjectXmlPath = this.resolveOwnerObjectXmlPath(filePath);
@@ -273,7 +276,13 @@ export class RepositoryService {
       return false;
     }
 
-    return this.isMetadataEditRestricted(target, ownerObjectXmlPath);
+    const suffix = resolveUnitSuffixByRelativePath(path.relative(target.configRoot, filePath));
+    const ownerFullName = suffix.length > 0 ? this.resolveRootObjectFullName(ownerObjectXmlPath) : null;
+    if (!ownerFullName) {
+      return this.isMetadataEditRestricted(target, ownerObjectXmlPath);
+    }
+    const unit = suffix.reduce((parent, segment) => subordinateUnitFullName(parent, segment.tag, segment.name), ownerFullName);
+    return !this.isLocked(target, unit);
   }
 
   /**

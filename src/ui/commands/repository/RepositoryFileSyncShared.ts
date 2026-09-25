@@ -18,12 +18,13 @@ import {
   planRepositoryMerge,
   type MergePlan,
 } from '../../../infra/repository/RepositoryMergePlanner';
-import { buildRootDumpListName, isRootLockName, parseRepositoryFullName } from '../../../infra/repository/RepositoryObjectNames';
+import type { RepositoryLockMode } from '../../../infra/repository/RepositoryLockState';
+import { buildRootDumpListName, isRootLockName } from '../../../infra/repository/RepositoryObjectNames';
 import {
-  includeNestedSubsystems,
   resolveObjectScope,
   toPosixRel,
   type ObjectScope,
+  type ScopeDepth,
 } from '../../../infra/repository/RepositoryObjectScope';
 import type { RepositoryNodeRef, RepositoryTarget } from '../../../infra/repository/RepositoryService';
 import type { CommandServices } from '../_shared';
@@ -208,8 +209,8 @@ export function reportFlowError(
 
 /**
  * Что именно захватывается/освобождается узлом: якорь (fullName узла или сентинел
- * корня), раскрытый состав и план выгрузки. Файл `Objects.xml` пишется здесь, поэтому
- * вызывается уже внутри аренды.
+ * корня), состав по проекту, режим захвата и план выгрузки. Файл `Objects.xml` пишется
+ * здесь, поэтому вызывается уже внутри аренды.
  */
 export interface RepositorySubject {
   target: RepositoryTarget;
@@ -217,7 +218,8 @@ export interface RepositorySubject {
   anchor: string;
   members: string[];
   isRoot: boolean;
-  subsystemRecursive: boolean;
+  /** Режим захвата единиц `members`: рекурсивный захватывает и подчинённые на сервере. */
+  mode: RepositoryLockMode;
   plan: RepositoryDumpPlan;
 }
 
@@ -240,16 +242,15 @@ export function prepareRepositorySubject(
   services: RepositoryFileSyncServices
 ): RepositorySubject {
   const objects = services.repositoryService.createObjectsFileForNode(node, recursive);
-  const plan = buildRepositoryDumpPlan(node, objects, recursive);
+  const plan = buildRepositoryDumpPlan(node, objects, recursive, target.configRoot);
   const anchor = objects.fullNames[0];
-  const isRoot = isRootLockName(anchor);
   return {
     target,
     objectsFile: objects.filePath,
     anchor,
     members: plan.kind === 'objects' ? [...new Set([anchor, ...plan.fullNames])] : [anchor],
-    isRoot,
-    subsystemRecursive: recursive && node.nodeKind === 'Subsystem',
+    isRoot: isRootLockName(anchor),
+    mode: recursive ? 'recursive' : 'object',
     plan,
   };
 }
@@ -260,26 +261,17 @@ export function toDumpListName(fullName: string, target: RepositoryTarget): stri
 }
 
 /**
- * Вложенная подсистема рекурсивного захвата не получает собственной области: её файлы
- * лежат в каталоге якоря и входят в его область (см. includeNestedSubsystems).
- */
-export function isNestedSubsystemMember(subject: RepositorySubject, fullName: string): boolean {
-  return subject.subsystemRecursive && fullName !== subject.anchor && parseRepositoryFullName(fullName)?.kind === 'Subsystem';
-}
-
-/**
- * Область объекта для слияния: сначала по проекту, иначе по выгрузке (объект новый
- * в хранилище и в проекте его ещё нет).
+ * Область единицы для слияния: сначала по проекту, иначе по выгрузке (единица новая
+ * в хранилище и в проекте её ещё нет).
  */
 export function resolveMergeScope(
   target: RepositoryTarget,
   fullName: string,
   dumpDir: string | undefined,
-  withNestedSubsystems: boolean
+  depth: ScopeDepth
 ): ObjectScope | null {
-  const scope = resolveObjectScope(target.configRoot, fullName, target)
-    ?? (dumpDir ? resolveObjectScope(dumpDir, fullName, target) : null);
-  return scope && withNestedSubsystems ? includeNestedSubsystems(scope) : scope;
+  return resolveObjectScope(target.configRoot, fullName, target, depth)
+    ?? (dumpDir ? resolveObjectScope(dumpDir, fullName, target, depth) : null);
 }
 
 export function isObjectMissingInProject(target: RepositoryTarget, fullName: string): boolean {
@@ -498,11 +490,6 @@ function syncChildObjectsAfterMerge(
     );
   }
   return result.changedFiles;
-}
-
-/** Файлы, пропущенные из-за неполной выгрузки области: берутся в снимок из проекта. */
-export function skippedRelsOfScope(plan: MergePlan, scope: ObjectScope): string[] {
-  return plan.skipped.filter((entry) => entry.scope === scope).map((entry) => entry.rel);
 }
 
 export function buildOperationBackupDir(

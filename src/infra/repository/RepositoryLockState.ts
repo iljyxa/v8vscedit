@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { getRootLockName, isRootLockName } from './RepositoryObjectNames';
+import { getRepositoryUnitAncestors, getRootLockName, isRootLockName } from './RepositoryObjectNames';
 import type { RepositoryTarget } from './RepositoryService';
 
 /**
@@ -9,7 +9,9 @@ import type { RepositoryTarget } from './RepositoryService';
  * необязательны, поэтому файлы, записанные прежними версиями, читаются без потерь.
  *  - `rootRecursive` — рекурсивный захват корня: захваченным считается любой объект,
  *    кроме точечно освобождённых (`releasedUnderRoot`);
- *  - `lockGroups` — якорь рекурсивно захваченной подсистемы → её состав на момент захвата.
+ *  - `lockGroups` — якорь рекурсивного захвата → его состав на момент захвата;
+ *  - `lockModes` — режим последнего захвата единицы. Запись без режима (сделанная до
+ *    появления единиц-подчинённых) по-прежнему покрывает подчинённых своего владельца.
  */
 interface RepositoryScopeState {
   connected?: boolean;
@@ -17,7 +19,10 @@ interface RepositoryScopeState {
   rootRecursive?: boolean;
   lockGroups?: Record<string, string[]>;
   releasedUnderRoot?: string[];
+  lockModes?: Record<string, RepositoryLockMode>;
 }
+
+export type RepositoryLockMode = 'recursive' | 'object';
 
 interface RepositoryStateFile {
   version: 2;
@@ -42,6 +47,8 @@ export interface RepositoryLockRequest {
   anchor: string;
   members: readonly string[];
   recursiveRoot?: boolean;
+  /** Режим захвата для всех `members`; без него запись ведёт себя как старая. */
+  mode?: RepositoryLockMode;
 }
 
 export interface RepositoryUnlockRequest {
@@ -94,17 +101,17 @@ export class RepositoryLockState {
     if (!scope) {
       return false;
     }
-    if (scope.lockedFullNames.includes(fullName)) {
-      return true;
-    }
-    if (Object.values(scope.lockGroups ?? {}).some((members) => members.includes(fullName))) {
+    if (isLockedDirectly(scope, fullName)) {
       return true;
     }
     // Корень считается захваченным только явно: рекурсивный признак раскрывает
     // захват на объекты, но не заменяет собой запись корня.
-    return scope.rootRecursive === true
-      && !isRootLockName(fullName)
-      && !(scope.releasedUnderRoot ?? []).includes(fullName);
+    if (scope.rootRecursive === true && !isRootLockName(fullName) && !(scope.releasedUnderRoot ?? []).includes(fullName)) {
+      return true;
+    }
+    // Старая запись владельца без режима: подчинённые раньше захватывались вместе с ним.
+    return getRepositoryUnitAncestors(fullName)
+      .some((ancestor) => isLockedDirectly(scope, ancestor) && scope.lockModes?.[ancestor] === undefined);
   }
 
   isRootLocked(target: RepositoryTarget): boolean {
@@ -131,12 +138,18 @@ export class RepositoryLockState {
       const released = request.recursiveRoot
         ? []
         : (scope.releasedUnderRoot ?? []).filter((fullName) => !members.includes(fullName));
+      const lockModes = withoutKeys(scope.lockModes, members);
+      if (request.mode) {
+        const mode = request.mode;
+        members.forEach((fullName) => { lockModes[fullName] = mode; });
+      }
       return {
         ...scope,
         lockedFullNames: sortNames([...locked]),
         rootRecursive: request.recursiveRoot ? true : scope.rootRecursive,
         lockGroups,
         releasedUnderRoot: released,
+        lockModes,
       };
     });
     this.emit(target, members);
@@ -144,8 +157,10 @@ export class RepositoryLockState {
 
   /**
    * Снимает захват и возвращает fullName, чьё состояние изменилось. Рекурсивная
-   * подсистема снимается по объединению состава на момент захвата и текущего
-   * состава из XML — объекты могли быть включены в подсистему или исключены из неё.
+   * отмена снимает группу якоря целиком (по составу на момент захвата и текущему
+   * составу из XML — объекты могли быть включены или исключены). Нерекурсивная
+   * отмена якоря группы убирает из неё только освобождённые единицы: подчинённые
+   * на сервере остаются захваченными.
    */
   applyUnlock(target: RepositoryTarget, request: RepositoryUnlockRequest): string[] {
     let removed: string[] = [];
@@ -158,9 +173,13 @@ export class RepositoryLockState {
       if (request.recursive) {
         (scope.lockGroups?.[request.anchor] ?? []).forEach((fullName) => affected.add(fullName));
       }
-      const lockGroups = Object.fromEntries(
-        Object.entries(scope.lockGroups ?? {}).filter(([anchor]) => anchor !== request.anchor)
-      );
+      const lockGroups: Record<string, string[]> = {};
+      for (const [anchor, members] of Object.entries(scope.lockGroups ?? {})) {
+        const rest = anchor !== request.anchor ? members : members.filter((fullName) => !request.recursive && !affected.has(fullName));
+        if (rest.length > 0) {
+          lockGroups[anchor] = rest;
+        }
+      }
       const released = new Set(scope.releasedUnderRoot ?? []);
       if (scope.rootRecursive && !request.isRoot) {
         affected.forEach((fullName) => released.add(fullName));
@@ -171,6 +190,7 @@ export class RepositoryLockState {
         lockedFullNames: scope.lockedFullNames.filter((fullName) => !affected.has(fullName)),
         lockGroups,
         releasedUnderRoot: sortNames([...released]),
+        lockModes: withoutKeys(scope.lockModes, [...affected]),
       };
     });
     this.emit(target, removed);
@@ -292,7 +312,26 @@ function sanitizeScope(raw: Record<string, unknown>): RepositoryScopeState {
   if (released) {
     scope.releasedUnderRoot = released;
   }
+  if (isRecord(raw.lockModes)) {
+    scope.lockModes = Object.fromEntries(
+      Object.entries(raw.lockModes).filter((entry): entry is [string, RepositoryLockMode] => isLockMode(entry[1]))
+    );
+  }
   return scope;
+}
+
+function isLockMode(value: unknown): value is RepositoryLockMode {
+  return value === 'recursive' || value === 'object';
+}
+
+/** Явный захват или участие в группе рекурсивного захвата. */
+function isLockedDirectly(scope: RepositoryScopeState, fullName: string): boolean {
+  return scope.lockedFullNames.includes(fullName)
+    || Object.values(scope.lockGroups ?? {}).some((members) => members.includes(fullName));
+}
+
+function withoutKeys(record: Readonly<Record<string, RepositoryLockMode>> | undefined, keys: readonly string[]): Record<string, RepositoryLockMode> {
+  return Object.fromEntries(Object.entries(record ?? {}).filter(([key]) => !keys.includes(key)));
 }
 
 /** Пустые необязательные поля не пишутся — state.json остаётся совместимым по виду со старым. */
@@ -309,6 +348,9 @@ function compactScope(scope: RepositoryScopeState): RepositoryScopeState {
   }
   if (scope.releasedUnderRoot && scope.releasedUnderRoot.length > 0) {
     result.releasedUnderRoot = scope.releasedUnderRoot;
+  }
+  if (scope.lockModes && Object.keys(scope.lockModes).length > 0) {
+    result.lockModes = scope.lockModes;
   }
   return result;
 }

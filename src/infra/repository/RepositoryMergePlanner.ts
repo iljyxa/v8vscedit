@@ -1,7 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { computeFileHash } from '../cache/HashCache';
-import { parseObjectXml } from '../xml';
 import {
   collectScopeFiles,
   detectScopeLayout,
@@ -26,7 +25,7 @@ export interface MergeFileState {
   dumpRel?: string;
   /** Область файла — чтобы применение убирало опустевшие каталоги только внутри неё. */
   scope?: ObjectScope;
-  /** Частичная выгрузка не содержит файлов дочернего элемента — локальные не трогать. */
+  /** Выгрузка области неполна (нет главного файла) — локальные файлы не трогать. */
   incomplete?: boolean;
   /** Несохранённый редактор: молча перезаписывать/удалять файл нельзя. */
   forceConflict?: boolean;
@@ -66,17 +65,6 @@ export interface CollectMergeFileStatesOptions {
    */
   requirePrimaryFile?: boolean;
 }
-
-/**
- * Подкаталоги дочерних элементов объекта в выгрузке. Это раскладка формата
- * выгрузки (тег ChildObjects → подпапка), а не реестр типов метаданных.
- */
-const CHILD_ELEMENT_DIRS: Readonly<Record<string, string>> = {
-  Form: 'Forms',
-  Template: 'Templates',
-  Command: 'Commands',
-  Subsystem: 'Subsystems',
-};
 
 const CONFIGURATION_XML_FILE = 'Configuration.xml';
 
@@ -141,7 +129,6 @@ export function collectMergeFileStates(options: CollectMergeFileStatesOptions): 
   for (const scope of options.scopes) {
     const projectLayout = detectScopeLayout(options.configRoot, scope);
     const dumpFiles = collectScopeFiles(options.dumpDir, scope);
-    const incompleteDirs = collectIncompleteChildDirs(options.dumpDir, scope, dumpFiles);
     const dumpByProjectRel = new Map<string, string>();
     for (const dumpRel of dumpFiles) {
       dumpByProjectRel.set(toPosixRel(mapDumpPathToProject(dumpRel, scope, projectLayout)), dumpRel);
@@ -163,7 +150,7 @@ export function collectMergeFileStates(options: CollectMergeFileStatesOptions): 
       if (dumpRel && dumpRel !== rel) {
         state.dumpRel = dumpRel;
       }
-      if (!dumpRel && (scopeIncomplete || incompleteDirs.some((dir) => rel === `${dir}.xml` || rel.startsWith(`${dir}/`)))) {
+      if (!dumpRel && scopeIncomplete) {
         state.incomplete = true;
       }
       if (dirty.has(rel)) {
@@ -198,39 +185,6 @@ function hasPrimaryDumpFile(scope: ObjectScope, dumpFiles: readonly string[]): b
     return dumpFiles.some((rel) => isObjectXmlRel(rel, scope));
   }
   return dumpFiles.includes(CONFIGURATION_XML_FILE);
-}
-
-/**
- * Защита от неполной частичной выгрузки: если дочерний элемент (форма, макет,
- * команда) есть в ChildObjects версии хранилища, но его файлов в выгрузке нет,
- * отсутствие файлов не означает удаления — локальные файлы элемента не трогаются.
- */
-function collectIncompleteChildDirs(dumpDir: string, scope: ObjectScope, dumpFiles: readonly string[]): string[] {
-  if (scope.kind !== 'object') {
-    return [];
-  }
-  const xmlRel = dumpFiles.find((rel) => rel.endsWith('.xml') && isObjectXmlRel(rel, scope));
-  if (!xmlRel) {
-    return [];
-  }
-  let children: { tag: string; name: string }[];
-  try {
-    children = parseObjectXml(path.join(dumpDir, xmlRel))?.children ?? [];
-  } catch {
-    return [];
-  }
-  const result: string[] = [];
-  for (const child of children) {
-    const subDir = CHILD_ELEMENT_DIRS[child.tag] as string | undefined;
-    if (!subDir) {
-      continue;
-    }
-    const childDir = `${scope.dirRel}/${subDir}/${child.name}`;
-    if (!dumpFiles.some((rel) => rel === `${childDir}.xml` || rel.startsWith(`${childDir}/`))) {
-      result.push(childDir);
-    }
-  }
-  return result;
 }
 
 function isObjectXmlRel(rel: string, scope: Extract<ObjectScope, { kind: 'object' }>): boolean {

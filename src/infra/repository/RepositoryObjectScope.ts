@@ -1,14 +1,32 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { META_TYPES } from '../../domain/MetaTypes';
-import { getRootLockName, isRootLockName, ONE_C_TYPE_NAMES, parseRepositoryFullName } from './RepositoryObjectNames';
+import {
+  formatRepositoryUnit,
+  getRootLockName,
+  isRootLockName,
+  ONE_C_TYPE_NAMES,
+  parseRepositoryUnit,
+  REPOSITORY_SUBORDINATE_LAYOUT,
+  type RepositorySubordinateTag,
+  type RepositoryUnitPath,
+} from './RepositoryObjectNames';
 import type { RepositoryTarget } from './RepositoryService';
 
 /**
- * Область файлов, которую затрагивает захват/получение одного объекта хранилища.
+ * Глубина области единицы хранилища:
+ *  - `unit` — только сама единица: каталоги подчинённых единиц (формы, макеты,
+ *    перерасчёты, таблицы, кубы, вложенные подсистемы) исключены, у них свои захват,
+ *    выгрузка и снимок;
+ *  - `tree` — весь каталог единицы (удалённые из хранилища единицы, старые глубокие снимки).
+ */
+export type ScopeDepth = 'unit' | 'tree';
+
+/**
+ * Область файлов, которую затрагивает захват/получение одной единицы хранилища.
  * Одна и та же область применяется и к проекту, и к временной выгрузке, чтобы
  * «лишние» файлы (сироты) определялись одинаково с обеих сторон.
- *  - `object` — XML объекта + всё содержимое его каталога (кроме `excludeDirRels`);
+ *  - `object` — XML единицы + содержимое её каталога (кроме `excludeDirRels`);
  *  - `root` — Configuration.xml + корневой Ext/** (модули приложения/сеанса и т.п.);
  *  - `all` — вся выгрузка (fallback полной выгрузки корня).
  * Все относительные пути — POSIX.
@@ -20,6 +38,7 @@ export type ObjectScope =
     xmlRel: string;
     dirRel: string;
     excludeDirRels: readonly string[];
+    depth: ScopeDepth;
   }
   | { kind: 'root'; fullName: string }
   | { kind: 'all' };
@@ -35,46 +54,64 @@ export function toPosixRel(rel: string): string {
   return rel.split(path.sep).join('/').replace(/\\/g, '/');
 }
 
-/**
- * Область объекта по fullName. Папка берётся из META_TYPES; поддерживаются обе
- * раскладки XML (плоская `F/N.xml` и глубокая `F/N/N.xml`). `null` — тип не
- * распознан или XML объекта в `configRoot` нет.
- */
-export function resolveObjectScope(configRoot: string, fullName: string, target: RepositoryTarget): ObjectScope | null {
-  if (isRootLockName(fullName)) {
-    return { kind: 'root', fullName: getRootLockName(target) };
-  }
-  const parsed = parseRepositoryFullName(fullName);
-  const folder = parsed ? META_TYPES[parsed.kind].folder : undefined;
-  if (!parsed || !folder) {
+/** Каталоги подчинённых единиц под каталогом единицы — исключения области `unit`. */
+const SUBORDINATE_FOLDERS: readonly string[] = Object.values(REPOSITORY_SUBORDINATE_LAYOUT).map((layout) => layout.folder);
+
+const SUBORDINATE_TAG_BY_FOLDER: ReadonlyMap<string, RepositorySubordinateTag> = new Map(
+  (Object.entries(REPOSITORY_SUBORDINATE_LAYOUT) as [RepositorySubordinateTag, { folder: string }][]).map(
+    ([tag, layout]): [string, RepositorySubordinateTag] => [layout.folder, tag]
+  )
+);
+
+/** Каталог единицы `Folder/Name(/SubFolder/Name)*`; папка владельца — из META_TYPES. */
+function resolveUnitDirRel(unit: RepositoryUnitPath): string | null {
+  const folder = META_TYPES[unit.kind].folder;
+  if (!folder) {
     return null;
   }
-  const dirRel = `${folder}/${parsed.name}`;
-  const deepXml = `${dirRel}/${parsed.name}.xml`;
-  const flatXml = `${folder}/${parsed.name}.xml`;
-  let xmlRel: string;
-  if (fs.existsSync(path.join(configRoot, deepXml))) {
-    xmlRel = deepXml;
-  } else if (fs.existsSync(path.join(configRoot, flatXml))) {
-    xmlRel = flatXml;
-  } else {
-    return null;
+  return [`${folder}/${unit.name}`, ...unit.segments.map((segment) => `${REPOSITORY_SUBORDINATE_LAYOUT[segment.tag].folder}/${segment.name}`)]
+    .join('/');
+}
+
+/** XML единицы в `baseDir`: глубокая раскладка `…/N/N.xml`, затем плоская `…/N.xml`. */
+function findUnitXmlRel(baseDir: string, dirRel: string): string | null {
+  const name = path.posix.basename(dirRel);
+  const deepXml = `${dirRel}/${name}.xml`;
+  if (fs.existsSync(path.join(baseDir, deepXml))) {
+    return deepXml;
   }
-  // Вложенные подсистемы — самостоятельные объекты хранилища со своим захватом,
-  // поэтому их файлы не относятся к области родительской подсистемы.
-  const excludeDirRels = parsed.kind === 'Subsystem' ? [`${dirRel}/Subsystems`] : [];
-  return { kind: 'object', fullName, xmlRel, dirRel, excludeDirRels };
+  const flatXml = `${path.posix.dirname(dirRel)}/${name}.xml`;
+  return fs.existsSync(path.join(baseDir, flatXml)) ? flatXml : null;
+}
+
+/** Путь основного XML единицы относительно `baseDir`; `null` — имя не распознано или файла нет. */
+export function resolveUnitXmlRel(baseDir: string, fullName: string): string | null {
+  const unit = parseRepositoryUnit(fullName);
+  const dirRel = unit ? resolveUnitDirRel(unit) : null;
+  return dirRel ? findUnitXmlRel(baseDir, dirRel) : null;
 }
 
 /**
- * Область подсистемы вместе с вложенными подсистемами. Исключение `Subsystems/**`
- * осмысленно только для подсистемы как отдельного объекта захвата; при рекурсивном
- * захвате и при получении владельца `Subsystem.A` по ConfigDumpInfo (туда же
- * сгруппированы записи `Subsystem.A.Subsystem.B`) вложенные подсистемы приходят в
- * составе выгрузки родителя и без этого не применились бы.
+ * Область единицы по fullName (владелец верхнего уровня или подчинённый объект).
+ * `null` — имя не распознано или XML единицы в `configRoot` нет.
  */
-export function includeNestedSubsystems(scope: ObjectScope): ObjectScope {
-  return scope.kind === 'object' && scope.excludeDirRels.length > 0 ? { ...scope, excludeDirRels: [] } : scope;
+export function resolveObjectScope(
+  configRoot: string,
+  fullName: string,
+  target: RepositoryTarget,
+  depth: ScopeDepth = 'tree'
+): ObjectScope | null {
+  if (isRootLockName(fullName)) {
+    return { kind: 'root', fullName: getRootLockName(target) };
+  }
+  const unit = parseRepositoryUnit(fullName);
+  const dirRel = unit ? resolveUnitDirRel(unit) : null;
+  const xmlRel = dirRel ? findUnitXmlRel(configRoot, dirRel) : null;
+  if (!dirRel || !xmlRel) {
+    return null;
+  }
+  const excludeDirRels = depth === 'unit' ? SUBORDINATE_FOLDERS.map((folder) => `${dirRel}/${folder}`) : [];
+  return { kind: 'object', fullName, xmlRel, dirRel, excludeDirRels, depth };
 }
 
 function objectXmlForms(scope: Extract<ObjectScope, { kind: 'object' }>): { flat: string; deep: string } {
@@ -123,7 +160,7 @@ export function collectScopeFiles(baseDir: string, scope: ObjectScope): string[]
     walkFiles(baseDir, ROOT_EXT_DIR, result);
   } else {
     pushIfFile(objectXmlForms(scope).flat);
-    walkFiles(baseDir, scope.dirRel, result);
+    walkFiles(baseDir, scope.dirRel, result, new Set(scope.excludeDirRels));
   }
   return result
     .filter((rel) => rel !== CONFIG_DUMP_INFO_FILE && isPathInScope(rel, scope))
@@ -193,6 +230,41 @@ export function resolveOwnerFullNameByRelativePath(rel: string, target: Reposito
 }
 
 /**
+ * Подчинённые сегменты единицы по пути файла внутри каталога владельца: пары
+ * «каталог подчинённых/имя» (`Forms/Y`, `Cubes/C/DimensionTables/D`). Только строковые
+ * операции — вызывается на горячем пути проверки readonly. Файлы внутри каталогов
+ * не-единиц (`Commands/**`, `Ext/**`) относятся к ближайшей единице.
+ */
+export function resolveUnitSuffixByRelativePath(rel: string): RepositoryUnitPath['segments'] {
+  const segments = toPosixRel(rel).split('/');
+  const result: RepositoryUnitPath['segments'] = [];
+  for (let index = 2; index + 1 < segments.length; index += 2) {
+    const tag = SUBORDINATE_TAG_BY_FOLDER.get(segments[index]);
+    if (!tag) {
+      break;
+    }
+    const isLast = index + 2 === segments.length;
+    result.push({ tag, name: isLast ? stripXmlExtension(segments[index + 1]) : segments[index + 1] });
+  }
+  return result;
+}
+
+/** Самая конкретная единица хранилища по пути файла (владелец + подчинённые сегменты). */
+export function resolveLockUnitByRelativePath(rel: string, target: RepositoryTarget): string | null {
+  const owner = resolveOwnerFullNameByRelativePath(rel, target);
+  const unit = owner ? parseRepositoryUnit(owner) : null;
+  if (!unit) {
+    return owner;
+  }
+  unit.segments.push(...resolveUnitSuffixByRelativePath(rel));
+  return formatRepositoryUnit(unit);
+}
+
+function stripXmlExtension(segment: string): string {
+  return segment.toLowerCase().endsWith('.xml') ? segment.slice(0, -'.xml'.length) : segment;
+}
+
+/**
  * Удаляет опустевшие каталоги от файла вверх, пока каталог остаётся внутри области —
  * папка типа (`Catalogs`) и корень конфигурации не трогаются.
  */
@@ -220,7 +292,8 @@ function isExistingFile(filePath: string): boolean {
   }
 }
 
-function walkFiles(baseDir: string, relDir: string, out: string[]): void {
+/** Исключённые каталоги не обходятся: файлы подчинённых единиц не нужны области владельца. */
+function walkFiles(baseDir: string, relDir: string, out: string[], excluded: ReadonlySet<string> = new Set()): void {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(path.join(baseDir, relDir), { withFileTypes: true });
@@ -230,7 +303,9 @@ function walkFiles(baseDir: string, relDir: string, out: string[]): void {
   for (const entry of entries) {
     const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
     if (entry.isDirectory()) {
-      walkFiles(baseDir, rel, out);
+      if (!excluded.has(rel)) {
+        walkFiles(baseDir, rel, out, excluded);
+      }
     } else if (entry.isFile()) {
       out.push(rel);
     }

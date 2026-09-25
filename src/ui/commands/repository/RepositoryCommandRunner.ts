@@ -198,12 +198,14 @@ async function runRepositoryDesigner(
 /**
  * Обёртка с UI-реакцией для команд вне guard'а (подключение, создание, отключение,
  * пользователи, выгрузка версии, отчёт, метка): ошибку здесь можно показать модально.
+ * `execute` внедряется, чтобы реакции на исходы проверялись без процесса 1С.
  */
 export async function runRepositoryCliCommand(
   options: RepositoryCliRunOptions,
-  services: RepositoryCliServices
+  services: RepositoryCliServices,
+  execute: (request: RepositoryCliRequest, services: RepositoryCliServices) => Promise<RepositoryCliResult> = executeRepositoryCli
 ): Promise<boolean> {
-  const result = await executeRepositoryCli({
+  const result = await execute({
     command: options.command,
     target: options.target,
     extraArgs: options.extraArgs ?? [],

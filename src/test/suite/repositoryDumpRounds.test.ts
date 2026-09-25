@@ -340,16 +340,14 @@ suite('RepositoryDumpRounds — runDumpRounds: раунд 0 успешен (issu
         KNOWN_FIXTURE_UNITS.kontragentyFormaSpiska,
         KNOWN_FIXTURE_UNITS.kontragentyMaket,
       ].sort());
-      if (result.status === 'ok') {
-        assert.deepStrictEqual([...result.found.map((f: FoundUnit) => f.fullName)].sort(), [
-          KNOWN_FIXTURE_UNITS.kontragenty,
-          KNOWN_FIXTURE_UNITS.kontragentyFormaElementa,
-          KNOWN_FIXTURE_UNITS.kontragentyFormaSpiska,
-          KNOWN_FIXTURE_UNITS.kontragentyMaket,
-        ].sort());
-        assert.deepStrictEqual(result.missing, []);
-        result.dispose();
-      }
+      assert.deepStrictEqual([...result.found.map((f: FoundUnit) => f.fullName)].sort(), [
+        KNOWN_FIXTURE_UNITS.kontragenty,
+        KNOWN_FIXTURE_UNITS.kontragentyFormaElementa,
+        KNOWN_FIXTURE_UNITS.kontragentyFormaSpiska,
+        KNOWN_FIXTURE_UNITS.kontragentyMaket,
+      ].sort());
+      assert.deepStrictEqual(result.missing, []);
+      result.dispose();
     } finally {
       fixture.disposeAll();
       lease?.release();
@@ -386,16 +384,14 @@ suite('RepositoryDumpRounds — runDumpRounds: раунд 0 успешен (issu
       });
       assert.strictEqual(result.status, 'ok');
       assert.strictEqual(fixture.calls.length, 2, 'Куб — новая, ранее не выгруженная единица; его собственные подчинённые раскрываются вторым раундом.');
-      if (result.status === 'ok') {
-        assert.deepStrictEqual([...result.found.map((f: FoundUnit) => f.fullName)].sort(), [
-          KNOWN_FIXTURE_UNITS.internetMagazin,
-          KNOWN_FIXTURE_UNITS.internetMagazinZakazy,
-          KNOWN_FIXTURE_UNITS.internetMagazinProdazhi,
-          KNOWN_FIXTURE_UNITS.internetMagazinTovary,
-          KNOWN_FIXTURE_UNITS.internetMagazinRegiony,
-        ].sort());
-        result.dispose();
-      }
+      assert.deepStrictEqual([...result.found.map((f: FoundUnit) => f.fullName)].sort(), [
+        KNOWN_FIXTURE_UNITS.internetMagazin,
+        KNOWN_FIXTURE_UNITS.internetMagazinZakazy,
+        KNOWN_FIXTURE_UNITS.internetMagazinProdazhi,
+        KNOWN_FIXTURE_UNITS.internetMagazinTovary,
+        KNOWN_FIXTURE_UNITS.internetMagazinRegiony,
+      ].sort());
+      result.dispose();
     } finally {
       fixture.disposeAll();
       lease?.release();
@@ -432,10 +428,8 @@ suite('RepositoryDumpRounds — runDumpRounds: раунд 0 упал (issue #1, 
       assert.strictEqual(result.status, 'ok', 'Повтор только якорем должен пройти успешно.');
       assert.strictEqual(fixture.calls.length, 2, 'Раунд 0 (с призрачной формой, провал) + повтор только якорем.');
       assert.deepStrictEqual(fixture.calls[1].names, [KNOWN_FIXTURE_UNITS.kontragenty]);
-      if (result.status === 'ok') {
-        assert.deepStrictEqual(result.found.map((f: FoundUnit) => f.fullName), [KNOWN_FIXTURE_UNITS.kontragenty]);
-        result.dispose();
-      }
+      assert.deepStrictEqual(result.found.map((f: FoundUnit) => f.fullName), [KNOWN_FIXTURE_UNITS.kontragenty]);
+      result.dispose();
     } finally {
       fixture.disposeAll();
       lease?.release();
@@ -502,10 +496,8 @@ suite('RepositoryDumpRounds — runDumpRounds: MAX_DUMP_ROUNDS и missing (issue
       });
       assert.strictEqual(result.status, 'ok');
       assert.ok(fixture.calls.length <= MAX_DUMP_ROUNDS, `Число вызовов (${String(fixture.calls.length)}) не должно превышать MAX_DUMP_ROUNDS.`);
-      if (result.status === 'ok') {
-        assert.ok(result.missing.length > 0, 'Недовыгруженные единицы должны попасть в missing.');
-        result.dispose();
-      }
+      assert.ok(result.missing.length > 0, 'Недовыгруженные единицы должны попасть в missing.');
+      result.dispose();
     } finally {
       fixture.disposeAll();
       lease?.release();
@@ -533,9 +525,7 @@ suite('RepositoryDumpRounds — runDumpRounds: towards/none (issue #1, разд�
       assert.strictEqual(result.status, 'ok');
       assert.strictEqual(fixture.calls.length, 1);
       assert.deepStrictEqual(fixture.calls[0].names, [KNOWN_FIXTURE_UNITS.kontragentyFormaElementa]);
-      if (result.status === 'ok') {
-        result.dispose();
-      }
+      result.dispose();
     } finally {
       fixture.disposeAll();
       lease?.release();

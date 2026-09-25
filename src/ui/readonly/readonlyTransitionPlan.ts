@@ -12,7 +12,8 @@ export interface ReadonlyTransitionInput {
   /** Все объекты с известным состоянием захвата после события. */
   allObjects: readonly string[];
   configRoot: string;
-  ownerOf: (filePath: string) => string | null;
+  /** Единица хранилища файла и её предки до владельца верхнего уровня; `[]` — не распознан. */
+  ownerChainOf: (filePath: string) => readonly string[];
   /** Желаемое состояние: `true` — редактирование запрещено поддержкой или хранилищем. */
   isRestricted: (filePath: string) => boolean;
 }
@@ -37,8 +38,10 @@ function isInsideRoot(filePath: string, configRoot: string): boolean {
 }
 
 /**
- * Файл затронут, если его владелец есть в `changedOwnerFullNames` или `allObjects`:
- * остальные вкладки не трогаются, чтобы не перебивать чужое состояние readonly.
+ * Файл затронут, если хотя бы одно звено его цепочки владения есть в
+ * `changedOwnerFullNames` или `allObjects`: событие владельца касается и его
+ * подчинённых единиц, событие единицы — только её файлов. Остальные вкладки не
+ * трогаются, чтобы не перебивать чужое состояние readonly.
  * Один файл в нескольких вкладках планируется один раз; видимая вкладка важнее.
  */
 export function planReadonlyTransitions(input: ReadonlyTransitionInput): ReadonlyTransitionPlan {
@@ -48,8 +51,7 @@ export function planReadonlyTransitions(input: ReadonlyTransitionInput): Readonl
     if (!isInsideRoot(file.path, input.configRoot)) {
       continue;
     }
-    const owner = input.ownerOf(file.path);
-    if (owner === null || !affectedOwners.has(owner)) {
+    if (!input.ownerChainOf(file.path).some((owner) => affectedOwners.has(owner))) {
       continue;
     }
     const key = normalizeKey(file.path);
