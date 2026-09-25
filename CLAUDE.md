@@ -169,7 +169,10 @@ src/
 │   │                                  # docs/git-history-graph.md; граф — сворачиваемый блок панели
 │   │                                  # «Изменения метаданных», отдельного webview/вкладки нет)
 │   ├── environment/                  # bsl-analyzer.toml, окружение проекта, реестр баз
-│   ├── process/                      # поиск платформы, spawn, декодер OEM/Win1251
+│   ├── process/                      # поиск платформы, spawn, декодер OEM/Win1251,
+│   │                                  # ConfigurationOperationGuard — единая блокировка
+│   │                                  # полного импорта/обновления/применения конфигурации
+│   │                                  # к базе в пределах одного окна (см. docs/architecture.md)
 │   ├── mcp/                          # McpServerIdentity/McpStartDecision/McpPortProbe/
 │   │                                  # McpConflictPrompt/McpHost — чистая логика жизненного цикла
 │   │                                  # встроенного MCP-сервера (bind/reuse/conflict, закрытие порта),
@@ -331,6 +334,20 @@ Vue-приложения (сборка `vite.webview.config.ts`, проверк�
   переключения на ручной ввод значения пользователем. Подробности и обоснование —
   [architecture.md](./docs/architecture.md#паттерн-чтение-данных-из-базы-через-пакетный-конфигуратор-file-handoff).
 - **Открытие BSL-модулей:** только реальные `file://` документы (виртуальная схема `onec://` удалена). Readonly — через `ui/readonly/BslReadonlyGuard.ts`.
+- **Новая операция, запускающая Конфигуратор для полного импорта/обновления/применения конфигурации к
+  базе** (аналог `importConfigurations`/`updateChangedConfigurations`/`runPostRepositorySync`): захват —
+  через `services.configurationOperationGuard` (`runExclusive(title, op)` для одной атомарной цепочки
+  либо `tryAcquire(title)` + `release()` в `finally`, если между проверкой и запуском есть модальный
+  диалог) → сообщение о занятости — только `notifyConfigurationOperationBusy`
+  (`ui/commands/ext/configurationOperationBusy.ts`), **без `await`** (см. запрет №18) → фоновый (`void`)
+  путь без ожидающего пользователя логирует исход в `outputChannel` и уведомляет тем же способом, а не
+  падает молча → контекст enablement `v8vscedit.isUpdatingConfigurations` вручную нигде не выставлять —
+  его синхронизирует только `Container.wireConfigurationOperationContext()` подпиской на
+  `guard.onDidChangeBusy` → модальные диалоги подтверждения по возможности держать ВНЕ аренды (проверка
+  занятости — до диалога, повторный захват — после) → runner'ы Конфигуратора и диалоги внедряются через
+  `deps`-объект по умолчанию (образец — `RepositoryDatabaseSync.ts`/`RepositoryDatabaseSyncDeps`), чтобы
+  логику захвата можно было протестировать без реального процесса 1С. Подробности —
+  [architecture.md](./docs/architecture.md#сериализация-операций-конфигуратора-с-базой-configurationoperationguard).
 - **Изменение жизненного цикла/безопасности встроенного MCP-сервера** (порт, идентичность процесса,
   graceful shutdown, Host/Origin, отличается от «новый MCP-инструмент» из раздела выше): чистая логика —
   в `infra/mcp/` (`McpServerIdentity`, `McpStartDecision`, `McpPortProbe`, `McpConflictPrompt`, `McpHost`,
@@ -405,7 +422,7 @@ Vue-приложения (сборка `vite.webview.config.ts`, проверк�
 15. **Нативный TreeView — не основной UI**; не дублировать логику меню в `package.json`, если она есть в `addModuleActions`.
 16. **MCP-инструменты принимают только канон** (см. `./docs/mcp-paths.md`).
 17. **God-объектов быть не должно.** Порог-ориентир — **~800 строк** на файл производственного кода; превышение требует либо явного обоснования, либо декомпозиции. Дробить **по ответственности/домену, а не механически по строкам**. Каноничные приёмы: регистрация MCP-инструментов дробится по доменам (`src/ui/mcp/registration/*`, образец — `McpAddToolsRegistration`); диспетчер `switch (kind)` заменяется **таблицей** `Record<MetaKind, …>` — данные типа в `META_TYPES`, XML-литералы формата в спец-реестре `infra/` (параллельные словари вне `META_TYPES` запрещены, см. п.2); класс-фасад остаётся тонким, логика — в module-level функциях/подмодулях того же слоя. **Любое дробление XML-генератора обязано сохранять байт-в-байт выход** (BOM/EOL/порядок атрибутов/самозакрытие, см. п.12) и предваряться байт-golden-тестом; декомпозиция `MetadataXmlCreator`/`FormBuilders` без такого эталона — запрещена (идёт вслепую).
-18. **Внутри критической секции эксклюзивной операции (флаги вида `isUpdatingConfigurations`) уведомления показываются без `await`.** `await vscode.window.showInformationMessage(...)`/`showWarningMessage(...)` до закрытия секции держит флаг занятости выставленным до закрытия нотификации пользователем — любая параллельная операция всё это время отбивается сообщением «уже выполняется», хотя фактически ничего не выполняется.
+18. **Внутри аренды `ConfigurationOperationGuard` (или любой другой эксклюзивной операции) уведомления показываются без `await`.** `await vscode.window.showInformationMessage(...)`/`showWarningMessage(...)` до `release()` держит guard занятым до закрытия нотификации пользователем — любая параллельная операция всё это время отбивается сообщением «уже выполняется», хотя фактически ничего не выполняется.
 
 ## Ключевые принципы
 

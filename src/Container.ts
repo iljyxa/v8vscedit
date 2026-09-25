@@ -5,6 +5,7 @@ import type { ConfigEntry } from './domain/Configuration';
 import { findConfigurations } from './infra/fs/ConfigLocator';
 import { type ChangedConfiguration, ConfigurationChangeDetector } from './infra/fs/ConfigurationChangeDetector';
 import { ConfigurationCleanWindow } from './infra/fs/ConfigurationCleanWindow';
+import { ConfigurationOperationGuard } from './infra/process/ConfigurationOperationGuard';
 import { MetadataTreeProvider } from './ui/tree/MetadataTreeProvider';
 import { registerCommands } from './ui/commands/CommandRegistry';
 import type { CommandServices } from './ui/commands/_shared';
@@ -82,6 +83,7 @@ import type { GitApiLike, GitExtensionLike } from './ui/git/gitExtensionApi';
  */
 export class Container {
   readonly outputChannel: vscode.OutputChannel;
+  readonly configurationOperationGuard: ConfigurationOperationGuard;
   readonly supportService: SupportInfoService;
   readonly treeProvider: MetadataTreeProvider;
   readonly subsystemEditorViewProvider: SubsystemEditorViewProvider;
@@ -153,6 +155,10 @@ export class Container {
   ) {
     this.outputChannel = vscode.window.createOutputChannel('1С Редактор');
     context.subscriptions.push(this.outputChannel);
+    this.configurationOperationGuard = new ConfigurationOperationGuard((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.outputChannel.appendLine(`[guard][error] ${message}`);
+    });
     // Отложенный пересчёт состояния живёт дольше окна тишины: если расширение
     // выгрузят в это время, обратный вызов дёрнул бы уже мёртвые сервисы.
     context.subscriptions.push({
@@ -349,6 +355,7 @@ export class Container {
     c.wireGitDecorationWatcher();
     void c.wireGitStateWatcher();
     c.wireMetadataChangesView();
+    c.wireConfigurationOperationContext();
     c.wireCommands();
     c.wireReadonlyGuard();
     c.reloadEntries();
@@ -429,6 +436,26 @@ export class Container {
     );
   }
 
+  /**
+   * Контекст enablement команд импорта/обновления выставляется только отсюда:
+   * guard общий для всех путей (включая синхронизацию с хранилищем), поэтому
+   * команды гаснут, какая бы из операций его ни заняла.
+   */
+  private wireConfigurationOperationContext(): void {
+    const subscription = this.configurationOperationGuard.onDidChangeBusy((busy) => {
+      // Отказ setContext асинхронный — onListenerError guard'а его не увидит,
+      // поэтому логируем здесь, иначе рассинхрон enablement остался бы немым.
+      vscode.commands.executeCommand('setContext', 'v8vscedit.isUpdatingConfigurations', busy).then(
+        undefined,
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          this.outputChannel.appendLine(`[guard][error] setContext: ${message}`);
+        }
+      );
+    });
+    this.context.subscriptions.push(subscription);
+  }
+
   private wireCommands(): void {
     registerCommands(this.context, this.buildCommandServices());
   }
@@ -496,6 +523,7 @@ export class Container {
       setTreeMessage: () => undefined,
       setTreeProcessingState: (state) => this.setTreeProcessingState(state),
       refreshActionsView: () => this.refreshActionsView(),
+      configurationOperationGuard: this.configurationOperationGuard,
     };
   }
 
