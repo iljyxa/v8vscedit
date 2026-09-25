@@ -364,3 +364,19 @@ Mocha грузит все out/test/suite/*.js до grep — пока хоть о
 | `unlock` без `-force` при изменённом в базе объекте | rc=1 «Объект … был изменен», ничего не меняется |
 | `unlock -force` | объект в базе возвращается к версии хранилища |
 | Загрузка захваченного объекта в привязанную базу без аргументов `/ConfigurationRepository*` | проходит (база хранит признак захвата локально); с неверным пользователем хранилища — отказ |
+
+### 10.13 Решения test-writer по неоднозначным сигнатурам раздела 10 (тесты в c25dad5 — реализовать ИМЕННО так)
+
+1. `RepositoryLockRequest.mode?: 'recursive' | 'object'` — необязательное; пропуск = поведение старой записи. `lockModes` пишется всем `members` операции с одним значением, удаляется у освобождённых.
+2. `isLocked(target, unit)`: явно ИЛИ участник группы ИЛИ правило рекурсивного корня ИЛИ предок единицы (`getRepositoryUnitAncestors`, от ближайшего) захвачен явно/через группу и у него НЕТ записи в `lockModes`.
+3. `RepositoryUnitPath = {kind: MetaKind; name; segments: {tag: RepositorySubordinateTag; name}[]}`; `parseRepositoryUnit`/`formatRepositoryUnit` — round-trip; `subordinateUnitFullName(parent, tag, name)` бросает на нераспознанном `parent`; `getRepositoryUnitAncestors` — от ближайшего к дальнему, `[]` для верхнего уровня и нераспознанного имени.
+4. `extractDumpInfoUnit` — в `ConfigDumpInfoDiff.ts`; `diffConfigDumpInfo(prev, next, keyOf = extractDumpInfoOwner)`.
+5. `resolveObjectScope(configRoot, fullName, target, depth = 'tree')` понимает единицы; `resolveUnitXmlRel(baseDir, fullName)`; `resolveLockUnitByRelativePath(rel, target)` — самая конкретная единица по пути.
+6. `captureFromDirectory(target, fullName, sourceDir, scope, keepFromProject = [], depth: ScopeDepth = 'unit', subordinates?)`; `readSnapshotInfo(target, fullName) → {hashes; depth; subordinates?} | undefined` (v1/v2 → `tree`); `restoreToProject`/сравнение фильтруют файлы снимка по переданной `scope` (`isPathInScope`); `diffOwnersAgainstBaseline` группирует по `resolveLockUnitByRelativePath`.
+7. `RepositoryDumpRounds`: `UnitExpansion = (unit, unitXmlPath) => string[]`; `runDumpRounds(request) → {status:'ok'; found:{fullName, dir}[]; missing: string[]; dispose()} | {status:'failed'; reason}`; `removed` — отдельная `collectRemovedSubordinates(target, ownerUnit, projectXmlPath, dumpXmlPath): string[]`; список раунда 0 длиннее `anchors` и упал → повтор только `anchors`; равен `anchors` и упал → сразу `failed`; `optimistic: false` для `towards`/`none`.
+8. `readonlyTransitionPlan`: `ownerChainOf(path) => string[]`; файл затронут, если хоть одно звено в `changedOwnerFullNames ∪ allObjects`.
+9. `EditorReadonlyController`: публичные идемпотентные `onActiveEditorChanged(editor | undefined)` и `onDocumentClosed(document)`.
+10. `resolveMergeScope(target, fullName, dumpDir, depth: ScopeDepth)`.
+11. `runRepositoryCliCommand(options, services, execute = executeRepositoryCli)`.
+12. `RepositoryMergePlanner`: `CHILD_ELEMENT_DIRS`/`collectIncompleteChildDirs`/импорт `parseObjectXml` удалены; `incomplete`/`requirePrimaryFile` остаются.
+13. `buildRepositoryDumpPlan` в новой форме отдельным юнит-тестом не зафиксирован — наблюдается через потоки; сквозные flow-сценарии (критерии 10.1.2, 5–8, 10) добираются после реализации сборки потоков.
