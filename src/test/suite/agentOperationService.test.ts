@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   AgentOperationService,
+  collectAllRelativeFiles,
   isInfoBaseAlreadyConnectedMessage,
   type DesignerAgentTransport,
   type DesignerAgentTransportFactory,
@@ -305,6 +306,34 @@ suite('AgentOperationService — dumpToDirectory (issue #1)', () => {
     }
   });
 
+  // Примечание (находка вне объёма задачи): `AgentWorkspaceService.resolveWorkspace`
+  // требует непустой `target.extensionName` для ЛЮБОЙ операции с расширением
+  // (включая `dumpToDirectory`) и бросает исключение раньше, чем выполнение
+  // доходит до `extensionName: target.kind === 'cfe' ? target.extensionName ?? target.name : undefined`
+  // в самой команде — правая часть `?? target.name` для `dumpToDirectory`
+  // практически недостижима. Тест покрывает единственный реально достижимый
+  // случай (`kind==='cfe'` с заданным `extensionName`).
+  test('target.kind==="cfe": --extension берётся из target.extensionName', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-agent-dump-cfe-'));
+    try {
+      const configRoot = path.join(tempRoot, 'src', 'cfe', 'EVOLC');
+      fs.mkdirSync(configRoot, { recursive: true });
+      fs.writeFileSync(path.join(configRoot, 'Configuration.xml'), '<MetaDataObject/>', 'utf-8');
+
+      const transport = new FakeTransport();
+      const service = new AgentOperationService(tempRoot, new FakeTransportFactory(transport));
+      await service.dumpToDirectory(
+        { kind: 'cfe', name: 'ЕВОЛК', extensionName: 'EVOLC', rootPath: configRoot },
+        { mode: 'full' }
+      );
+      const dumpCommand = transport.commands.find((command) => command.startsWith('config dump-config-to-files'));
+      assert.ok(dumpCommand);
+      assert.match(dumpCommand, /--extension=EVOLC/);
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   test('mode "update-info": команда содержит --config-dump-info-only, без --list-file', async () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-agent-dump-info-'));
     try {
@@ -408,5 +437,39 @@ suite('AgentOperationService — dumpToDirectory (issue #1)', () => {
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * `collectAllRelativeFiles` — во всех сценариях `dumpToDirectory` выше временный
+ * каталог выгрузки пуст (`FakeTransport` не пишет реальные файлы), поэтому тело
+ * рекурсивного обхода (вложенные каталоги, файлы) там ни разу не выполняется.
+ * Юнит-тест на реальной временной структуре каталогов — по контракту
+ * (`export function`, часть `infra/agent`).
+ */
+suite('collectAllRelativeFiles (issue #1)', () => {
+  test('обходит вложенные каталоги и возвращает относительные пути всех файлов', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-collect-all-relative-'));
+    try {
+      fs.writeFileSync(path.join(tempRoot, 'Configuration.xml'), '', 'utf-8');
+      fs.mkdirSync(path.join(tempRoot, 'Catalogs', 'Товары', 'Ext'), { recursive: true });
+      fs.writeFileSync(path.join(tempRoot, 'Catalogs', 'Товары.xml'), '', 'utf-8');
+      fs.writeFileSync(path.join(tempRoot, 'Catalogs', 'Товары', 'Ext', 'ObjectModule.bsl'), '', 'utf-8');
+
+      const result = collectAllRelativeFiles(tempRoot);
+
+      assert.deepStrictEqual(result.sort(), [
+        path.join('Catalogs', 'Товары.xml'),
+        path.join('Catalogs', 'Товары', 'Ext', 'ObjectModule.bsl'),
+        'Configuration.xml',
+      ].sort());
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('несуществующий каталог → пустой список без ошибки', () => {
+    const missingDir = path.join(os.tmpdir(), 'v8-collect-all-relative-does-not-exist');
+    assert.deepStrictEqual(collectAllRelativeFiles(missingDir), []);
   });
 });

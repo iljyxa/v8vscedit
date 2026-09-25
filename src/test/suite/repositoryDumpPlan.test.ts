@@ -3,9 +3,12 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+  buildRepositoryDumpPlan,
   resolveSubsystemMemberFullNames,
   resolveXmlPathByFullName,
 } from '../../infra/repository/RepositoryDumpPlan';
+import { CONFIGURATION_ROOT_LOCK_NAME, EXTENSION_ROOT_LOCK_NAME } from '../../infra/repository/RepositoryObjectNames';
+import type { RepositoryNodeRef } from '../../infra/repository/RepositoryService';
 
 /**
  * `RepositoryDumpPlan` — перенос (issue #1, план архитектора, раздел 3
@@ -22,18 +25,16 @@ import {
  * поэтому дублирующий здесь тест рисковал бы зафиксировать неверно угаданную
  * внутреннюю форму раньше, чем реальный вызывающий код.
  *
- * Раздел 10 (Р2/Р4/Р10): по той же причине здесь НЕ фиксируется новая форма
- * `{kind:'objects'; anchors; fullNames; expansion}` и новая сигнатура
- * `buildRepositoryDumpPlan(node, objects, recursive, configRoot)` — поле
- * `expansion` целиком зависит от контракта `RepositoryDumpRounds.UnitExpansion`
- * (см. `repositoryDumpRounds.test.ts`, где раскрытие подчинённых единиц уже
- * покрыто параметризованно), а `anchors`/`fullNames` наблюдаемы только через
- * реальный вызов `RepositoryLockSync`/`RepositoryUnlockSync`. Синтетический тест
- * здесь заранее угадывал бы, ЧТО именно `buildRepositoryDumpPlan` кладёт в
- * `fullNames` для рекурсивного/нерекурсивного захвата верхнеуровневого объекта
- * (список полностью раскрытых подчинённых по проекту? только якорь? частично?)
- * — эта развилка прямо влияет на число вызовов `dumpToTemp` в
- * `RepositoryLockSync`, поэтому решается и фиксируется тестами ТАМ, а не тут.
+ * Раздел 10 (Р2/Р4/Р10), уточнение по факту реализации: решение test-writer
+ * (10.13.13) откладывало юнит-тест `buildRepositoryDumpPlan` до наблюдения через
+ * потоки `RepositoryLockSync`/`RepositoryUnlockSync`. Флоу-тесты покрывают лишь
+ * часть веток диспетчера (root/root-incremental, Subsystem с xmlPath, объект без
+ * recursive), поэтому ветка `kind:'objects'`/`expansion:'subordinates'` для
+ * РЕКУРСИВНОГО объекта БЕЗ `Subsystem`-узла (включая Subsystem-узел без
+ * `xmlPath`, который проваливается в ту же ветку) оставалась непокрытой —
+ * добавлен прямой юнит-тест диспетчера ниже (не дублирует форму `fullNames` для
+ * Subsystem-веток, которая по-прежнему фиксируется только через
+ * `RepositoryLockSync`).
  * D3 (см. `resolveSubsystemMemberFullNames` выше) — фиксируется здесь, так как
  * это точечное исправление уже существующей, наблюдаемой в этом файле функции.
  */
@@ -130,6 +131,126 @@ suite('RepositoryDumpPlan — resolveSubsystemMemberFullNames', () => {
     } finally {
       fs.rmSync(configRoot, { recursive: true, force: true });
     }
+  });
+
+  test('повреждённый (нечитаемый) XML подсистемы — пустой результат, ветка пропускается без исключения', () => {
+    const configRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-dumpplan-subsystem-broken-'));
+    try {
+      // fs.existsSync() для каталога тоже true — readFileSync внутри readSubsystem
+      // бросит EISDIR, попав ровно в защитную ветку catch (не связано с содержимым XML).
+      const brokenPath = path.join(configRoot, 'Subsystems', 'Сломанная.xml');
+      fs.mkdirSync(brokenPath, { recursive: true });
+      assert.deepStrictEqual(resolveSubsystemMemberFullNames(brokenPath, true), []);
+    } finally {
+      fs.rmSync(configRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('дочерняя подсистема во ПЛОСКОЙ раскладке (Subsystems/Родитель/Subsystems/Ребёнок.xml, без вложенного каталога)', () => {
+    const configRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-dumpplan-subsystem-flat-child-'));
+    try {
+      fs.mkdirSync(path.join(configRoot, 'Subsystems', 'Опт', 'Subsystems'), { recursive: true });
+      fs.writeFileSync(
+        path.join(configRoot, 'Subsystems', 'Опт.xml'),
+        buildSubsystemXml('Опт', [], ['Партнеры']),
+        'utf-8'
+      );
+      // Плоская раскладка ребёнка — нет каталога Subsystems/Опт/Subsystems/Партнеры/.
+      fs.writeFileSync(
+        path.join(configRoot, 'Subsystems', 'Опт', 'Subsystems', 'Партнеры.xml'),
+        buildSubsystemXml('Партнеры', ['Catalog.Контрагенты'], []),
+        'utf-8'
+      );
+
+      const result = resolveSubsystemMemberFullNames(path.join(configRoot, 'Subsystems', 'Опт.xml'), true);
+
+      assert.deepStrictEqual(
+        [...result].sort(),
+        ['Подсистема.Опт', 'Подсистема.Опт.Подсистема.Партнеры', 'Справочник.Контрагенты'].sort()
+      );
+    } finally {
+      fs.rmSync(configRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+suite('RepositoryDumpPlan — buildRepositoryDumpPlan (issue #1, раздел 10)', () => {
+  const configRoot = path.resolve(__dirname, '../../../example/2.21/src/cf');
+
+  function objectNode(xmlPath: string): RepositoryNodeRef {
+    return { nodeKind: 'Catalog', label: 'Контрагенты', xmlPath };
+  }
+
+  test('anchors[0] — сентинел корня конфигурации, recursive=true → {kind:"root-incremental"}', () => {
+    const plan = buildRepositoryDumpPlan({ nodeKind: 'configuration' }, { fullNames: [CONFIGURATION_ROOT_LOCK_NAME] }, true, configRoot);
+    assert.deepStrictEqual(plan, { kind: 'root-incremental' });
+  });
+
+  test('anchors[0] — сентинел корня конфигурации, recursive=false → {kind:"root-object"}', () => {
+    const plan = buildRepositoryDumpPlan({ nodeKind: 'configuration' }, { fullNames: [CONFIGURATION_ROOT_LOCK_NAME] }, false, configRoot);
+    assert.deepStrictEqual(plan, { kind: 'root-object' });
+  });
+
+  test('anchors[0] — сентинел корня расширения, recursive=true → {kind:"root-incremental"} (та же ветка isRootLockName)', () => {
+    const plan = buildRepositoryDumpPlan({ nodeKind: 'extension' }, { fullNames: [EXTENSION_ROOT_LOCK_NAME] }, true, configRoot);
+    assert.deepStrictEqual(plan, { kind: 'root-incremental' });
+  });
+
+  test('нерекурсивная операция над объектом → {kind:"objects", fullNames===anchors, expansion:"new-subordinates"}', () => {
+    const xmlPath = path.join(configRoot, 'Catalogs', 'Контрагенты.xml');
+    const plan = buildRepositoryDumpPlan(objectNode(xmlPath), { fullNames: ['Справочник.Контрагенты'] }, false, configRoot);
+    assert.deepStrictEqual(plan, {
+      kind: 'objects',
+      anchors: ['Справочник.Контрагенты'],
+      fullNames: ['Справочник.Контрагенты'],
+      expansion: 'new-subordinates',
+    });
+  });
+
+  test('рекурсивный узел Subsystem С xmlPath → expansion:"subsystem", fullNames раскрыты по составу подсистемы', () => {
+    const configRootSubsystem = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-dumpplan-buildplan-subsystem-'));
+    try {
+      fs.mkdirSync(path.join(configRootSubsystem, 'Subsystems'), { recursive: true });
+      fs.writeFileSync(
+        path.join(configRootSubsystem, 'Subsystems', 'Продажи.xml'),
+        buildSubsystemXml('Продажи', ['Catalog.Товары'], []),
+        'utf-8'
+      );
+      fs.mkdirSync(path.join(configRootSubsystem, 'Catalogs'), { recursive: true });
+      fs.writeFileSync(path.join(configRootSubsystem, 'Catalogs', 'Товары.xml'), '<MetaDataObject/>', 'utf-8');
+      const node: RepositoryNodeRef = { nodeKind: 'Subsystem', label: 'Продажи', xmlPath: path.join(configRootSubsystem, 'Subsystems', 'Продажи.xml') };
+
+      const plan = buildRepositoryDumpPlan(node, { fullNames: ['Подсистема.Продажи'] }, true, configRootSubsystem);
+
+      assert.strictEqual(plan.kind, 'objects');
+      assert.strictEqual(plan.expansion, 'subsystem');
+      assert.strictEqual(plan.anchors[0], 'Подсистема.Продажи');
+      assert.deepStrictEqual([...plan.fullNames].sort(), ['Подсистема.Продажи', 'Справочник.Товары'].sort());
+    } finally {
+      fs.rmSync(configRootSubsystem, { recursive: true, force: true });
+    }
+  });
+
+  test('рекурсивный узел Subsystem БЕЗ xmlPath → падает в общую ветку "subordinates" (состав подсистемы не резолвится)', () => {
+    const plan = buildRepositoryDumpPlan({ nodeKind: 'Subsystem', label: 'Продажи' }, { fullNames: ['Подсистема.Продажи'] }, true, configRoot);
+    assert.strictEqual(plan.kind, 'objects');
+    assert.strictEqual(plan.expansion, 'subordinates');
+  });
+
+  test('рекурсивный НЕ-Subsystem объект (Catalog) → {expansion:"subordinates"}, fullNames раскрыты по проектным подчинённым', () => {
+    const xmlPath = path.join(configRoot, 'Catalogs', 'Контрагенты.xml');
+    const plan = buildRepositoryDumpPlan(objectNode(xmlPath), { fullNames: ['Справочник.Контрагенты'] }, true, configRoot);
+    assert.strictEqual(plan.kind, 'objects');
+    assert.strictEqual(plan.expansion, 'subordinates');
+    assert.deepStrictEqual(
+      [...plan.fullNames].sort(),
+      [
+        'Справочник.Контрагенты',
+        'Справочник.Контрагенты.Форма.ФормаЭлемента',
+        'Справочник.Контрагенты.Форма.ФормаСписка',
+        'Справочник.Контрагенты.Макет.ЗагрузкаИзФайла',
+      ].sort()
+    );
   });
 });
 

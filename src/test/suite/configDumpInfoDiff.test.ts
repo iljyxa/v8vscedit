@@ -69,6 +69,23 @@ suite('ConfigDumpInfoDiff — diffConfigDumpInfo', () => {
     assert.deepStrictEqual(diff, { changedOwners: ['Catalog.Контрагенты'], addedOwners: [], removedOwners: [] });
   });
 
+  test('у существующего владельца добавилась новая запись (число записей владельца различается) → он в changedOwners', () => {
+    // sameEntries() сравнивается по РАЗМЕРУ карт ДО поэлементного сравнения —
+    // здесь набор имён владельца различается количеством (появилась ФормаЭлемента),
+    // а не только значением уже существующей записи (в отличие от теста выше).
+    const prev = mapOf([
+      ['Catalog.Контрагенты', 'root-h1'],
+      ['Catalog.Контрагенты.ObjectModule', 'module-h1'],
+    ]);
+    const next = mapOf([
+      ['Catalog.Контрагенты', 'root-h1'],
+      ['Catalog.Контрагенты.ObjectModule', 'module-h1'],
+      ['Catalog.Контрагенты.Form.ФормаЭлемента.Form', 'form-h1'],
+    ]);
+    const diff = diffConfigDumpInfo(prev, next);
+    assert.deepStrictEqual(diff, { changedOwners: ['Catalog.Контрагенты'], addedOwners: [], removedOwners: [] });
+  });
+
   test('изменён корень (Configuration.*.SessionModule) → владелец "Configuration.X" в changedOwners', () => {
     const prev = mapOf([
       ['Configuration.ТорговыйУчет', 'root-h1'],
