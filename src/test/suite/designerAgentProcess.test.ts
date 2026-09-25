@@ -78,8 +78,8 @@ suite('DesignerAgentProcess', () => {
   // resolveV8ExecutablePath) не должна приводить к необработанному исключению
   // процесса Node (event 'error' без слушателя роняет весь Extension Host).
   // Файл называем "1cv8" и делаем исполняемым, чтобы пройти валидацию
-  // resolveV8ExecutablePath и получить именно ошибку spawn() (ENOENT/EACCES/ENOEXEC),
-  // а не синхронный throw на этапе резолва пути.
+  // resolveV8ExecutablePath и получить именно ошибку spawn() (на *nix — событием 'error'),
+  // а не синхронный throw на этапе резолва пути (см. createBrokenExecutable).
   test('реальная ошибка spawn не бросает необработанное исключение и переводит процесс в exited', async () => {
     const brokenV8Path = createBrokenExecutable();
 
@@ -102,8 +102,14 @@ suite('DesignerAgentProcess', () => {
     assert.strictEqual(exitEvents.length, 1, 'onExit должен быть вызван ровно один раз при ошибке spawn');
     // getExitDescription() должен явно объяснять причину, а не просто "код=null, сигнал=null" —
     // иначе пользователь не поймёт, что 1С не запустилась именно из-за битого исполняемого файла.
-    assert.ok(
-      /enoent|eacces|enoexec|не найден|spawn/i.test(proc.getExitDescription()),
+    // На *nix причина детерминирована (ENOENT от execve), на Windows код ошибки CreateProcess
+    // для «битого» .exe зависит от версии ОС/libuv, поэтому там проверяется только ветка spawn-ошибки.
+    const expectedReason = process.platform === 'win32'
+      ? /^не удалось запустить конфигуратор: /
+      : /^не удалось запустить конфигуратор: .*\(ENOENT\)$/;
+    assert.match(
+      proc.getExitDescription(),
+      expectedReason,
       `getExitDescription() должен объяснять причину ошибки spawn, получено: "${proc.getExitDescription()}"`
     );
   });
@@ -239,16 +245,24 @@ suite('DesignerAgentProcess', () => {
 });
 
 /**
- * Создаёт файл "1cv8" с правом на выполнение, но без валидного содержимого
- * исполняемого файла. resolveV8ExecutablePath принимает его по имени/правам,
- * а реальный spawn() на такой "бинарник" падает с ENOEXEC/EACCES — то есть тест
+ * Создаёт существующий файл "1cv8" с правом на выполнение, запуск которого гарантированно
+ * падает в spawn(): resolveV8ExecutablePath принимает его по имени/правам, поэтому тест
  * бьёт именно по обработчику ошибки spawn, а не по валидации пути.
+ *
+ * На *nix — скрипт с shebang на несуществующий интерпретатор: execve возвращает ENOENT,
+ * и Node доставляет его событием 'error'. Бинарный мусор здесь не подходит: на ENOEXEC
+ * libuv (как и execvp) повторяет запуск через /bin/sh, и вместо 'error' процесс просто
+ * завершается с кодом 127. Путь интерпретатора — короткий и фиксированный, а не внутри
+ * os.tmpdir(): строка shebang длиннее буфера ядра (~255 байт) тоже даёт ENOEXEC.
  */
 function createBrokenExecutable(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-broken-v8-'));
   const executableName = process.platform === 'win32' ? '1cv8.exe' : '1cv8';
   const brokenPath = path.join(dir, executableName);
-  fs.writeFileSync(brokenPath, '\x00\x00not-a-real-executable\x00\x00');
+  const content = process.platform === 'win32'
+    ? '\x00\x00not-a-real-executable\x00\x00'
+    : '#!/nonexistent-v8vscedit/interpreter\n';
+  fs.writeFileSync(brokenPath, content);
   fs.chmodSync(brokenPath, 0o755);
   return brokenPath;
 }
