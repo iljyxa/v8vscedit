@@ -1,6 +1,6 @@
 # План архитектора — issue #1: синхронизация файлов с хранилищем 1С
 
-> Рабочий план FULL-трека issue #1 (архитектор + решения test-writer). Реализация выполнена по нему в ветке `feature/repository-lock-unlock-file-sync`; отклонения developer — в комментарии issue #1. Итоговая документация — задача documenter (см. раздел 7).
+> Рабочий план FULL-трека issue #1 (архитектор + решения test-writer). Разделы 1–9 реализованы; раздел 10 — доработка по фактам платформы. Реализация выполнена по нему в ветке `feature/repository-lock-unlock-file-sync`; отклонения developer — в комментарии issue #1. Итоговая документация — задача documenter (см. раздел 7).
 
 Ветка: `feature/repository-lock-unlock-file-sync`. Трек: FULL.
 
@@ -199,3 +199,168 @@ c8 ignore (с обоснованием) — только модальные об
 12. `new EditorReadonlyController(repositoryService, supportService, bslReadonlyGuard, outputChannel)`.
 Замечание test-writer: сквозные сценарии порогов ROOT_INCREMENTAL_MAX_*, многораундовой довыгрузки подсистемы и «удалённый владелец → removeChildObject» в flow-тестах не покрыты — developer/qa должны добрать покрытие изменённых строк до 100%.
 Mocha грузит все out/test/suite/*.js до grep — пока хоть один модуль отсутствует, падает весь прогон; прогонять тесты после того, как все модули существуют (можно заглушками-экспортами на промежуточном шаге).
+
+
+## 10. Доработка по фактам платформы: подчинённые объекты с собственным XML (D1–D3)
+
+> Разделы 1–9 остаются контрактом; раздел 10 заменяет их только там, где это сказано явно («заменяет §…»). Основание — проверки на платформе 1С 8.5.1 (пакетный Конфигуратор, файловые базы, файловое хранилище с двумя пользователями, фикстура `example/2.21/src/cf`), см. 10.12.
+
+### 10.0 Подтверждение дефектов по коду
+
+- **D1.** `RepositoryObjectNames.ts` — `FunctionalOptionsParameter: 'ПараметрФункциональнойОпции'`; платформа принимает только `ПараметрФункциональныхОпций`. Та же таблица идёт и в `-listFile`, и в `Objects.xml` захвата (`RepositoryService.buildRootObjectFullName`).
+- **D2.** Частичная выгрузка владельца не включает подчинённые объекты с собственным XML (формы, макеты, перерасчёты, таблицы/кубы/таблицы измерений внешних источников, вложенные подсистемы). Цепочка кода работает на уровне объекта верхнего уровня:
+  - `ObjectXmlReader.parseChildren` возвращает только Form/Template/Subsystem;
+  - `CHILD_ELEMENT_DIRS`/`collectIncompleteChildDirs` (`RepositoryMergePlanner.ts`) защищают только Forms/Templates/Commands/Subsystems — файлы Recalculations/Tables/Cubes считаются сиротами и удаляются (D2b, потеря данных);
+  - снимок пополняется проектными версиями `skip-incomplete` файлов (D2a: откат восстанавливает не версию хранилища);
+  - владелец ConfigDumpInfo = два сегмента имени (D2c: изменённая форма не попадает в проект при root-incremental);
+  - readonly определяется по владельцу верхнего уровня (`RepositoryService.isEditRestricted`, `resolveOwnerFullNameByRelativePath`, `EditorReadonlyController`) — файлы форм редактируемы при нерекурсивном захвате, хотя на сервере форма не захвачена (D2d).
+- **D3.** `resolveSubsystemMemberFullNames` называет вложенную подсистему `Подсистема.B` вместо `Подсистема.A.Подсистема.B`; несуществующее имя роняет всю выгрузку, поэтому рекурсивная подсистема с вложенными не синхронизируется. Обходы `isNestedSubsystemMember`, `includeNestedSubsystems`, `resolveNewSubsystemMembers` опираются на опровергнутое допущение «вложенные приходят в составе родителя».
+
+### 10.1 Критерии приёмки
+
+1. `ONE_C_TYPE_NAMES.FunctionalOptionsParameter === 'ПараметрФункциональныхОпций'`; таблица имён закреплена эталонным тестом со значениями, проверенными на платформе.
+2. Рекурсивный захват/получение `Справочник.Контрагенты` (2.21) при наличии XML подчинённых в хеш-кэше: ровно один `dumpToTemp` со списком `Справочник.Контрагенты`, `…Форма.ФормаСписка`, `…Форма.ФормаЭлемента`, `…Макет.ЗагрузкаИзФайла`; файлы форм и макета записаны из выгрузки; 4 снимка (по одному на единицу, манифест v3, `depth: 'unit'`); `lockGroups['Справочник.Контрагенты']` = 4 единицы, `lockModes[…] = 'recursive'`.
+3. Нерекурсивный захват/получение `Справочник.Контрагенты`: один `dumpToTemp` со списком `[Справочник.Контрагенты]` (плюс новые в хранилище подчинённые по стратегии `new-subordinates`); файлы `Forms/**`, `Templates/**` существующих подчинённых побайтово не меняются и не удаляются; снимок только у владельца; `isEditRestricted`: файлы форм/макета → `true`, файлы владельца (`Контрагенты.xml`, `Ext/*.bsl`, `Commands/**`) → `false`.
+4. Регресс D2b: нерекурсивная и рекурсивная операция над `РегистрРасчета.Начисления` и `ВнешнийИсточникДанных.ИнтернетМагазин` не удаляет `Recalculations/**`, `Tables/**`, `Cubes/**`, `Cubes/*/DimensionTables/**`, если единицы есть в версии хранилища.
+5. Рекурсивная операция над `ВнешнийИсточникДанных.ИнтернетМагазин`: выгружены `…Таблица.Заказы`, `…Куб.Продажи`, `…Куб.Продажи.ТаблицаИзмерения.Товары/Регионы`; подчинённые в хеш-кэше → 1 вызов `dumpToTemp`; хеш-кэш пуст по подчинённым → 3 вызова (владелец; таблица + куб; таблицы измерений); все вызовы при `guard.isBusy === true`.
+6. Оптимистичный раунд 0 упал (в списке имя, которого нет в «базе») → следующий вызов только якоря, затем раунды по выгруженному XML; итоговый набор единиц совпадает с успешным сценарием; всё в одной аренде.
+7. root-incremental: изменены только `Catalog.Контрагенты.Form.ФормаЭлемента(.Form)` → список частичной выгрузки ровно `[Справочник.Контрагенты.Форма.ФормаЭлемента]`; удалённая единица-подчинённый → её файлы удаляются по правилам конфликтов; имена Recalculation/Table/Cube/DimensionTable/`Subsystem.A.Subsystem.B` переводятся в `-listFile` точно по таблице.
+8. unlock рекурсивного корня по манифесту: изменён только модуль формы → выгрузка ровно `[Справочник.Контрагенты.Форма.ФормаЭлемента]`; ничего не изменено → Конфигуратор не запускается.
+9. Совместимость state.json v2: старая запись (`lockedFullNames: [Справочник.Контрагенты]` без `lockModes`) → файлы форм редактируемы, как раньше; новый нерекурсивный захват → формы readonly; рекурсивный → редактируемы; нерекурсивная отмена после рекурсивного захвата → владелец readonly, формы редактируемы (на сервере остаются захваченными, P4); рекурсивная отмена → всё readonly.
+10. Отмена захвата: нерекурсивная → сравнение и откат только в области единицы владельца, снимки подчинённых сохраняются; рекурсивная → каждая единица со своим снимком; подчинённый, созданный локально (нет в `subordinates` снимка владельца) → эталон «пусто» без Конфигуратора; старый снимок (манифест v1/v2 = глубокий) при рекурсивной отмене → область `tree`, без выгрузки.
+11. Вложенные подсистемы везде (планы, `-listFile`, `lockGroups`, снимки) называются `Подсистема.A.Подсистема.B`.
+12. Контроллер readonly: событие с `…Форма.Y` пересчитывает только вкладки файлов формы Y; событие с `Справочник.X` — вкладки X и его подчинённых.
+13. Вывод `parseObjectXml` не меняется: `validate_metadata` для `Начисления` и `ИнтернетМагазин` даёт тот же результат, что до задачи.
+14. compile, lint, `coverage:changed` = 100% на изменённых файлах; каждый затронутый production-файл ≤ ~800 строк.
+
+### 10.2 Решения
+
+**Р1. D1.** Исправить литерал; тест — эталон проверенных имён и сопоставление каждого каталога верхнего уровня `example/2.21/src/cf` записи таблицы.
+
+**Р2. Единица хранилища** — объект верхнего уровня ИЛИ подчинённый объект с собственным XML; у единицы свои захват, имя в `-listFile`, запись в ConfigDumpInfo, область файлов и снимок.
+- Грамматика имён в трёх алфавитах (единственное место перевода — `RepositoryObjectNames`): fullName хранилища `Тип.Имя(.ПодТипRu.Имя)*`; ChildObjects/ConfigDumpInfo `Kind.Name(.Tag.Name)*`; путь `Folder/Name(/SubFolder/Name)*` с XML `…/Name.xml` (плоская) или `…/Name/Name.xml` (глубокая).
+- `REPOSITORY_SUBORDINATE_LAYOUT: Record<RepositorySubordinateTag, {folder, oneCName}>` для тегов Form, Template, Recalculation, Table, Cube, DimensionTable, Subsystem (в `RepositoryObjectNames.ts`, заменяет `CHILD_ELEMENT_DIRS`). Выводится из существующих данных, где они есть (`CHILD_TAG_CONFIG[tag].pathSegment` для Form/Template, `ONE_C_TYPE_NAMES.Subsystem`, `META_TYPES.Subsystem.folder`); литералы — только для Recalculation/Table/Cube/DimensionTable и каталогов Forms/Templates. Это не нарушение запрета №2: эти виды не `MetaKind`; при появлении их в навигаторе `folder` переезжает в реестр (тех. долг в CLAUDE.md). `Command` в таблицу не входит — выгружается вместе с владельцем.
+- `parseObjectXml` не расширять (иначе `MetadataValidationService.validateChildTags` начнёт выдавать `disallowed-child`/`unexpected-child`, изменится `MetadataInfoService`). Вместо этого — узкий ридер `readChildObjectRefs` в `infra/xml`.
+- Группировка ConfigDumpInfo `extractDumpInfoUnit(name)`: к `Kind.Name` добавляются пары `(Tag, Name)`, пока `Tag` из таблицы и за ним есть сегмент (`Catalog.X.Form.Y.Form` → `Catalog.X.Form.Y`; `Catalog.X.Command.C.CommandModule` → `Catalog.X`; `CommonForm.F.Form` → `CommonForm.F`; `ExternalDataSource.E.Cube.C.DimensionTable.D.Field.F` → `…DimensionTable.D`; `Configuration.X.SessionModule` → `Configuration.X`).
+
+**Р3. Области: глубина `unit`/`tree`.** `ObjectScope` (`object`) получает `depth`; `resolveObjectScope(configRoot, fullName, target, depth = 'tree')` понимает имена единиц. `unit`: `excludeDirRels` = все каталоги таблицы раскладки непосредственно под `dirRel`; `tree`: весь каталог. `includeNestedSubsystems` удаляется. Слияние, снимки, сравнение — `unit`; `tree` — только для единиц, удалённых из хранилища, и старых глубоких снимков. `collectScopeFiles` не обходит исключённые каталоги (горячий путь).
+
+**Р4. Выгрузка подчинённых — оптимистично с откатом** (обычный случай 1 запуск вместо 2–3, редкий +1; корректность не зависит от проектных имён: успех раунда 0 = все имена есть в базе, полнота проверяется по XML владельцев из выгрузки). `runDumpRounds` (infra, выгрузка внедрена функцией):
+1. Раунд 0 — якоря + замыкание раскрытия по проектному XML; не-якорные имена — только если основной XML единицы есть в хеш-кэше (при пустом кэше фильтр не применяется). Хеш-кэш загружается ДО аренды.
+2. Сбой раунда 0 при списке длиннее якорей → лог и повтор только якорей; повтор упал → `failed`.
+3. Раунды 1..N: ожидаемые = раскрытие новых найденных единиц по их XML из выгрузки минус известные; пусто → стоп; сбой раунда → стоп с логом, недовыгруженные → `missing`; `MAX_DUMP_ROUNDS = 5` (заменяет `MAX_SUBSYSTEM_DUMP_ROUNDS`).
+4. Найденная единица — её основной XML есть в каталоге раунда; каждый раунд в свой temp; все `dispose` в `finally`; всё в той же аренде.
+5. `missing` не входят в слияние, их файлы не трогаются; после аренды — `notifyWarning`.
+
+Стратегии раскрытия `UnitExpansion = (unit, unitXmlPath) => string[]`: `subordinates` (рекурсивный объект; куб раскрывается в таблицы измерений); `subsystem` (рекурсивная подсистема: вложенные `Подсистема.A.Подсистема.B` и участники `<Content>`; для участника — его подчинённые, `SUBSYSTEM_MEMBERS_INCLUDE_SUBORDINATES = true` по P1); `new-subordinates` (нерекурсивная операция: подчинённые якоря из XML версии хранилища, которых нет в проекте — применимо по P2); `towards(wanted)` (отмена захвата без снимка); `none` (root-incremental и откат корня: точные имена, один раунд). Подчинённые, удалённые из хранилища, при рекурсивной операции: подчинённые найденной единицы по проектному XML минус по XML выгрузки → `removed` с областью `tree`; при нерекурсивной — не трогаются, предупреждение в лог.
+
+**Р5. root-incremental по единицам (заменяет §2.10 в части группировки).** `diffConfigDumpInfo(prev, next, keyOf = extractDumpInfoOwner)`, в root-incremental `keyOf = extractDumpInfoUnit`; пороги `ROOT_INCREMENTAL_*` в единицах (значения прежние); `dumpInfoOwnerToRepositoryFullName` принимает единицы (неизвестный тег подчинённого → единица-родитель); удалённые → `tree`; добавленные/изменённые — одним списком, стратегия `none`; в `ChildObjects` `Configuration.xml` — только верхний уровень.
+
+**Р6. Нерекурсивная операция.** Якорь в области `unit` для всех видов из D2; файлы подчинённых исключены из области (не `skip-incomplete`). `collectIncompleteChildDirs`, `CHILD_ELEMENT_DIRS` и импорт `parseObjectXml` из планировщика удаляются; `requirePrimaryFile` остаётся.
+
+**Р7. Состояние захвата (state.json остаётся `version: 2`).**
+- Новое необязательное поле `lockModes?: Record<string, 'recursive' | 'object'>` — режим последнего захвата для всех `members` операции; некорректные значения отбрасываются; пустое поле не пишется.
+- Рекурсивный захват объекта: `members` = якорь + подчинённые по проекту, после выгрузки — плюс найденные (повторный `applyLock`); нерекурсивный — только якорь.
+- `isLocked(target, unit)` = явно в `lockedFullNames` ИЛИ участник группы ИЛИ (`rootRecursive` и не в `releasedUnderRoot`) ИЛИ правило старых записей: предок единицы захвачен явно/через группу и у него нет `lockModes`.
+- Нерекурсивная отмена якоря с группой: из группы убирается только якорь (P4); рекурсивная — как раньше; `lockModes` удаляется у освобождённых. Под рекурсивным корнем: нерекурсивная отмена X → в `releasedUnderRoot` только X; рекурсивная → X и его подчинённые.
+- `RepositoryLockRequest.mode: 'recursive' | 'object'`.
+
+**Р8. Снимки по единицам.** Снимок на каждую единицу из её каталога выгрузки. Манифест v3: `{version: 3, files, hashes, depth: 'unit' | 'tree', subordinates?: string[]}`; v1/v2 читаются как `depth: 'tree'` без `subordinates`. `restoreToProject` и сравнение отбрасывают файлы снимка вне области. Эталоны отмены (не рекурсивный корень), обход от предков к потомкам: (1) покрыта предком с `tree` → пропуск; (2) свой снимок → `snapshot` (`tree` только если снимок глубокий И отмена рекурсивная); (3) нет снимка, у ближайшего предка снимок v3 с `subordinates` без этой единицы → `empty` без Конфигуратора; (4) иначе → `dump` через `runDumpRounds` (`towards(wanted)`, откат к якорям); единица без выгрузки, чей выгруженный родитель её не перечисляет → `empty`; остальное → `missing` (лог, без эталона, хеш-кэш не патчится). Рекурсивный корень: `diffOwnersAgainstBaseline` группирует по единицам (`resolveLockUnitByRelativePath`). Помещение с `keepLocked` → `captureFromProject` на каждую единицу `members`.
+
+**Р9. Readonly.** `RepositoryService.isEditRestricted(filePath)`: владелец верхнего уровня — как сейчас, плюс суффикс единицы по сегментам пути после каталога объекта (только строковые операции, запрет №11); суффикс пуст → прежняя логика; иначе → `!isLocked(target, unit)`. `isMetadataEditRestricted` — на уровне владельца. `readonlyTransitionPlan`: `ownerOf` → `ownerChainOf(path) => string[]` (единица, затем предки).
+
+**Р10. D3.** Вложенные — `subordinateUnitFullName(parent, 'Subsystem', child)`; `resolveNewSubsystemMembers`, `isNestedSubsystemMember`, `includeNestedSubsystems` удаляются; вложенная подсистема — обычная единица (`Subsystems/A/Subsystems/B.xml` + `…/B/**` без `…/B/Subsystems`).
+
+### 10.3 Файлы и сигнатуры
+
+- **НОВЫЙ** `src/infra/xml/ChildObjectRefsReader.ts`: `readChildObjectRefs(xmlPath, tags: ReadonlySet<string>): {tag; name}[] | null` — прямые дети `<ChildObjects>` корня, только текстовые ссылки; `null` — нет файла/не разбирается. `ObjectXmlReader.ts` — не менять.
+- `RepositoryObjectNames.ts`: D1; `RepositorySubordinateTag`, `REPOSITORY_SUBORDINATE_LAYOUT`, `isRepositorySubordinateTag`, `RepositoryUnitPath`, `parseRepositoryUnit`, `formatRepositoryUnit`, `subordinateUnitFullName`, `getRepositoryUnitAncestors`; `parseRepositoryFullName` — только верхний уровень; `dumpInfoOwnerToRepositoryFullName` — единицы.
+- `ConfigDumpInfoDiff.ts`: `extractDumpInfoUnit`; `diffConfigDumpInfo(prev, next, keyOf)`.
+- `RepositoryObjectScope.ts`: `ScopeDepth`, `depth` в `object`; `resolveObjectScope(…, depth)`; `resolveUnitXmlRel(baseDir, fullName)`; `resolveLockUnitByRelativePath(rel, target)`; `collectScopeFiles` пропускает исключённые каталоги; удалить `includeNestedSubsystems`.
+- `RepositoryDumpPlan.ts`: `DumpExpansion`; вариант `{kind: 'objects'; anchors; fullNames; expansion}`; `buildRepositoryDumpPlan(node, objects, recursive, configRoot)`; `resolveXmlPathByFullName` → `resolveUnitXmlRel`; D3; удалить `resolveNewSubsystemMembers`; `SUBSYSTEM_MEMBERS_INCLUDE_SUBORDINATES = true`.
+- **НОВЫЙ** `RepositoryDumpRounds.ts` (~300 строк): `UnitExpansion`, `expandSubordinateUnits`, `createSubsystemExpansion`, `createNewSubordinatesExpansion`, `createTowardsExpansion`, `collectUnitClosure`, `buildOptimisticDumpList`, `collectRemovedSubordinates`, `runDumpRounds`, `MAX_DUMP_ROUNDS = 5`.
+- `RepositoryMergePlanner.ts`: удалить `CHILD_ELEMENT_DIRS`, `collectIncompleteChildDirs`, импорт `parseObjectXml`.
+- `RepositoryLockState.ts`: `lockModes`, `mode`, правило старых записей, частичное усечение группы.
+- `RepositoryLockSnapshotStore.ts`: манифест v3, `readSnapshotInfo`, фильтр по области в `restoreToProject`, `diffOwnersAgainstBaseline` по единицам.
+- `RepositoryService.ts`: `isEditRestricted` на уровне единицы.
+- `RepositoryFileSyncShared.ts`: `resolveMergeScope(…, depth)`; удалить `isNestedSubsystemMember`; `RepositorySubject` + `mode`, `anchors`, `expansion`; `loadBaseHashes` до аренды.
+- `RepositoryLockSync.ts`: `acquireObjectsDump` → `runDumpRounds` + `removed` + `missing`; root-incremental по единицам; `applySubjectLock` с `mode`; предупреждение о `missing` вне аренды.
+- `RepositoryUnlockSync.ts`: эталоны по Р8 (при росте — вынос в `RepositoryUnlockEtalons.ts`).
+- `RepositoryCommandRunner.ts`: `runRepositoryCliCommand(options, services, execute = executeRepositoryCli)`.
+- `readonlyTransitionPlan.ts`: `ownerChainOf`; `EditorReadonlyController.ts`: цепочка единиц, публичные `onActiveEditorChanged`/`onDocumentClosed`.
+- `RepositoryCommands.ts`, `Container.ts`, `package.json` — без изменений.
+
+### 10.4 Шаги developer (один слой за шаг; после каждого — compile, lint, связанные тесты)
+
+1. D1 (можно отдельным коммитом). 2. infra/xml: `ChildObjectRefsReader`. 3. infra/repository: имена, `ConfigDumpInfoDiff`, области. 4. infra/repository: `RepositoryDumpRounds`, `RepositoryDumpPlan`, `RepositoryMergePlanner`. 5. infra/repository: состояние, снимки, `RepositoryService.isEditRestricted`. 6. ui/commands/repository. 7. ui/readonly. Sanity-чеки CLAUDE.md п.4–8 — после шагов 3–5.
+
+### 10.5 План тестов (один пакет, 100% новых и изменённых строк)
+
+Только копии реальных файлов (`example/2.21/src/cf`: Контрагенты, Начисления, ИнтернетМагазин, FunctionalOptionsParameters, ConfigDumpInfo.xml; `example/2.20/src/cf`; `example/2.21/src/cfe/EVOLC`). Правка текста `.bsl` в копии и удаление реальных файлов допустимы; ручная сборка/правка XML объектов и подсистем — нет. Имитация платформы — хелпер `src/test/suite/support/partialDumpFixture.ts`: копирует ровно основной XML единицы и её каталог без подкаталогов Forms/Templates/Recalculations/Tables/Cubes/DimensionTables/Subsystems (поведение D2 литералом, независимо от production-кода); имя, которого нет в фикстуре → `{ok: false}` (как rc=1); пишет список имён каждого вызова. Харнессы `repositoryLockSync`/`repositoryUnlockSync` переводятся на копию фикстуры (синтетические `<MetaDataObject/>` и `buildSubsystemXml` удаляются в затронутых наборах).
+
+Модули: `repositoryObjectNames`, `childObjectRefsReader` (новый; включая регресс `parseObjectXml`/`validate_metadata`), `configDumpInfoDiff`, `repositoryObjectScope`, `repositoryDumpRounds` (новый), `repositoryMergePlanner`, `repositoryLockState`, `repositoryLockSnapshotStore`, `repositoryLockSync`, `repositoryUnlockSync`, `readonlyTransitionPlan`, `editorReadonlyController`, `repositoryDumpPlan` — ветки по критериям 10.1. Параметризация: теги таблицы (7), `depth`, режим захвата (`recursive`/`object`/старая запись), версия фикстуры (2.20/2.21), вид цели (cf/cfe), исход выгрузки (ok/fail).
+
+### 10.6 Ранее непокрытые ветки
+
+- `resolveMergeScope` без `dumpDir` для объекта не в проекте → unit-тест `null`.
+- `conflict-write` при `localHash === null` и базовом хеше → тест `applyMergeWithPostMutation`, `choice ∈ {replace, compare, keep-local}`.
+- `captureFetchSnapshots`: рекурсивный корень + конфликт + keep-local; получение на рекурсивно захваченном корне.
+- `RepositoryUnlockSync`: помещение без `node.label`; `recaptureSnapshotsFromProject` (объект и корень); ветка `readSnapshotHashes ?? {}` исчезает после Р8.
+- `runRepositoryCliCommand` — внедрение `execute` вместо c8 ignore: done/`showSuccessMessage:false`/`afterSuccess` бросает/interrupted/failed.
+- `EditorReadonlyController`, скрытая вкладка: `pending` → `onActiveEditorChanged` → `set/reset`; `onDocumentClosed` → `pending` очищен; ожидание по эффекту, не по таймеру.
+
+### 10.7 Фикстуры через Конфигуратор (пользователь)
+
+- **F1.** В `example/2.21/src/cf` (желательно и 2.20): вложенная подсистема `Подсистема.Продажи.Подсистема.Розница` (Content: `Справочник.Контрагенты`) и `…Розница.Подсистема.Интернет` (Content: другой справочник).
+- **F2 (желательно).** В `example/2.21/src/cfe/EVOLC`: собственная форма у `Справочник.ев_РабочийПроцесс`.
+- **F4.** «Версия хранилища» со структурными отличиями (например `example/2.21/repo-next/`): частичная выгрузка из базы, где в `Справочник.Контрагенты` удалена `ФормаСписка`, добавлена `ФормаВыбора`, изменён модуль `ФормаЭлемента`; в `ИнтернетМагазин` добавлена таблица `Клиенты`, удалена таблица измерения `Регионы`; плюс `-configDumpInfoOnly` той же базы.
+
+### 10.8 Проверки на платформе — выполнены, см. 10.12
+
+### 10.9 Риски
+
+- Сложность отмены захвата (4 источника эталона) — порядок «предки → потомки» и покрытие `tree` проверяются отдельными тестами; `RepositoryUnlockSync` ≤ 800 строк.
+- Флаги раскрытия и «оптимистичный список» — по одной константе/функции; переход на двухфазную схему — `optimistic := anchors`.
+- Старые записи state.json: формы при старых нерекурсивных захватах остаются редактируемыми до следующего захвата/отмены — описать в документации.
+- Хеш-кэш большой конфигурации загружается до аренды; внутри аренды только CLI, `applyLock`/`applyUnlock`, `runDumpRounds` (запрет №18, ассерты `isBusy`).
+- Пустые каталоги-контейнеры (`Forms/`) после удаления последней формы остаются — ограничение.
+- Слои: `RepositoryDumpRounds`, `ChildObjectRefsReader` без vscode; разбор XML — только `infra/xml`. Запрет №12 — побайтовое копирование. Запрет №2 — тех. долг `REPOSITORY_SUBORDINATE_LAYOUT`.
+
+### 10.10 Документация (documenter)
+
+- `docs/repository-file-sync.md`: единица хранилища и таблица раскладки; области `unit`/`tree`; раунды и откат оптимистичной выгрузки, число запусков; `lockModes` и правило старых записей; манифест v3; алгоритм эталонов отмены; поведение нерекурсивных операций; «повторный захват `-revised` перетирает непомещённые правки в базе, файлы защищает слияние».
+- CLAUDE.md, тех. долги: `REPOSITORY_SUBORDINATE_LAYOUT` вне `META_TYPES`; `SupportInfoService.CHILD_FOLDERS_WITH_OWN_XML` дублирует часть таблицы.
+- `docs/metadata-navigator.md`: readonly файлов форм/макетов зависит от режима захвата владельца.
+
+### 10.11 Попутные находки вне объёма (issues форка)
+
+1. Захват/отмена/помещение с узла формы или макета захватывает владельца (`RepositoryService.resolveFullName`, `CHILD_LIKE_KINDS`).
+2. Значок захвата и `isMetadataEditRestricted` для узлов Form/Template проверяют владельца; панель свойств позволяет править `Forms/Y.xml` незахваченной формы.
+3. `SupportInfoService.CHILD_FOLDERS_WITH_OWN_XML = ['Forms', 'Templates']`: режим поддержки файлов Recalculations/Tables/Cubes/DimensionTables и вложенных подсистем берётся от владельца.
+4. Синтетический XML в наборах тестов вне этой задачи — долг относительно правила «только реальные фикстуры».
+
+### 10.12 Результаты проверок на платформе 1С 8.5.1
+
+Стенд: файловые базы из `example/2.21/src/cf` (ibcmd), файловое хранилище, пользователи Admin и Bob, пакетный Конфигуратор под xvfb.
+
+| Проверка | Результат |
+|---|---|
+| `-listFile` `Справочник.X`, корень `Конфигурация.<Name>` (cf и cfe `-Extension`) | принимаются; корень cf → `Configuration.xml` + `Ext/**`, cfe → `Configuration.xml` |
+| 84 русских имени типов верхнего уровня | приняты все, кроме `ПараметрФункциональнойОпции` (верно `ПараметрФункциональныхОпций`, D1) |
+| Состав частичной выгрузки владельца | нет форм, макетов, перерасчётов, таблиц/кубов/таблиц измерений внешних источников, вложенных подсистем; модули, команды, справка, `Rights.xml` есть; побайтово = полной выгрузке |
+| Имена подчинённых | `…Форма.Y`, `…Макет.Y`, `РегистрРасчета.X.Перерасчет.Y`, `ВнешнийИсточникДанных.X.Таблица.Y`, `…Куб.Y`, `…Куб.Y.ТаблицаИзмерения.Z`, `Подсистема.A.Подсистема.B` — приняты; `…Команда.Y` — отказ («нельзя сохранить в отдельный XML-файл») |
+| Владелец + подчинённые одним списком (P5) | rc=0, без дублей, побайтово = проекту |
+| Несуществующее имя в списке (P3) | вся выгрузка rc=1, файлов нет; время = успешной (~1.5 с на базе стенда) |
+| Частичная выгрузка и `ConfigDumpInfo.xml` | не пишется |
+| `-configDumpInfoOnly` в пустой каталог | только полный `ConfigDumpInfo.xml`, ~1.6 с |
+| `configVersion` после захвата/получения | меняется только у полученных единиц (`Catalog.Контрагенты.Form.ФормаЭлемента` и `….Form`) |
+| Вложенная подсистема в ConfigDumpInfo (P6) | своя строка `Subsystem.A.Subsystem.B` с `configVersion` |
+| Захват владельца без `includeChildObjects` | формы/макеты НЕ захватываются (загрузка модуля формы — «не захвачен в хранилище»); изменённые в хранилище формы НЕ получаются |
+| Рекурсивный захват объекта | захватываются и получаются формы и макеты |
+| Рекурсивный захват подсистемы (P1) | захватываются участники, их формы и макеты, участники и сами вложенные подсистемы |
+| Нерекурсивная отмена после рекурсивного захвата (P4) | снимается только владелец; формы остаются захваченными |
+| Нерекурсивные получение/захват при новой форме в хранилище (P2) | новая форма получается в базу («требуется получение объектов»), но не захватывается; удалённая в хранилище форма — не проверено |
+| `-revised` | получает версию хранилища; повторный захват уже захваченного объекта перетирает непомещённые правки в базе |
+| `unlock` без `-force` при изменённом в базе объекте | rc=1 «Объект … был изменен», ничего не меняется |
+| `unlock -force` | объект в базе возвращается к версии хранилища |
+| Загрузка захваченного объекта в привязанную базу без аргументов `/ConfigurationRepository*` | проходит (база хранит признак захвата локально); с неверным пользователем хранилища — отказ |
