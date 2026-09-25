@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import type { ExtensionApi } from '../../extension';
 import type { CommandServices } from '../../ui/commands/_shared';
+import { type ConfigurationCommandOutcome, isConfigurationCommandSucceeded } from '../../ui/commands/ext/configurationCommandOutcome';
 import type { ChildTag } from '../../domain/ChildTag';
 import { META_TYPES, getMetaFolder, type MetaKind } from '../../domain/MetaTypes';
 import { ObjectXmlReader } from '../../infra/xml/ObjectXmlReader';
@@ -150,7 +151,9 @@ function objectXmlPath(kind: MetaKind, name: string): string {
 }
 
 async function loadIntoBase(): Promise<boolean> {
-  return (await vscode.commands.executeCommand('v8vscedit.updateChangedConfigurations')) === true;
+  return isConfigurationCommandSucceeded(
+    await vscode.commands.executeCommand<ConfigurationCommandOutcome>('v8vscedit.updateChangedConfigurations')
+  );
 }
 
 function ensureReady(ctx: Mocha.Context): CommandServices | null {

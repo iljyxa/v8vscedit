@@ -37,7 +37,7 @@ import {
 // 3. `src/ui/commands/ext/ExtensionCommands.ts` — тело команды
 //    `v8vscedit.connectExtension` проверяется интеграционно в
 //    `configurationOperationGuardCommands.test.ts` (suite issue #38): запрос
-//    списка расширений и декомпиляция внедряются через `ConnectExtensionDeps`,
+//    списка расширений и декомпиляция внедряются через `ExtensionCommandsDeps`,
 //    QuickPick подменяется, поэтому там проверяется судьба каталога
 //    `src/cfe/<имя>` и захват общего guard'а без процесса Конфигуратора.
 //

@@ -10,6 +10,10 @@ export interface ConfigurationOperationLease {
   release(): void;
 }
 
+export type ConfigurationOperationAcquireResult =
+  | { readonly acquired: true; readonly lease: ConfigurationOperationLease }
+  | { readonly acquired: false; readonly heldBy: string };
+
 export type ConfigurationOperationExclusiveResult<T> =
   | { readonly acquired: true; readonly value: T }
   | { readonly acquired: false; readonly heldBy: string };
@@ -41,10 +45,21 @@ export class ConfigurationOperationGuard {
    * поэтому две команды, стартовавшие в одном тике, не займут guard обе.
    */
   tryAcquire(operationTitle: string): ConfigurationOperationLease | undefined {
-    if (this.holder) {
-      return undefined;
+    const result = this.tryAcquireOrHeldBy(operationTitle);
+    return result.acquired ? result.lease : undefined;
+  }
+
+  /**
+   * Как `tryAcquire`, но при отказе сразу отдаёт держателя: повторное чтение
+   * `heldBy` после отказа формально может вернуть `undefined`, и вызывающему
+   * пришлось бы обрабатывать невозможную ветку.
+   */
+  tryAcquireOrHeldBy(operationTitle: string): ConfigurationOperationAcquireResult {
+    const current = this.holder;
+    if (current) {
+      return { acquired: false, heldBy: current.title };
     }
-    return this.acquire(operationTitle);
+    return { acquired: true, lease: this.acquire(operationTitle) };
   }
 
   async runExclusive<T>(

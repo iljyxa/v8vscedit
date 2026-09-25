@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { CommandServices } from '../_shared';
+import { type ConfigurationCommandOutcome, isConfigurationCommandSucceeded } from '../ext/configurationCommandOutcome';
 import { runDbClientFromWorkspace } from './DbRunCommandRunner';
 
 /** Регистрирует команды запуска 1С из настроек рабочей области. */
@@ -57,6 +58,6 @@ async function confirmUpdateBeforeThinClient(services: CommandServices): Promise
     return false;
   }
 
-  const updated = await vscode.commands.executeCommand<boolean>('v8vscedit.updateChangedConfigurations');
-  return updated;
+  const outcome = await vscode.commands.executeCommand<ConfigurationCommandOutcome>('v8vscedit.updateChangedConfigurations');
+  return isConfigurationCommandSucceeded(outcome);
 }
