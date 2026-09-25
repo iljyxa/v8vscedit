@@ -13,7 +13,6 @@ import {
   collectCurrentHashes,
   diffHashSnapshots,
   loadHashCache,
-  patchHashCacheForFiles,
   patchHashSnapshot,
   saveHashCache,
 } from '../cache/HashCache';
@@ -141,58 +140,6 @@ export class AgentOperationService {
       hooks?.onProjectFilesWillChange?.(changedProjectFiles);
       this.refreshCaches(target);
       return { changedProjectFiles };
-    });
-  }
-
-  /**
-   * Частичная выгрузка из БД в файлы по явному списку fullName объектов
-   * (`/DumpConfigToFiles ... -listFile`) — в отличие от {@link importFromDatabase},
-   * не переписывает всю конфигурацию, а трогает только запрошенные объекты.
-   *
-   * КРИТИЧНО: НЕ переиспользует общий workspace `ensureWorkspace(buildSessionKey(target), …)` —
-   * тот является персистентным зеркалом ВСЕЙ конфигурации, которое {@link importFromDatabase}/
-   * {@link loadChanged} поддерживают между вызовами специально для последующих частичных
-   * ЗАГРУЗОК (файлы→БД). Если частичная ВЫГРУЗКА (БД→файлы) писала бы в тот же каталог,
-   * `collectAllRelativeFiles` вернул бы не только реально выгруженные сейчас объекты, а
-   * весь ранее накопленный снимок — и {@link syncSelectedSnapshotFiles} переписал бы в
-   * проекте посторонние файлы устаревшим содержимым общего workspace. Поэтому здесь —
-   * отдельный одноразовый каталог, который создаётся пустым и удаляется по завершении.
-   */
-  async importPartialFromDatabase(
-    target: AgentConfigurationOperationTarget,
-    fullNames: readonly string[],
-    hooks?: AgentOperationHooks
-  ): Promise<AgentOperationResult> {
-    return this.runInfoBaseOperation(hooks, async () => {
-      const operationSessionId = `${buildSessionKey(target)}-partial-dump-${String(Date.now())}`;
-      const workspace = this.workspaceService.ensureWorkspace(operationSessionId, target);
-      try {
-        const listFile = this.workspaceService.writeObjectNamesFile(operationSessionId, fullNames);
-        const agentListFile = this.workspaceService.toAgentPath(listFile);
-
-        const command = buildDumpConfigToFilesCommand(workspace.targetAgentDir, {
-          extensionName: target.kind === 'cfe' ? target.extensionName ?? target.name : undefined,
-          format: 'hierarchical',
-          listFile: agentListFile,
-        });
-
-        await this.executeAgentCommand(command, hooks);
-        const relativeFiles = collectAllRelativeFiles(workspace.targetDir);
-        const changedProjectFiles = relativeFiles.map((relativeFile) => path.join(target.rootPath, relativeFile));
-        hooks?.onProjectFilesWillChange?.(changedProjectFiles);
-        syncSelectedSnapshotFiles(workspace.targetDir, target.rootPath, relativeFiles);
-        hooks?.onProjectFilesWillChange?.(changedProjectFiles);
-        // НЕ this.refreshCaches(target) — тот пересобирает хеш-кэш ПОЛНЫМ обходом
-        // всего target.rootPath (см. комментарий класса выше и аналогичный фикс в
-        // ExtensionCommandRunner.runBatchPartialDump). Здесь — точечный патч только
-        // по relativeFiles; кэш метаданных (дерево объектов) не трогаем — состав
-        // объектов от частичной выгрузки не меняется, меняется только их содержимое.
-        const extensionName = target.kind === 'cfe' ? target.extensionName ?? target.name : '';
-        patchHashCacheForFiles(this.projectRoot, target.kind, target.rootPath, extensionName, relativeFiles);
-        return { changedProjectFiles };
-      } finally {
-        fs.rmSync(workspace.workspaceRoot, { recursive: true, force: true });
-      }
     });
   }
 
