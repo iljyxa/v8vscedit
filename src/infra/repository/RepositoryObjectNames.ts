@@ -35,7 +35,7 @@ export const ONE_C_TYPE_NAMES: Partial<Record<MetaKind, string>> = {
   StyleItem: 'ЭлементСтиля',
   DefinedType: 'ОпределяемыйТип',
   FunctionalOption: 'ФункциональнаяОпция',
-  FunctionalOptionsParameter: 'ПараметрФункциональнойОпции',
+  FunctionalOptionsParameter: 'ПараметрФункциональныхОпций',
   SettingsStorage: 'ХранилищеНастроек',
   Style: 'Стиль',
   WSReference: 'WSСсылка',
