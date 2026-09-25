@@ -400,6 +400,37 @@ suite('RepositoryFileSyncShared — applyMergeWithPostMutation: childObjects/con
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });
+
+  test('conflict-write без локального файла (localHash:null) при choice="keep-local" — НЕ структурное изменение (created остаётся false)', async () => {
+    const harness = createHarness();
+    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-filesync-conflictwrite-keeplocal-'));
+    try {
+      fs.writeFileSync(path.join(dumpDir, 'Module.bsl'), 'версия хранилища', 'utf-8');
+      const source: PlannedMergeSource = {
+        dir: dumpDir,
+        entries: [],
+        plan: {
+          entries: [{ rel: 'Module.bsl', repositoryHash: 'hash-repo', localHash: null, baseHash: 'hash-base', action: 'conflict-write' }],
+          conflicts: [{ rel: 'Module.bsl', repositoryHash: 'hash-repo', localHash: null, baseHash: 'hash-base', action: 'conflict-write' }],
+          silent: [],
+          skipped: [],
+          hasConflicts: true,
+        },
+      };
+
+      const result = await applyMergeWithPostMutation(harness.services, {
+        target: harness.target,
+        sources: [source],
+        choice: 'keep-local',
+        backupDir: path.join(harness.workspaceRoot, 'backup'),
+      });
+
+      assert.strictEqual(result.merge.keptLocalFiles.length, 1);
+      assert.strictEqual(harness.reloadCalls, 0, 'localHash:null + choice="keep-local" не должно считаться появлением нового файла (created=false) — reloadEntries не нужен.');
+    } finally {
+      fs.rmSync(dumpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 suite('RepositoryFileSyncShared — reportMergeOutcome', () => {

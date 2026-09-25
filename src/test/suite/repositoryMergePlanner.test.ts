@@ -264,6 +264,37 @@ suite('RepositoryMergePlanner — collectMergeFileStates (реальная ФС)
     }
   });
 
+  test('раскладка выгрузки (deep) отличается от раскладки проекта (flat) — dumpRel заполняется отдельно от rel', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-layout-mismatch-dump-'));
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-layout-mismatch-project-'));
+    try {
+      writeConfigurationXml(tempDir, fixtureUuid('merge-layout-mismatch-dump-config'));
+      writeConfigurationXml(projectDir, fixtureUuid('merge-layout-mismatch-project-config'));
+      // Выгрузка — глубокая раскладка (Catalogs/Смешанный/Смешанный.xml), проект — плоская.
+      writeObjectXml(tempDir, 'Catalogs', 'Смешанный', 'Catalog', fixtureUuid('merge-layout-mismatch-object-dump'), 'deep');
+      writeObjectXml(projectDir, 'Catalogs', 'Смешанный', 'Catalog', fixtureUuid('merge-layout-mismatch-object-project'), 'flat');
+
+      const target: RepositoryTarget = { configRoot: projectDir, configKind: 'cf', displayName: 'Тест' };
+      const scope = resolveObjectScope(projectDir, 'Справочник.Смешанный', target) as Extract<ObjectScope, { kind: 'object' }>;
+
+      const states = collectMergeFileStates({
+        configRoot: projectDir,
+        dumpDir: tempDir,
+        scopes: [scope],
+        baseHashes: {},
+        dirtyRelativePaths: [],
+      });
+
+      const xmlState = states.find((s: MergeFileState) => s.rel.replace(/\\/g, '/') === 'Catalogs/Смешанный.xml');
+      assert.ok(xmlState, 'Состояние должно быть заведено под ПРОЕКТНЫМ (плоским) путём.');
+      assert.strictEqual(xmlState.dumpRel?.replace(/\\/g, '/'), 'Catalogs/Смешанный/Смешанный.xml', 'dumpRel обязан указывать на РЕАЛЬНЫЙ (глубокий) путь файла в выгрузке.');
+      assert.notStrictEqual(xmlState.repositoryHash, null, 'Файл выгрузки должен был найтись несмотря на разную раскладку.');
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   test('файл только в проекте (сирота относительно области выгрузки) — repositoryHash=null', () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-orphan-dump-'));
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-orphan-project-'));
