@@ -14,8 +14,7 @@ import { parseParentConfigurations, type ParentConfigurationsInfo } from './Pare
  *   - Locked — не редактируется.
  *
  * Числовые значения заморожены: они вшиты в суффикс contextValue `-support<n>`
- * (`MetadataTreeProvider`, разбор в `UniversalPanelViewProvider`) и в URI
- * декораций `onec-support:///<n>` (`SupportDecorationProvider`).
+ * (`MetadataTreeProvider`, разбор в `UniversalPanelViewProvider`).
  */
 export const enum SupportMode {
   None = 0,

@@ -238,9 +238,8 @@ uuid); `b` — смысл не установлен, парсер и `SupportInf
 'supportChangesForbidden'`), чтобы формулировка причины не разошлась между ними.
 
 Значения `SupportMode` (`None=0`, `Editable=1`, `Locked=2`) заморожены — они вшиты в суффикс
-`contextValue` вида `-support<n>` (`MetadataTreeProvider`, разбор в `UniversalPanelViewProvider`) и в
-URI декораций `onec-support:///<n>` (`SupportDecorationProvider`); менять числа нельзя, только состав
-таблицы `BIN_CODE_TO_MODE`.
+`contextValue` вида `-support<n>` (`MetadataTreeProvider`, разбор в `UniversalPanelViewProvider`);
+менять числа нельзя, только состав таблицы `BIN_CODE_TO_MODE`.
 
 Нераспознанный формат (нет заголовка, версия ≠ 6, флаг заголовка ∉ `{0,1}`) — не частичный разбор:
 `parseParentConfigurations` возвращает `{ ok: false, reason }`, `SupportInfoService.loadConfig`

@@ -414,30 +414,6 @@
         "title": "BSL Analyzer: Показать лог"
       },
       {
-        "command": "v8vscedit.support.none",
-        "title": "Не на поддержке",
-        "icon": {
-          "light": "./src/icons/light/support-none.svg",
-          "dark": "./src/icons/dark/support-none.svg"
-        }
-      },
-      {
-        "command": "v8vscedit.support.editable",
-        "title": "На поддержке, редактирование разрешено",
-        "icon": {
-          "light": "./src/icons/light/support-editable.svg",
-          "dark": "./src/icons/dark/support-editable.svg"
-        }
-      },
-      {
-        "command": "v8vscedit.support.locked",
-        "title": "На поддержке, редактирование запрещено",
-        "icon": {
-          "light": "./src/icons/light/support-locked.svg",
-          "dark": "./src/icons/dark/support-locked.svg"
-        }
-      },
-      {
         "command": "v8vscedit.repository.connect",
         "title": "Подключить к хранилищу",
         "icon": "$(plug)"
