@@ -12,7 +12,12 @@ import {
 } from '../../infra/cache/HashCache';
 import { buildMetadataCacheScopeKey, loadMetadataCache } from '../../infra/cache/MetadataCache';
 import { loadFileStatIndex, saveFileStatIndex } from '../../infra/cache/FileStatIndex';
-import { ConfigurationChangeDetector } from '../../infra/fs/ConfigurationChangeDetector';
+import {
+  ConfigurationChangeDetector,
+  formatChangeDetectorTiming,
+  type ChangeDetectorPhase,
+  type ChangeDetectorTiming,
+} from '../../infra/fs/ConfigurationChangeDetector';
 
 const EXAMPLE_CF = path.resolve(__dirname, '../../../example/2.20/src/cf');
 const EXAMPLE_CFE = path.resolve(__dirname, '../../../example/2.21/src/cfe/EVOLC');
@@ -356,4 +361,152 @@ suite('ConfigurationChangeDetector — минимальная временная
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });
+});
+
+/**
+ * Секундомер, сдвигающийся на шаг при каждом чтении: длительность фазы
+ * становится положительной и детерминированной без sleep.
+ */
+function steppingClock(stepMs: number): () => number {
+  let current = 0;
+  return () => {
+    current += stepMs;
+    return current;
+  };
+}
+
+suite('ConfigurationChangeDetector — тайминги фаз', () => {
+  const STEP_MS = 10;
+  // now детектора — эпоха для racy-окна stat-индекса, отдельно от секундомера замера.
+  const farFuture = Date.now() + 3_600_000;
+
+  function withMiniConfig(prefix: string, body: (tempRoot: string, entry: ConfigEntry) => void): void {
+    const tempRoot = mkTempRoot(prefix);
+    try {
+      const configDir = path.join(tempRoot, 'src', 'cf');
+      buildMiniConfig(configDir);
+      body(tempRoot, { rootPath: configDir, kind: 'cf' });
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  }
+
+  function assertMeasured(timing: ChangeDetectorTiming): void {
+    // Длительность берётся из внедрённых часов, поэтому она кратна шагу и не нулевая.
+    assert.ok(timing.durationMs > 0, `durationMs=${String(timing.durationMs)}`);
+    assert.strictEqual(timing.durationMs % STEP_MS, 0);
+  }
+
+  test('первый ensureCaches сообщает хеш-кэш (все файлы перехешированы) и кэш метаданных', () => {
+    withMiniConfig('v8-detector-timing-first-', (tempRoot, entry) => {
+      const timings: ChangeDetectorTiming[] = [];
+      const detector = new ConfigurationChangeDetector(tempRoot, () => farFuture, { report: (t) => timings.push(t), clock: steppingClock(STEP_MS) });
+      detector.ensureCaches([entry]);
+
+      assert.deepStrictEqual(timings.map((t) => t.phase), ['hash-cache', 'metadata-cache']);
+      for (const timing of timings) {
+        assert.strictEqual(timing.configurationName, 'ТестоваяКонфигурация');
+        assertMeasured(timing);
+      }
+      // Configuration.xml, Catalogs/Тест.xml и CommonModules/Модуль.bsl — поддерживаемые файлы.
+      assert.deepStrictEqual(timings[0].files, { total: 3, hashed: 3 });
+      assert.strictEqual(timings[1].files, undefined);
+    });
+  });
+
+  test('detect после ensureCaches сообщает проверку без перехеширования', () => {
+    withMiniConfig('v8-detector-timing-detect-', (tempRoot, entry) => {
+      const timings: ChangeDetectorTiming[] = [];
+      const detector = new ConfigurationChangeDetector(tempRoot, () => farFuture, { report: (t) => timings.push(t), clock: steppingClock(STEP_MS) });
+      detector.ensureCaches([entry]);
+      timings.length = 0;
+
+      assert.deepStrictEqual(detector.detect([entry]), []);
+
+      assert.strictEqual(timings.length, 1);
+      assert.strictEqual(timings[0].phase, 'detect');
+      assert.strictEqual(timings[0].configurationName, 'ТестоваяКонфигурация');
+      assert.deepStrictEqual(timings[0].files, { total: 3, hashed: 0 });
+      assertMeasured(timings[0]);
+    });
+  });
+
+  test('detect с изменённым файлом сообщает число перехешированных файлов', () => {
+    withMiniConfig('v8-detector-timing-changed-', (tempRoot, entry) => {
+      const timings: ChangeDetectorTiming[] = [];
+      const detector = new ConfigurationChangeDetector(tempRoot, () => farFuture, { report: (t) => timings.push(t), clock: steppingClock(STEP_MS) });
+      detector.ensureCaches([entry]);
+      timings.length = 0;
+
+      const target = path.join(entry.rootPath, 'CommonModules', 'Модуль.bsl');
+      fs.appendFileSync(target, '\n// правка', 'utf-8');
+      const changed = detector.detect([entry]);
+
+      assert.strictEqual(changed.length, 1);
+      assert.deepStrictEqual(timings.map((t) => t.files), [{ total: 3, hashed: 1 }]);
+    });
+  });
+
+  test('ensureCaches при готовых кэшах не сообщает фаз', () => {
+    withMiniConfig('v8-detector-timing-ready-', (tempRoot, entry) => {
+      const timings: ChangeDetectorTiming[] = [];
+      const detector = new ConfigurationChangeDetector(tempRoot, () => farFuture, { report: (t) => timings.push(t), clock: steppingClock(STEP_MS) });
+      detector.ensureCaches([entry]);
+      timings.length = 0;
+
+      assert.strictEqual(detector.ensureCaches([entry]), 0);
+      assert.deepStrictEqual(timings, []);
+    });
+  });
+
+  test('наблюдатель без своих часов меряет монотонным секундомером процесса', () => {
+    withMiniConfig('v8-detector-timing-default-clock-', (tempRoot, entry) => {
+      const timings: ChangeDetectorTiming[] = [];
+      const detector = new ConfigurationChangeDetector(tempRoot, () => farFuture, { report: (t) => timings.push(t) });
+      detector.ensureCaches([entry]);
+      detector.detect([entry]);
+
+      assert.deepStrictEqual(timings.map((t) => t.phase), ['hash-cache', 'metadata-cache', 'detect']);
+      for (const timing of timings) {
+        assert.ok(Number.isFinite(timing.durationMs) && timing.durationMs >= 0, `durationMs=${String(timing.durationMs)}`);
+      }
+    });
+  });
+
+  test('хеш-кэш есть, кэша метаданных нет: сообщается только кэш метаданных', () => {
+    withMiniConfig('v8-detector-timing-meta-only-', (tempRoot, entry) => {
+      saveHashCache(tempRoot, buildHashSnapshot(scopeKeyFor(entry), entry.rootPath));
+      const timings: ChangeDetectorTiming[] = [];
+      const detector = new ConfigurationChangeDetector(tempRoot, () => farFuture, { report: (t) => timings.push(t), clock: steppingClock(STEP_MS) });
+      detector.ensureCaches([entry]);
+
+      assert.deepStrictEqual(timings.map((t) => t.phase), ['metadata-cache']);
+      assertMeasured(timings[0]);
+    });
+  });
+});
+
+suite('formatChangeDetectorTiming', () => {
+  const cases: { phase: ChangeDetectorPhase; label: string }[] = [
+    { phase: 'hash-cache', label: 'хеш-кэш' },
+    { phase: 'metadata-cache', label: 'кэш метаданных' },
+    { phase: 'detect', label: 'проверка изменений' },
+  ];
+
+  for (const { phase, label } of cases) {
+    test(`${phase}: строка со статистикой файлов`, () => {
+      const line = formatChangeDetectorTiming({
+        phase,
+        configurationName: 'УТ',
+        durationMs: 1234.4,
+        files: { total: 59503, hashed: 12 },
+      });
+      assert.strictEqual(line, `[perf] ${label} «УТ»: 1234 мс (файлов 59503, перехешировано 12)`);
+    });
+
+    test(`${phase}: строка без статистики файлов`, () => {
+      const line = formatChangeDetectorTiming({ phase, configurationName: 'УТ', durationMs: 7 });
+      assert.strictEqual(line, `[perf] ${label} «УТ»: 7 мс`);
+    });
+  }
 });
