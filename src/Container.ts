@@ -3,7 +3,12 @@ import * as path from 'path';
 import * as fs from 'fs';
 import type { ConfigEntry } from './domain/Configuration';
 import { findConfigurations } from './infra/fs/ConfigLocator';
-import { type ChangedConfiguration, ConfigurationChangeDetector } from './infra/fs/ConfigurationChangeDetector';
+import {
+  type ChangedConfiguration,
+  ConfigurationChangeDetector,
+  formatChangeDetectorTiming,
+} from './infra/fs/ConfigurationChangeDetector';
+import { formatPerfLine, measurePerfPhase } from './infra/support/PerfLog';
 import { ConfigurationCleanWindow } from './infra/fs/ConfigurationCleanWindow';
 import { ConfigurationOperationGuard } from './infra/process/ConfigurationOperationGuard';
 import { MetadataTreeProvider } from './ui/tree/MetadataTreeProvider';
@@ -318,7 +323,9 @@ export class Container {
       this.dynamicPanelController
     );
     context.subscriptions.push(this.dynamicPanelController, this.dynamicPanelViewProvider);
-    this.changeDetector = new ConfigurationChangeDetector(workspaceFolder.uri.fsPath);
+    this.changeDetector = new ConfigurationChangeDetector(workspaceFolder.uri.fsPath, undefined, {
+      report: (timing) => this.outputChannel.appendLine(formatChangeDetectorTiming(timing)),
+    });
 
     this.lspManager = new LspManager(context, this.outputChannel);
     const extensionPackageJson = context.extension.packageJSON as { version?: string };
@@ -369,8 +376,11 @@ export class Container {
 
   /** Перечитывает список конфигураций в рабочей области */
   reloadEntries(): void {
+    const startedAt = performance.now();
     const rootPath = this.workspaceFolder.uri.fsPath;
-    const entries = findConfigurations(rootPath);
+    const entries = this.measurePhase('поиск конфигураций', () => findConfigurations(rootPath), (found) =>
+      `найдено ${String(found.length)}`
+    );
     // Пустой/отсутствующий env.json ломает чтение настроек хранилища и весь
     // навигатор. В реальном проекте (есть выгрузки) доинициализируем его тем же
     // шаблоном, что и при создании проекта.
@@ -378,20 +388,21 @@ export class Container {
       this.outputChannel.appendLine('[init] env.json отсутствовал или был пуст — создан из шаблона');
     }
     this.basedOnXmlService.invalidate();
-    // P2-замечание: ensureHashCaches при первом запуске может пересчитывать хеш-кэш
-    // целиком на потоке активации. Отложить его в microtask нельзя без регрессии —
+    // P2-замечание: ensureHashCaches хеширует выгрузку целиком на потоке активации
+    // только при первом запуске или потере stat-индекса; штатно это stat-проход с
+    // перехешированием лишь изменённых файлов. Отложить его в microtask нельзя без регрессии —
     // последующий refreshChangedConfigurationState() читает эти кэши через
     // changeDetector.detect(), а reloadEntries вызывается не только при bootstrap
     // (см. вызов из watcher'а), поэтому синхронная готовность здесь наблюдаема.
-    this.ensureHashCaches(entries);
+    this.measurePhase('подготовка кэшей', () => this.ensureHashCaches(entries));
     // Состав корней конфигураций мог измениться (новая cfe / переименование),
     // поэтому кэш `findConfigRoot` нужно сбросить до перестроения дерева.
     this.repositoryService.invalidateConfigRootCache();
-    this.treeProvider.updateEntries(entries);
+    this.measurePhase('дерево метаданных', () => this.treeProvider.updateEntries(entries));
     // Состав корней выгрузки мог измениться — синхронизируем представление
     // изменений (заодно пересчитывается его модель git-статуса).
     this.changesConfigRoots = entries;
-    this.metadataChangesViewProvider.updateConfigRoots();
+    this.measurePhase('панель изменений', () => this.metadataChangesViewProvider.updateConfigRoots());
     if (this.isProjectInitialized()) {
       this.bslAnalyzerConfigService.ensureExists(getExtensionRootPaths(entries));
     }
@@ -399,6 +410,15 @@ export class Container {
     const hasCfe = entries.some((e) => e.kind === 'cfe');
     void vscode.commands.executeCommand('setContext', 'v8vscedit.hasCfeEntries', hasCfe);
     this.outputChannel.appendLine(`[init] Найдено конфигураций: ${String(entries.length)}`);
+    this.outputChannel.appendLine(formatPerfLine('перечитывание конфигураций, итого', performance.now() - startedAt));
+  }
+
+  /**
+   * Строка `[perf]` на синхронную фазу reloadEntries: по логу реальной выгрузки
+   * видно, что именно тормозит активацию (см. docs/architecture.md).
+   */
+  private measurePhase<T>(label: string, run: () => T, details?: (result: T) => string): T {
+    return measurePerfPhase(() => performance.now(), (line) => this.outputChannel.appendLine(line), label, run, details);
   }
 
   async deactivate(): Promise<void> {
@@ -714,8 +734,9 @@ export class Container {
     // События файлов, записанных самим импортом/обновлением, watcher доставляет с
     // задержкой — уже после markConfigurationsClean. Пока окно тишины открыто,
     // такое событие игнорируется целиком: хеш-кэш операция только что
-    // актуализировала, а полный пересчёт (detect обходит и хеширует всю выгрузку)
-    // на каждое из тысяч событий заблокировал бы Extension Host на минуты.
+    // актуализировала, а пересчёт detect (stat-проход по всей выгрузке, в худшем
+    // случае — без stat-индекса — ещё и хеширование каждого файла) на каждое из
+    // тысяч событий заблокировал бы Extension Host.
     // Единственный авторитетный пересчёт по окончании окна ставит markConfigurationsClean.
     if (uri && this.cleanWindow.isOpenFor(uri.fsPath)) {
       return;
