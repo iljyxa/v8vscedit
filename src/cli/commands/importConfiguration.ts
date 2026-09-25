@@ -7,6 +7,7 @@ import { createTempDir, printLogFile, runDesignerAndPrintResult, safeRemoveDir, 
 import { resolveConfigDir } from '../core/projectLayout';
 import type { CliArgs } from '../core/types';
 import { saveMetadataCacheForEntry } from '../../infra/cache/MetadataCache';
+import { mainConfigurationImportBlockReason } from '../../infra/support/SupportImportGuard';
 
 export async function importConfiguration(args: CliArgs): Promise<number> {
   const projectRoot = path.resolve(getString(args, 'ProjectRoot', process.cwd()));
@@ -33,8 +34,9 @@ export async function importConfiguration(args: CliArgs): Promise<number> {
   if (mode === 'Partial' && !files.trim() && !listFileFromArgs.trim()) {
     throw new Error('Error: -Files or -ListFile required for Partial mode');
   }
-  if (target !== 'cfe' && isConfigurationOnSupport(configDir)) {
-    throw new Error('Обновление основной конфигурации запрещено: конфигурация на поддержке');
+  const supportBlockReason = target === 'cfe' ? undefined : mainConfigurationImportBlockReason(configDir);
+  if (supportBlockReason) {
+    throw new Error(`Обновление основной конфигурации запрещено: ${supportBlockReason}`);
   }
 
   const tempDir = createTempDir('db_load_xml_');
@@ -88,10 +90,6 @@ export async function importConfiguration(args: CliArgs): Promise<number> {
   } finally {
     safeRemoveDir(tempDir);
   }
-}
-
-function isConfigurationOnSupport(configDir: string): boolean {
-  return fs.existsSync(path.join(configDir, 'Ext', 'ParentConfigurations.bin'));
 }
 
 function refreshHashCacheAfterImport(
