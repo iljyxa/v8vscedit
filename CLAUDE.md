@@ -152,12 +152,16 @@ src/
 │   ├── fs/
 │   │   ├── ConfigLocator.ts          # рекурсивный поиск Configuration.xml
 │   │   ├── MetaPathResolver.ts       # единый resolver: XML + все модули по ModuleSlot
-│   │   └── ConfigurationCleanWindow.ts # окно тишины по корню конфигурации после
-│   │                                  # импорта/обновления БД (Container.markConfigurationsClean,
-│   │                                  # см. docs/architecture.md)
+│   │   ├── ConfigurationCleanWindow.ts # окно тишины по корню конфигурации после
+│   │   │                              # импорта/обновления БД (Container.markConfigurationsClean,
+│   │   │                              # см. docs/architecture.md)
+│   │   └── AtomicFileWrite.ts        # writeFileAtomicSync — общая атомарная запись
+│   │                                  # служебных кэшей (tmp+rename), см. cache/ ниже
 │   ├── cfe/                          # расширения: CfeBorrowService, CfeDiffService, CfePatchMethodService
 │   ├── support/                      # SupportInfoReader/Service (ParentConfigurations.bin), Logger
-│   ├── cache/                        # MetadataCache, hashCache (CLI)
+│   ├── cache/                        # MetadataCache, hashCache (CLI), FileStatIndex — stat-индекс
+│   │                                  # рабочего дерева (ускоритель ConfigurationChangeDetector, не
+│   │                                  # источник правды), см. docs/architecture.md
 │   ├── repository/                   # хранилище 1С, локальные захваты
 │   ├── git/                          # статус Git для узлов метаданных (GitMetadataStatusService,
 │   │                                  # декорации) + представление «Изменения метаданных»
