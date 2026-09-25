@@ -2,11 +2,10 @@
 import * as vscode from 'vscode';
 import type { RepositoryBinding, RepositoryNodeRef, RepositoryService, RepositoryTarget } from '../../../infra/repository/RepositoryService';
 import type { CommandServices, NodeArg } from '../_shared';
-import {
-  runDecompileExtension,
-  runDecompileMainConfiguration,
-  runPartialImportFromDatabase,
-} from '../ext/ExtensionCommandRunner';
+import { runDecompileExtension, runDecompileMainConfiguration } from '../ext/ExtensionCommandRunner';
+import { dumpConfigurationToTemp } from '../ext/ConfigurationDumpRunner';
+import { syncSelectedSnapshotFiles } from '../../../infra/agent/DirectorySnapshot';
+import { patchHashCacheForFiles } from '../../../infra/cache/HashCache';
 import {
   ensureTargetUpdatedBeforeCommit,
   refreshRepositoryUi,
@@ -661,22 +660,32 @@ async function runFileSyncAfterLockOrUpdate(
     }
 
     if (plan.fullNames.length > 0) {
-      const dumped = await runPartialImportFromDatabase(
+      const dumped = await dumpConfigurationToTemp(
         {
           kind: target.configKind,
           name: target.displayName,
           rootPath: target.configRoot,
           extensionName: target.extensionName,
         },
-        plan.fullNames,
+        { mode: 'partial', fullNames: plan.fullNames },
         services.workspaceFolder,
-        services.outputChannel,
-        hooks
+        services.outputChannel
       );
-      if (dumped) {
-        await services.reloadEntries();
-        services.refreshActionsView();
+      if (!dumped.ok) {
+        throw new Error(dumped.reason);
       }
+      try {
+        // Временно — прежнее прямое копирование выгрузки поверх проекта; слияние с
+        // диалогом конфликтов подключается при переводе команды на RepositoryLockSync.
+        const relativeFiles = dumped.handle.relativeFiles.filter((relativeFile) => relativeFile !== 'ConfigDumpInfo.xml');
+        hooks.beforeProjectFilesChanged(relativeFiles.map((relativeFile) => path.join(target.configRoot, relativeFile)));
+        syncSelectedSnapshotFiles(dumped.handle.dir, target.configRoot, relativeFiles);
+        patchHashCacheForFiles(services.workspaceFolder.uri.fsPath, target.configKind, target.configRoot, target.extensionName ?? '', relativeFiles);
+      } finally {
+        dumped.handle.dispose();
+      }
+      await services.reloadEntries();
+      services.refreshActionsView();
     }
 
     if (plan.fullNames.length > 1) {

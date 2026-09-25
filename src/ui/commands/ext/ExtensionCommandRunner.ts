@@ -22,8 +22,6 @@ import {
   runProcess,
 } from '../../../infra/process';
 import { readExtensionListFromDumpFile, resolveDbPassword, type ProjectSecretStorage } from '../../../infra/environment';
-import { collectAllRelativeFiles, syncSelectedSnapshotFiles } from '../../../infra/agent/DirectorySnapshot';
-import { patchHashCacheForFiles } from '../../../infra/cache/HashCache';
 
 type NodeArg = MetadataNode | { xmlPath?: string; nodeKind?: string; label?: string };
 
@@ -318,117 +316,6 @@ export async function runDecompileMainConfiguration(
       );
     }
   );
-}
-
-/**
- * Частичная выгрузка из БД в файлы по явному списку fullName объектов (в отличие
- * от {@link runDecompileMainConfiguration}/{@link runDecompileExtension}, которые
- * всегда выгружают конфигурацию/расширение целиком). Используется после
- * захвата/получения объектов хранилища — см. `RepositoryCommandRunner.ts`.
- * Диспетчеризует между batch- и agent-режимом так же, как полный импорт.
- */
-export async function runPartialImportFromDatabase(
-  target: { kind: 'cf' | 'cfe'; name: string; rootPath: string; extensionName?: string },
-  fullNames: readonly string[],
-  workspaceFolder: vscode.WorkspaceFolder,
-  outputChannel: vscode.OutputChannel,
-  hooks?: ConfigurationImportHooks
-): Promise<boolean> {
-  if (fullNames.length === 0) {
-    return true;
-  }
-
-  if (!isAgentConfigurationOperationMode()) {
-    return runBatchPartialDump(target, fullNames, workspaceFolder, outputChannel, hooks);
-  }
-
-  return runAgentConfigurationOperation(
-    {
-      progressTitle: `Импорт захваченных объектов «${target.name}» во внутренний XML`,
-      progressStartMessage: 'Импорт захваченных объектов через агент...',
-      successMessage: `Объекты «${target.name}» (${String(fullNames.length)}) импортированы из базы.`,
-      errorTitle: `Ошибка импорта захваченных объектов «${target.name}».`,
-      showSuccessMessage: false,
-      workspaceFolder,
-      outputChannel,
-      hooks,
-      rootPath: target.rootPath,
-    },
-    async (service, operationHooks) => {
-      await service.importPartialFromDatabase(
-        { kind: target.kind, name: target.name, rootPath: target.rootPath, extensionName: target.extensionName },
-        fullNames,
-        operationHooks
-      );
-    }
-  );
-}
-
-async function runBatchPartialDump(
-  target: { kind: 'cf' | 'cfe'; name: string; rootPath: string; extensionName?: string },
-  fullNames: readonly string[],
-  workspaceFolder: vscode.WorkspaceFolder,
-  outputChannel: vscode.OutputChannel,
-  hooks?: ConfigurationImportHooks
-): Promise<boolean> {
-  const settingsPath = resolveSettingsPath(workspaceFolder.uri.fsPath, target.rootPath);
-  const connection = await resolveConnectionFromSettings(settingsPath);
-  const tempRoot = createWorkspaceTempDir(workspaceFolder.uri.fsPath, 'import-partial-');
-  const tempConfigDir = path.join(tempRoot, target.kind);
-  fs.mkdirSync(tempConfigDir, { recursive: true });
-  const cliArgs = [
-    'export-configuration',
-    '-ProjectRoot',
-    workspaceFolder.uri.fsPath,
-    '-Target',
-    target.kind,
-    '-ConfigDir',
-    tempConfigDir,
-    '-Mode',
-    'Partial',
-    '-Objects',
-    fullNames.join(','),
-    ...(target.kind === 'cfe' && target.extensionName ? ['-Extension', target.extensionName] : []),
-    ...buildConnectionCliArgs(connection),
-  ];
-  try {
-    return await runInternalCliCommand(
-      {
-        cliArgs,
-        progressTitle: `Импорт захваченных объектов «${target.name}» во внутренний XML`,
-        progressStartMessage: `Импорт ${String(fullNames.length)} объект(ов) из базы во временный каталог...`,
-        successMessage: `Объекты «${target.name}» (${String(fullNames.length)}) импортированы из базы.`,
-        errorTitle: `Ошибка импорта захваченных объектов «${target.name}».`,
-        failureOperation: 'импорте захваченных объектов из базы',
-        logPrefix: 'export-configuration',
-        showSuccessMessage: false,
-        onProgressMessage: hooks?.onProgressMessage,
-        afterSuccess: async () => {
-          // Только реально появившиеся в temp-каталоге файлы — НЕ syncDirectorySnapshot,
-          // который зеркалирует и удалил бы из проекта всё, чего нет в частичном дампе
-          // (см. комментарий у collectAllRelativeFiles).
-          const relativeFiles = collectAllRelativeFiles(tempConfigDir);
-          const changedProjectFiles = relativeFiles.map((relativeFile) => path.join(target.rootPath, relativeFile));
-          hooks?.onProgressMessage?.(`замена файлов частичной выгрузки: ${String(changedProjectFiles.length)}`);
-          hooks?.beforeProjectFilesChanged?.(changedProjectFiles);
-          await yieldToUi();
-          syncSelectedSnapshotFiles(tempConfigDir, target.rootPath, relativeFiles);
-          hooks?.beforeProjectFilesChanged?.(changedProjectFiles);
-          hooks?.onProgressMessage?.('обновление кэша хешей (точечно)');
-          // НЕ refreshConfigurationHashCache — тот пересобирает хеш-кэш ПОЛНЫМ обходом
-          // всего configRoot (десятки тысяч файлов), что сводит на нет весь смысл
-          // частичной выгрузки. Здесь хеш-кэш патчится только по реально изменённым
-          // файлам через ту же infra/cache/HashCache, что использует агентский
-          // инкрементальный путь (AgentOperationService.loadChanged).
-          patchHashCacheForFiles(workspaceFolder.uri.fsPath, target.kind, target.rootPath, target.extensionName ?? '', relativeFiles);
-        },
-      },
-      workspaceFolder,
-      outputChannel
-    );
-  } finally {
-    removeTempDir(tempRoot, outputChannel);
-  }
 }
 
 export async function runApplyDatabaseConfiguration(
@@ -2032,3 +1919,18 @@ function isRawAgentCommandMessage(message: string): boolean {
     /^выполнено:\s*(common|config|options|infobase-tools)\s+/.test(normalized) ||
     /^the operation is completed:\s*(common|config|options|infobase-tools)\s+/.test(normalized);
 }
+
+/**
+ * Порт запуска процессов конфигурации для соседних модулей (`ConfigurationDumpRunner`):
+ * они переиспользуют общий запуск CLI/агента, прогресс и разбор подключения, не
+ * дублируя их и не раздувая этот файл новыми сценариями.
+ */
+export const configurationProcessPort = {
+  runInternalCliCommand,
+  runAgentConfigurationOperation,
+  resolveSettingsPath,
+  resolveConnectionFromSettings,
+  buildConnectionCliArgs,
+  createWorkspaceTempDir,
+  removeTempDir,
+};
