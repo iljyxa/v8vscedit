@@ -34,6 +34,7 @@ import { extractChildMetaElementXml } from '../../../infra/xml';
 import type { RepositoryService } from '../../../infra/repository/RepositoryService';
 import type { SupportInfoService, SupportMode } from '../../../infra/support/SupportInfoService';
 import { getHandlerForNode } from '../../tree/nodeBuilders/index';
+import { CHANGES_FORBIDDEN_REASON } from '../../support/supportLockReason';
 import type {
   PropertyControl,
   PropertiesRenderContext,
@@ -66,6 +67,7 @@ import {
   resolveTypeTarget,
 } from './PropertiesTargetResolver';
 import {
+  isChangesForbiddenBySupport,
   isEditLockedByRepository,
   isEditLockedBySupport,
   resolveEditLockReason,
@@ -156,7 +158,7 @@ export class PropertiesViewController {
 
     let readonlyReason: PropertiesViewState['readonlyReason'];
     if (context.isEditLockedBySupport) {
-      readonlyReason = 'support';
+      readonlyReason = isChangesForbiddenBySupport(node, this.editLockDeps) ? 'supportChangesForbidden' : 'support';
     } else if (context.isEditLockedByRepository) {
       readonlyReason = 'repository';
     }
@@ -322,7 +324,11 @@ export class PropertiesViewController {
         msg.type === 'updateTypeQualifiers' ||
         msg.type === 'propertyChanged'
       ) {
-        void vscode.window.showWarningMessage('Редактирование свойств запрещено поддержкой для этого объекта.');
+        void vscode.window.showWarningMessage(
+          isChangesForbiddenBySupport(this.activeNode, this.editLockDeps)
+            ? `Редактирование свойств запрещено: ${CHANGES_FORBIDDEN_REASON}.`
+            : 'Редактирование свойств запрещено поддержкой для этого объекта.'
+        );
       }
       return;
     }

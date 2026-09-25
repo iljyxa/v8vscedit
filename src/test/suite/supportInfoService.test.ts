@@ -17,6 +17,7 @@ import {
   EXAMPLE_CF_ROOTS,
   CHANGES_FORBIDDEN_BIN_PATH,
   MALFORMED_BIN_CASES,
+  buildSupportFixtureRoot,
   firstAttributeUuid,
 } from './support/realConfigFixtures';
 
@@ -747,4 +748,183 @@ suite('SupportInfoService — BOM реального .bin', () => {
       });
     });
   }
+});
+
+/**
+ * Issue #22: при флаге «изменения запрещены» `getSupportMode` по-прежнему
+ * возвращает `Locked` для ЛЮБОГО файла (это не меняется — см. suite выше), но
+ * UI обязан различать ПРИЧИНУ блокировки (объект реально на поддержке vs вся
+ * конфигурация закрыта флагом настроек поддержки). `hasChangesForbidden` —
+ * новый метод-предикат именно для этой причины, независимый от резолвинга
+ * uuid/XML-владельца: при установленном флаге результат `true` для ЛЮБОГО
+ * пути под корнем конфигурации, включая несуществующие файлы и BSL-модули без
+ * найденного владельца (симметрично с `getSupportMode`, который в этом случае
+ * тоже не пытается резолвить XML).
+ */
+suite('SupportInfoService — hasChangesForbidden (issue #22)', () => {
+  test('forbidden: Configuration.xml, объекты трёх разных кодов, BSL без владельца, несуществующий путь под корнем → true', () => {
+    const fixture = buildSupportFixtureRoot('forbidden');
+    try {
+      const service = new SupportInfoService(new TestLogger());
+      service.loadConfig(fixture.configRoot);
+
+      assert.strictEqual(service.hasChangesForbidden(fixture.configurationXmlPath), true);
+      assert.strictEqual(service.hasChangesForbidden(fixture.kontragentyXmlPath), true, 'Контрагенты (a=2 вне запрета)');
+      assert.strictEqual(service.hasChangesForbidden(fixture.avansovyOtchetXmlPath), true, 'АвансовыйОтчет… (a=0 вне запрета)');
+      assert.strictEqual(service.hasChangesForbidden(fixture.prihodTovaraXmlPath), true, 'ПриходТовара (a=1 вне запрета)');
+
+      const bslPath = writeBslFile(path.join(fixture.configRoot, 'CommonModules', 'Нет', 'Ext', 'Module.bsl'));
+      assert.strictEqual(service.hasChangesForbidden(bslPath), true, 'BSL без владельца');
+
+      const missingXmlPath = path.join(fixture.configRoot, 'Catalogs', 'НеСуществующийСправочник.xml');
+      assert.strictEqual(service.hasChangesForbidden(missingXmlPath), true, 'несуществующий путь под корнем');
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  test('normal: те же пути → false', () => {
+    const fixture = buildSupportFixtureRoot('normal');
+    try {
+      const service = new SupportInfoService(new TestLogger());
+      service.loadConfig(fixture.configRoot);
+
+      assert.strictEqual(service.hasChangesForbidden(fixture.configurationXmlPath), false);
+      assert.strictEqual(service.hasChangesForbidden(fixture.kontragentyXmlPath), false);
+      assert.strictEqual(service.hasChangesForbidden(fixture.avansovyOtchetXmlPath), false);
+      assert.strictEqual(service.hasChangesForbidden(fixture.prihodTovaraXmlPath), false);
+
+      const bslPath = writeBslFile(path.join(fixture.configRoot, 'CommonModules', 'Нет', 'Ext', 'Module.bsl'));
+      assert.strictEqual(service.hasChangesForbidden(bslPath), false);
+
+      const missingXmlPath = path.join(fixture.configRoot, 'Catalogs', 'НеСуществующийСправочник.xml');
+      assert.strictEqual(service.hasChangesForbidden(missingXmlPath), false);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  test('путь вне корня конфигурации → false, даже если сама конфигурация с флагом запрета', () => {
+    const fixture = buildSupportFixtureRoot('forbidden');
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-support-forbidden-outside-'));
+    try {
+      const service = new SupportInfoService(new TestLogger());
+      service.loadConfig(fixture.configRoot);
+
+      const outsidePath = writeBslFile(path.join(outsideDir, 'CommonModules', 'X', 'Ext', 'Module.bsl'));
+      assert.strictEqual(service.hasChangesForbidden(outsidePath), false);
+    } finally {
+      fixture.dispose();
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  test('конфигурация без ParentConfigurations.bin → false', () => {
+    withConfigRoot((configRoot) => {
+      writeConfigurationXml(configRoot, fixtureUuid('has-changes-forbidden-no-bin'));
+
+      const service = new SupportInfoService(new TestLogger());
+      service.loadConfig(configRoot);
+
+      assert.strictEqual(service.hasChangesForbidden(path.join(configRoot, 'Configuration.xml')), false);
+    });
+  });
+
+  for (const { label, text } of MALFORMED_BIN_CASES) {
+    test(`нераспознанный ParentConfigurations.bin (${label}) → false`, () => {
+      withConfigRoot((configRoot) => {
+        writeConfigurationXml(configRoot, fixtureUuid(`has-changes-forbidden-malformed-${label}`));
+        fs.mkdirSync(path.join(configRoot, 'Ext'), { recursive: true });
+        fs.writeFileSync(path.join(configRoot, 'Ext', 'ParentConfigurations.bin'), text, 'utf-8');
+
+        const service = new SupportInfoService(new TestLogger());
+        service.loadConfig(configRoot);
+
+        assert.strictEqual(service.hasChangesForbidden(path.join(configRoot, 'Configuration.xml')), false);
+      });
+    });
+  }
+
+  test('invalidate сбрасывает флаг запрета изменений в false', () => {
+    const fixture = buildSupportFixtureRoot('forbidden');
+    try {
+      const service = new SupportInfoService(new TestLogger());
+      service.loadConfig(fixture.configRoot);
+      assert.strictEqual(service.hasChangesForbidden(fixture.configurationXmlPath), true);
+
+      service.invalidate(fixture.configRoot);
+
+      assert.strictEqual(service.hasChangesForbidden(fixture.configurationXmlPath), false);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  test('переход 0 → 1: перезапись .bin с выставленным флагом делает hasChangesForbidden true', () => {
+    withConfigRoot((configRoot) => {
+      const objectUuid = fixtureUuid('has-changes-forbidden-0-to-1-object');
+      writeConfigurationXml(configRoot, fixtureUuid('has-changes-forbidden-0-to-1-config'));
+      const xmlPath = writeObjectXml(configRoot, 'Catalogs', 'Об1', 'Catalog', objectUuid, 'flat');
+      writeParentConfigurationsBin(configRoot, new Map([[objectUuid, SUPPORT_BIN_CODE.editable]]), {
+        changesForbidden: false,
+      });
+
+      const service = new SupportInfoService(new TestLogger());
+      service.loadConfig(configRoot);
+      assert.strictEqual(service.hasChangesForbidden(xmlPath), false);
+
+      writeParentConfigurationsBin(configRoot, new Map([[objectUuid, SUPPORT_BIN_CODE.editable]]), {
+        changesForbidden: true,
+      });
+      service.loadConfig(configRoot);
+
+      assert.strictEqual(service.hasChangesForbidden(xmlPath), true);
+    });
+  });
+
+  test('переход 1 → 0: перезапись .bin со снятым флагом делает hasChangesForbidden false', () => {
+    withConfigRoot((configRoot) => {
+      const objectUuid = fixtureUuid('has-changes-forbidden-1-to-0-object');
+      writeConfigurationXml(configRoot, fixtureUuid('has-changes-forbidden-1-to-0-config'));
+      const xmlPath = writeObjectXml(configRoot, 'Catalogs', 'Об1', 'Catalog', objectUuid, 'flat');
+      writeParentConfigurationsBin(configRoot, new Map([[objectUuid, SUPPORT_BIN_CODE.editable]]), {
+        changesForbidden: true,
+      });
+
+      const service = new SupportInfoService(new TestLogger());
+      service.loadConfig(configRoot);
+      assert.strictEqual(service.hasChangesForbidden(xmlPath), true);
+
+      writeParentConfigurationsBin(configRoot, new Map([[objectUuid, SUPPORT_BIN_CODE.editable]]), {
+        changesForbidden: false,
+      });
+      service.loadConfig(configRoot);
+
+      assert.strictEqual(service.hasChangesForbidden(xmlPath), false);
+    });
+  });
+
+  test('регрессия: hasConfigData не зависит от hasChangesForbidden — true и при forbidden, и при normal, false без .bin', () => {
+    const forbidden = buildSupportFixtureRoot('forbidden');
+    const normal = buildSupportFixtureRoot('normal');
+    try {
+      const serviceForbidden = new SupportInfoService(new TestLogger());
+      serviceForbidden.loadConfig(forbidden.configRoot);
+      assert.strictEqual(serviceForbidden.hasConfigData(forbidden.configurationXmlPath), true);
+
+      const serviceNormal = new SupportInfoService(new TestLogger());
+      serviceNormal.loadConfig(normal.configRoot);
+      assert.strictEqual(serviceNormal.hasConfigData(normal.configurationXmlPath), true);
+    } finally {
+      forbidden.dispose();
+      normal.dispose();
+    }
+
+    withConfigRoot((configRoot) => {
+      writeConfigurationXml(configRoot, fixtureUuid('has-config-data-no-bin'));
+      const service = new SupportInfoService(new TestLogger());
+      service.loadConfig(configRoot);
+      assert.strictEqual(service.hasConfigData(path.join(configRoot, 'Configuration.xml')), false);
+    });
+  });
 });
