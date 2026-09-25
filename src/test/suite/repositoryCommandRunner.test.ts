@@ -6,7 +6,11 @@ import * as vscode from 'vscode';
 import {
   buildCommandDesignerArgs,
   buildLockExtraArgs,
+  buildRepositoryCommitRequest,
+  buildRepositoryUnlockRequest,
+  buildRepositoryUpdateRequest,
   executeRepositoryCli,
+  runRepositoryCliCommand,
   type RepositoryCliServices,
 } from '../../ui/commands/repository/RepositoryCommandRunner';
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
@@ -126,6 +130,52 @@ suite('RepositoryCommandRunner — buildCommandDesignerArgs: unlock/update/commi
   });
 });
 
+suite('RepositoryCommandRunner — build*Request: обе стороны ternary-веток по force/comment', () => {
+  const target: RepositoryTarget = { configRoot: '/tmp/repo', configKind: 'cf', displayName: 'Тест' };
+
+  [false, true].forEach((force) => {
+    test(`buildRepositoryUnlockRequest: force=${String(force)}`, () => {
+      const request = buildRepositoryUnlockRequest(target, '/tmp/o.xml', 'Товары', force);
+      const expected = ['-ObjectsFile', '/tmp/o.xml', ...(force ? ['-Force'] : [])];
+      assert.deepStrictEqual(request.extraArgs, expected);
+      assert.deepStrictEqual(
+        buildCommandDesignerArgs('repository-unlock', request.extraArgs),
+        ['/ConfigurationRepositoryUnLock', '-Objects', '/tmp/o.xml', ...(force ? ['-force'] : [])]
+      );
+    });
+  });
+
+  [
+    { version: undefined, force: false },
+    { version: '125', force: true },
+  ].forEach(({ version, force }) => {
+    test(`buildRepositoryUpdateRequest: version=${String(version)}, force=${String(force)}`, () => {
+      const request = buildRepositoryUpdateRequest(target, '/tmp/o.xml', 'Товары', { version, force });
+      const expected = ['-ObjectsFile', '/tmp/o.xml', ...(version ? ['-Version', version] : []), ...(force ? ['-Force'] : [])];
+      assert.deepStrictEqual(request.extraArgs, expected);
+    });
+  });
+
+  [
+    { comment: '', force: false },
+    { comment: 'Комментарий', force: true },
+  ].forEach(({ comment, force }) => {
+    test(`buildRepositoryCommitRequest: comment=${JSON.stringify(comment)}, force=${String(force)}`, () => {
+      const request = buildRepositoryCommitRequest(target, '/tmp/o.xml', 'Товары', { comment, keepLocked: false, force });
+      const expected = [
+        '-ObjectsFile', '/tmp/o.xml',
+        ...(comment ? ['-Comment', comment] : []),
+        ...(force ? ['-Force'] : []),
+      ];
+      assert.deepStrictEqual(request.extraArgs, expected);
+      assert.deepStrictEqual(
+        buildCommandDesignerArgs('repository-commit', request.extraArgs),
+        ['/ConfigurationRepositoryCommit', '-Objects', '/tmp/o.xml', ...(comment ? ['-comment', comment] : []), ...(force ? ['-force'] : [])]
+      );
+    });
+  });
+});
+
 suite('RepositoryCommandRunner — executeRepositoryCli: гарантированно детерминированные failure-ветки (без реального процесса 1С)', () => {
   let workspaceRoot: string;
   let repositoryService: RepositoryService;
@@ -142,7 +192,9 @@ suite('RepositoryCommandRunner — executeRepositoryCli: гарантирова�
       workspaceFolder: { uri: vscode.Uri.file(workspaceRoot), name: 'test', index: 0 },
       outputChannel: { appendLine: () => undefined } as unknown as vscode.OutputChannel,
       repositoryService,
-      projectSecretStorage: {} as unknown as ProjectSecretStorage,
+      // Реальный ProjectSecretStorage (не пустая заглушка): часть тестов в этом файле
+      // доходит до resolveDbPassword(), которому нужен настоящий метод getDbPassword().
+      projectSecretStorage: new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot),
     };
     errorMessageCalls = [];
     originalShowErrorMessage = vscode.window.showErrorMessage;
@@ -172,5 +224,114 @@ suite('RepositoryCommandRunner — executeRepositoryCli: гарантирова�
     );
     assert.strictEqual(result.status, 'failed');
     assert.deepStrictEqual(errorMessageCalls, []);
+  });
+
+  test('env.json есть (--ibconnection валиден), но нет привязки к хранилищу (нет --repo-path) → {status:"failed"} с сообщением о привязке', async () => {
+    fs.writeFileSync(
+      path.join(workspaceRoot, 'env.json'),
+      JSON.stringify({ default: { '--ibconnection': '/FC:\\Fake\\Base' } }),
+      'utf-8'
+    );
+
+    const result = await executeRepositoryCli(
+      { command: 'repository-lock', target, extraArgs: buildLockExtraArgs('/tmp/objects.xml') },
+      services
+    );
+
+    assert.strictEqual(result.status, 'failed');
+    assert.ok('message' in result && result.message.includes('не настроено подключение к хранилищу в env.json'));
+    assert.deepStrictEqual(errorMessageCalls, []);
+  });
+
+  [
+    { label: 'cf (без -Extension)', configKind: 'cf' as const, extensionName: undefined },
+    { label: 'cfe (с -Extension)', configKind: 'cfe' as const, extensionName: 'EVOLC' },
+  ].forEach(({ label, configKind, extensionName }) => {
+    test(`env.json с привязкой есть, платформа 1С не установлена (${label}) → аргументы Конфигуратора собираются (includeChildObjects/-Extension), сбой только на поиске платформы`, async () => {
+      const defaults: Record<string, unknown> = { '--ibconnection': '/FC:\\Fake\\Base' };
+      if (extensionName) {
+        // Привязка расширения хранится в собственной секции env.json (RepositoryBindingStore.saveBinding).
+        defaults.extension = { [extensionName]: { 'repo-path': 'http://fake-repo', 'repo-user': 'Administrator' } };
+      } else {
+        defaults['--repo-path'] = 'http://fake-repo';
+        defaults['--repo-user'] = 'Administrator';
+      }
+      fs.writeFileSync(path.join(workspaceRoot, 'env.json'), JSON.stringify({ default: defaults }), 'utf-8');
+      const bindingTarget: RepositoryTarget = { configRoot: target.configRoot, configKind, extensionName, displayName: 'Тест' };
+
+      const result = await executeRepositoryCli(
+        { command: 'repository-lock', target: bindingTarget, extraArgs: buildLockExtraArgs('/tmp/objects.xml') },
+        services
+      );
+
+      // Тестовое окружение заведомо без установленной платформы 1С — единственный
+      // детерминированный исход дальше сборки аргументов (сам запуск процесса — c8 ignore).
+      assert.strictEqual(result.status, 'failed');
+      assert.ok('message' in result && result.message.includes('Не найден исполняемый файл 1С'));
+    });
+  });
+});
+
+suite('RepositoryCommandRunner — runRepositoryCliCommand: обёртка с UI-реакцией', () => {
+  let workspaceRoot: string;
+  let repositoryService: RepositoryService;
+  let target: RepositoryTarget;
+  let services: RepositoryCliServices;
+  let errorMessageCalls: unknown[][];
+  let originalShowErrorMessage: typeof vscode.window.showErrorMessage;
+
+  setup(() => {
+    workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-runclicmd-'));
+    repositoryService = new RepositoryService(workspaceRoot, new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot));
+    target = { configRoot: path.join(workspaceRoot, 'src', 'cf'), configKind: 'cf', displayName: 'Тест' };
+    services = {
+      workspaceFolder: { uri: vscode.Uri.file(workspaceRoot), name: 'test', index: 0 },
+      outputChannel: { appendLine: () => undefined } as unknown as vscode.OutputChannel,
+      repositoryService,
+      // Реальный ProjectSecretStorage (не пустая заглушка): часть тестов в этом файле
+      // доходит до resolveDbPassword(), которому нужен настоящий метод getDbPassword().
+      projectSecretStorage: new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot),
+    };
+    errorMessageCalls = [];
+    originalShowErrorMessage = vscode.window.showErrorMessage;
+    (vscode.window as { showErrorMessage: typeof vscode.window.showErrorMessage }).showErrorMessage = (...args: unknown[]) => {
+      errorMessageCalls.push(args);
+      return Promise.resolve(undefined);
+    };
+  });
+
+  teardown(() => {
+    (vscode.window as { showErrorMessage: typeof vscode.window.showErrorMessage }).showErrorMessage = originalShowErrorMessage;
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  });
+
+  /**
+   * `runRepositoryCliCommand` — единственная точка входа для команд ВНЕ guard'а
+   * (bind/create/unbind/dump/report/users/label). Ветки `status:"interrupted"` и
+   * успешный путь (`afterSuccess`/`showSuccessMessage`) зависят от того, что
+   * `executeRepositoryCli` вернёт статус "done" либо "interrupted" — а это способен
+   * дать только реальный запуск Конфигуратора внутри runRepositoryDesigner
+   * (помечена c8-ignore, недоступна в тестовом окружении без платформы 1С).
+   * Поэтому здесь детерминированно и без реального процесса проверяется только
+   * ветка "failed" — остальные две задокументированы как остаток в итоговом
+   * отчёте test-writer.
+   */
+  test('executeRepositoryCli вернул {status:"failed"} (нет env.json) → showErrorMessage с errorTitle, возвращает false', async () => {
+    const result = await runRepositoryCliCommand(
+      {
+        command: 'repository-lock',
+        target,
+        extraArgs: buildLockExtraArgs('/tmp/objects.xml'),
+        progressTitle: 'Захват',
+        progressStartMessage: 'Захват...',
+        successMessage: 'Готово',
+        errorTitle: 'Ошибка захвата',
+      },
+      services
+    );
+
+    assert.strictEqual(result, false);
+    assert.strictEqual(errorMessageCalls.length, 1);
+    assert.ok(String(errorMessageCalls[0][0]).startsWith('Ошибка захвата\n'));
   });
 });

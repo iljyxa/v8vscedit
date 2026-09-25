@@ -9,6 +9,7 @@ import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOp
 import { RepositoryService, type RepositoryNodeRef, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import { resolveObjectScope, type ObjectScope } from '../../infra/repository/RepositoryObjectScope';
+import { buildScopeKey, computeFileHash, saveHashCache } from '../../infra/cache/HashCache';
 import type { ConfigurationDumpRequest } from '../../infra/agent';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import type { MetadataTreeProvider } from '../../ui/tree/MetadataTreeProvider';
@@ -348,11 +349,11 @@ suite('RepositoryUnlockSync — корень рекурсивно с хеш-ма
   });
 });
 
-suite('RepositoryUnlockSync — runRepositoryCommitFlow', () => {
-  function formData(overrides: Partial<{ recursive: boolean; comment: string; keepLocked: boolean; force: boolean }> = {}) {
-    return { recursive: false, comment: 'Комментарий помещения', keepLocked: false, force: false, ...overrides };
-  }
+function formData(overrides: Partial<{ recursive: boolean; comment: string; keepLocked: boolean; force: boolean }> = {}) {
+  return { recursive: false, comment: 'Комментарий помещения', keepLocked: false, force: false, ...overrides };
+}
 
+suite('RepositoryUnlockSync — runRepositoryCommitFlow', () => {
   test('guard занят — busy, CLI не вызывается', async () => {
     const harness = createHarness();
     const node = catalogNode(harness, 'Товары');
@@ -396,5 +397,227 @@ suite('RepositoryUnlockSync — runRepositoryCommitFlow', () => {
 
     assert.strictEqual(outcome, 'done');
     assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Товары'), false);
+  });
+});
+
+suite('RepositoryUnlockSync — узел без валидной цели', () => {
+  test('runRepositoryUnlockFlow: xmlPath не резолвится — outcome "failed"', async () => {
+    const harness = createHarness();
+    const node: RepositoryNodeRef = { nodeKind: 'Catalog', label: 'Товары', xmlPath: path.join(harness.workspaceRoot, 'нет', 'Товары.xml') };
+    let notifyErrorCalls = 0;
+    const deps = baseDeps({ notifyError: () => { notifyErrorCalls += 1; } });
+
+    const outcome = await runRepositoryUnlockFlow(node, { recursive: false, force: false }, harness.services, deps);
+
+    assert.strictEqual(outcome, 'failed');
+    assert.strictEqual(notifyErrorCalls, 1);
+  });
+
+  test('runRepositoryCommitFlow: xmlPath не резолвится — outcome "failed"', async () => {
+    const harness = createHarness();
+    const node: RepositoryNodeRef = { nodeKind: 'Catalog', label: 'Товары', xmlPath: path.join(harness.workspaceRoot, 'нет', 'Товары.xml') };
+    const deps = baseDeps();
+
+    const outcome = await runRepositoryCommitFlow(node, formData(), harness.services, deps);
+
+    assert.strictEqual(outcome, 'failed');
+  });
+
+  test('node.label не задан — fullName резолвится из <Name> XML объекта', async () => {
+    const harness = createHarness();
+    const xmlPath = path.join(harness.configRoot, 'Catalogs', 'Товары.xml');
+    fs.mkdirSync(path.dirname(xmlPath), { recursive: true });
+    fs.writeFileSync(xmlPath, '<MetaDataObject><Catalog><Properties><Name>Товары</Name></Properties></Catalog></MetaDataObject>', 'utf-8');
+    const node: RepositoryNodeRef = { nodeKind: 'Catalog', xmlPath };
+    harness.repositoryService.lockState.applyLock(harness.target, { anchor: 'Справочник.Товары', members: ['Справочник.Товары'] });
+    const deps = baseDeps({ runRepositoryCli: () => Promise.resolve({ status: 'done' }), isFileSyncEnabled: () => false });
+
+    const outcome = await runRepositoryUnlockFlow(node, { recursive: false, force: false }, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Товары'), false);
+  });
+});
+
+suite('RepositoryUnlockSync — исключение внутри аренды', () => {
+  test('runRepositoryUnlockFlow: runRepositoryCli бросает исключение — reportFlowError, outcome "failed", guard освобождён', async () => {
+    const harness = createHarness();
+    const node = catalogNode(harness, 'Товары');
+    let notifyErrorCalls = 0;
+    const deps = baseDeps({
+      runRepositoryCli: () => { throw new Error('сбой процесса'); },
+      notifyError: () => { notifyErrorCalls += 1; },
+    });
+
+    const outcome = await runRepositoryUnlockFlow(node, { recursive: false, force: false }, harness.services, deps);
+
+    assert.strictEqual(outcome, 'failed');
+    assert.strictEqual(notifyErrorCalls, 1);
+    assert.strictEqual(harness.guard.isBusy, false);
+    assert.ok(harness.outputLines.some((line) => line.includes('[repository][file-sync][error]') && line.includes('сбой процесса')));
+  });
+
+  test('runRepositoryCommitFlow: runRepositoryCli бросает исключение — reportFlowError, outcome "failed"', async () => {
+    const harness = createHarness();
+    const node = catalogNode(harness, 'Товары');
+    let notifyErrorCalls = 0;
+    const deps = baseDeps({
+      runRepositoryCli: () => { throw new Error('сбой процесса'); },
+      notifyError: () => { notifyErrorCalls += 1; },
+    });
+
+    const outcome = await runRepositoryCommitFlow(node, formData(), harness.services, deps);
+
+    assert.strictEqual(outcome, 'failed');
+    assert.strictEqual(notifyErrorCalls, 1);
+  });
+
+  test('completeUnlockSync бросает исключение (confirmRollback упал) — reportFlowError, outcome всё равно "done" (сама отмена захвата уже состоялась), снимки удалены', async () => {
+    const harness = createHarness();
+    const node = catalogNode(harness, 'Товары');
+    const objectModulePath = path.join(harness.configRoot, 'Catalogs', 'Товары', 'Ext', 'ObjectModule.bsl');
+    fs.mkdirSync(path.dirname(objectModulePath), { recursive: true });
+    const snapshotContent = 'содержимое на момент захвата';
+    fs.writeFileSync(objectModulePath, snapshotContent, 'utf-8');
+    harness.repositoryService.lockState.applyLock(harness.target, { anchor: 'Справочник.Товары', members: ['Справочник.Товары'] });
+    const scope = resolveObjectScope(harness.configRoot, 'Справочник.Товары', harness.target) as Extract<ObjectScope, { kind: 'object' }>;
+    harness.repositoryService.snapshots.captureFromProject(harness.target, 'Справочник.Товары', scope);
+    fs.writeFileSync(objectModulePath, 'правка во время захвата', 'utf-8');
+
+    let notifyErrorCalls = 0;
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      confirmRollback: () => { throw new Error('диалог упал'); },
+      notifyError: () => { notifyErrorCalls += 1; },
+    });
+
+    const outcome = await runRepositoryUnlockFlow(node, { recursive: false, force: false }, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done', 'отмена захвата (CLI+state) уже состоялась — сбой синхронизации файлов её не отменяет.');
+    assert.strictEqual(notifyErrorCalls, 1);
+    assert.ok(harness.outputLines.some((line) => line.includes('синхронизация файлов') && line.includes('диалог упал')));
+    assert.strictEqual(harness.repositoryService.snapshots.readSnapshotHashes(harness.target, 'Справочник.Товары'), undefined, 'снимок должен быть удалён даже при сбое синхронизации (finally).');
+  });
+});
+
+suite('RepositoryUnlockSync — область объекта не определена при сравнении с эталоном', () => {
+  test('fullName не резолвится ни в проекте, ни в выгрузке — лог, объект пропущен, остальной поток не ломается', async () => {
+    const harness = createHarness();
+    const real = catalogNode(harness, 'РеальныйОбъект');
+    const node: RepositoryNodeRef = { nodeKind: 'Catalog', label: 'НесуществующийОбъект', xmlPath: real.xmlPath };
+    harness.repositoryService.lockState.applyLock(harness.target, { anchor: 'Справочник.НесуществующийОбъект', members: ['Справочник.НесуществующийОбъект'] });
+    const emptyDump = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-unlock-scope-null-'));
+
+    const outcome = await runRepositoryUnlockFlow(node, { recursive: false, force: false }, harness.services, baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      dumpToTemp: () => Promise.resolve({ ok: true, dir: emptyDump, dispose: () => fs.rmSync(emptyDump, { recursive: true, force: true }) }),
+    }));
+
+    assert.strictEqual(outcome, 'done');
+    assert.ok(harness.outputLines.some((line) => line.includes('область файлов не определена') && line.includes('НесуществующийОбъект')));
+  });
+});
+
+suite('RepositoryUnlockSync — нет снимка, dumpToTemp провалился', () => {
+  test('acquireUnlockEtalons: dumpToTemp вернул ok:false — лог ошибки, notifyWarning, откат не выполняется', async () => {
+    const harness = createHarness();
+    const node = catalogNode(harness, 'Товары');
+    harness.repositoryService.lockState.applyLock(harness.target, { anchor: 'Справочник.Товары', members: ['Справочник.Товары'] });
+    let warningCalls = 0;
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      dumpToTemp: () => Promise.resolve({ ok: false, reason: 'сервер хранилища недоступен' }),
+      notifyWarning: () => { warningCalls += 1; },
+    });
+
+    const outcome = await runRepositoryUnlockFlow(node, { recursive: false, force: false }, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done', 'сама отмена захвата уже состоялась.');
+    assert.strictEqual(warningCalls, 1);
+    assert.ok(harness.outputLines.some((line) => line.includes('сервер хранилища недоступен')));
+  });
+});
+
+suite('RepositoryUnlockSync — commit keepLocked с рекурсивным корнем', () => {
+  function rootNode(harness: Harness): RepositoryNodeRef {
+    return { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(harness.configRoot, 'Configuration.xml') };
+  }
+
+  test('keepLocked=true, корень захвачен рекурсивно — снимок пересоздаётся как хеш-манифест из проекта (не из отдельных объектов)', async () => {
+    const harness = createHarness();
+    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
+    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'А.xml'), '<xml/>', 'utf-8');
+    harness.repositoryService.lockState.applyLock(harness.target, {
+      anchor: '__configuration_root__',
+      members: ['__configuration_root__'],
+      recursiveRoot: true,
+    });
+    const deps = baseDeps({ runRepositoryCli: () => Promise.resolve({ status: 'done' }) });
+
+    const outcome = await runRepositoryCommitFlow(rootNode(harness), formData({ recursive: true, keepLocked: true }), harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(harness.repositoryService.isRootLocked(harness.target), true);
+    const manifest = harness.repositoryService.snapshots.readRootManifestHashes(harness.target);
+    assert.ok(manifest, 'манифест должен быть пересоздан из текущего состояния проекта.');
+  });
+
+  test('keepLocked=true, настройка синхронизации выключена — пересъём снимка/манифеста не выполняется', async () => {
+    const harness = createHarness();
+    harness.repositoryService.lockState.applyLock(harness.target, { anchor: 'Справочник.Товары', members: ['Справочник.Товары'] });
+    const deps = baseDeps({ runRepositoryCli: () => Promise.resolve({ status: 'done' }), isFileSyncEnabled: () => false });
+
+    const outcome = await runRepositoryCommitFlow(catalogNode(harness, 'Товары'), formData({ keepLocked: true }), harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Товары'), true);
+  });
+});
+
+suite('RepositoryUnlockSync — корень рекурсивно без манифеста, но с непустым хеш-кэшем', () => {
+  test('эталон строится из хеш-кэша (не из манифеста) — изменённый по кэшу объект восстанавливается частичной выгрузкой', async () => {
+    const harness = createHarness();
+    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
+    const filePath = path.join(harness.configRoot, 'Catalogs', 'А.xml');
+    fs.writeFileSync(filePath, '<xml/>', 'utf-8');
+    // Хеш-кэш фиксирует состояние ДО правки — эталон для отката.
+    const scopeKey = buildScopeKey('cf', harness.configRoot, '');
+    saveHashCache(harness.workspaceRoot, {
+      schemaVersion: 1, scopeKey, generatedAt: '',
+      files: { 'Catalogs/А.xml': computeFileHash(filePath) },
+    });
+    // Правка ПОСЛЕ снятия хеш-кэша — то самое расхождение, которое обязан найти collectRootOwnersToRestore.
+    fs.writeFileSync(filePath, '<xml changed="true"/>', 'utf-8');
+
+    harness.repositoryService.lockState.applyLock(harness.target, {
+      anchor: '__configuration_root__',
+      members: ['__configuration_root__'],
+      recursiveRoot: true,
+    });
+    // captureRootManifest НЕ вызывается — манифеста нет, эталон строится из хеш-кэша.
+
+    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-unlock-root-cache-dump-'));
+    let dumpRequest: unknown;
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      dumpToTemp: (_target: RepositoryTarget, request: ConfigurationDumpRequest) => {
+        dumpRequest = request;
+        return Promise.resolve({ ok: true, dir: dumpDir, dispose: () => fs.rmSync(dumpDir, { recursive: true, force: true }) });
+      },
+      confirmRollback: () => Promise.resolve(true),
+    });
+
+    const outcome = await runRepositoryUnlockFlow(
+      { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(harness.configRoot, 'Configuration.xml') },
+      { recursive: true, force: false },
+      harness.services,
+      deps
+    );
+
+    assert.strictEqual(outcome, 'done');
+    assert.ok(dumpRequest);
+    const request = dumpRequest as { mode: string; fullNames?: string[] };
+    assert.strictEqual(request.mode, 'partial');
+    assert.deepStrictEqual(request.fullNames, ['Справочник.А']);
   });
 });

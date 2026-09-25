@@ -553,6 +553,75 @@ suite('RepositoryLockSync — runRepositoryLockFlow: узел без валид�
   });
 });
 
+suite('RepositoryLockSync — runRepositoryLockFlow: узел без label и сбой внутри аренды', () => {
+  test('node.label не задан — fullName резолвится из <Name> XML объекта, метка операции берётся из target.displayName', async () => {
+    const harness = createHarness();
+    // Без node.label resolveFullName() падает обратно на <Name> из самого XML объекта
+    // (RepositoryService.buildRootObjectFullName) — простая заглушка '<MetaDataObject/>'
+    // без <Name> для этого сценария не годится.
+    const xmlPath = path.join(harness.configRoot, 'Catalogs', 'Товары.xml');
+    fs.mkdirSync(path.dirname(xmlPath), { recursive: true });
+    fs.writeFileSync(xmlPath, '<MetaDataObject><Catalog><Properties><Name>Товары</Name></Properties></Catalog></MetaDataObject>', 'utf-8');
+    const node: RepositoryNodeRef = { nodeKind: 'Catalog', xmlPath };
+    const deps = baseDeps({ runRepositoryCli: () => Promise.resolve({ status: 'done' }), isFileSyncEnabled: () => false });
+
+    const outcome = await runRepositoryLockFlow(node, false, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Товары'), true);
+  });
+
+  test('runRepositoryCli бросает исключение внутри аренды — reportFlowError, outcome "failed", guard освобождён', async () => {
+    const harness = createHarness();
+    const node = catalogNode(harness, 'Товары');
+    let notifyErrorCalls = 0;
+    const deps = baseDeps({
+      runRepositoryCli: () => { throw new Error('сбой процесса'); },
+      notifyError: () => { notifyErrorCalls += 1; },
+    });
+
+    const outcome = await runRepositoryLockFlow(node, false, harness.services, deps);
+
+    assert.strictEqual(outcome, 'failed');
+    assert.strictEqual(notifyErrorCalls, 1);
+    assert.strictEqual(harness.guard.isBusy, false);
+    assert.ok(harness.outputLines.some((line) => line.includes('[repository][file-sync][error]') && line.includes('сбой процесса')));
+  });
+
+  test('completeFetchSync бросает исключение (chooseConflictResolution упал) — outcome всё равно "done" (захват уже состоялся)', async () => {
+    const harness = createHarness();
+    const node = catalogNode(harness, 'Товары');
+    const { objectModulePath, dump } = setupConflict(harness);
+    let notifyErrorCalls = 0;
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      dumpToTemp: () => Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose }),
+      chooseConflictResolution: () => { throw new Error('диалог упал'); },
+      notifyError: () => { notifyErrorCalls += 1; },
+    });
+
+    const outcome = await runRepositoryLockFlow(node, false, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done', 'захват (CLI+state) уже состоялся — сбой синхронизации файлов его не отменяет.');
+    assert.strictEqual(notifyErrorCalls, 1);
+    assert.ok(harness.outputLines.some((line) => line.includes('синхронизация файлов') && line.includes('диалог упал')));
+    assert.strictEqual(fs.readFileSync(objectModulePath, 'utf-8'), 'локальная правка', 'слияние не должно было применяться при сбое диалога.');
+  });
+});
+
+function setupConflict(harness: Harness) {
+  const objectModulePath = path.join(harness.configRoot, 'Catalogs', 'Товары', 'Ext', 'ObjectModule.bsl');
+  fs.mkdirSync(path.dirname(objectModulePath), { recursive: true });
+  fs.writeFileSync(objectModulePath, 'локальная правка', 'utf-8');
+  const scopeKey = buildScopeKey('cf', harness.configRoot, '');
+  saveHashCache(harness.workspaceRoot, {
+    schemaVersion: 1, scopeKey, generatedAt: '',
+    files: { 'Catalogs/Товары/Ext/ObjectModule.bsl': 'какой-то-другой-хеш-базы' },
+  });
+  const dump = makeTempDump({ 'Catalogs/Товары/Ext/ObjectModule.bsl': 'версия хранилища' });
+  return { objectModulePath, dump };
+}
+
 function buildSubsystemXml(name: string, refs: string[], childSubsystems: string[]): string {
   return `<?xml version="1.0" encoding="utf-8"?>
 <MetaDataObject>
@@ -943,5 +1012,92 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
     assert.strictEqual(outcome, 'done', 'сама операция захвата корня уже выполнена CLI-командой — сбой довыгрузки объектов её не отменяет.');
     assert.strictEqual(partialCalls, 1);
     assert.ok(harness.outputLines.some((line) => line.includes('сервер хранилища недоступен')));
+  });
+
+  test('сбой выгрузки update-info (ConfigDumpInfo.xml) — fallback на full, лог причины', async () => {
+    const harness = createHarness();
+    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), configDumpInfoXml([{ name: 'Catalog.А.ObjectModule', version: '1' }]), 'utf-8');
+    const fullDump = makeTempDump({});
+    const modes: string[] = [];
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      dumpToTemp: (_t, request) => {
+        modes.push(request.mode);
+        if (request.mode === 'update-info') {
+          return Promise.resolve({ ok: false, reason: 'сеть недоступна' });
+        }
+        return Promise.resolve({ ok: true, dir: fullDump.dir, dispose: fullDump.dispose });
+      },
+    });
+
+    const outcome = await runRepositoryLockFlow(
+      { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(harness.configRoot, 'Configuration.xml') },
+      true,
+      harness.services,
+      deps
+    );
+
+    assert.strictEqual(outcome, 'done');
+    assert.deepStrictEqual(modes, ['update-info', 'full']);
+    assert.ok(harness.outputLines.some((line) => line.includes('сбой выгрузки ConfigDumpInfo.xml') && line.includes('сеть недоступна')));
+  });
+
+  test('новый ConfigDumpInfo.xml из базы не разбирается (пуст при непустом проектном) — fallback на full', async () => {
+    const harness = createHarness();
+    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), configDumpInfoXml([{ name: 'Catalog.А.ObjectModule', version: '1' }]), 'utf-8');
+    const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': 'битый-не-xml' });
+    const fullDump = makeTempDump({});
+    const modes: string[] = [];
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      dumpToTemp: (_t, request) => {
+        modes.push(request.mode);
+        return Promise.resolve(request.mode === 'update-info'
+          ? { ok: true, dir: infoDump.dir, dispose: infoDump.dispose }
+          : { ok: true, dir: fullDump.dir, dispose: fullDump.dispose });
+      },
+    });
+
+    const outcome = await runRepositoryLockFlow(
+      { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(harness.configRoot, 'Configuration.xml') },
+      true,
+      harness.services,
+      deps
+    );
+
+    assert.strictEqual(outcome, 'done');
+    assert.deepStrictEqual(modes, ['update-info', 'full']);
+    assert.ok(harness.outputLines.some((line) => line.includes('ConfigDumpInfo.xml из базы не разобран')));
+  });
+
+  test('доля изменённых владельцев выше порога — fallback на full; сбой полной выгрузки — outcome "done" (захват уже состоялся)', async () => {
+    const harness = createHarness();
+    // Единственный владелец в проекте и в базе — доля изменений 100% (> 50%), даже без превышения абсолютного порога.
+    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), configDumpInfoXml([{ name: 'Catalog.А.ObjectModule', version: '1' }]), 'utf-8');
+    const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': configDumpInfoXml([{ name: 'Catalog.А.ObjectModule', version: '2' }]) });
+    const modes: string[] = [];
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      dumpToTemp: (_t, request) => {
+        modes.push(request.mode);
+        if (request.mode === 'update-info') {
+          return Promise.resolve({ ok: true, dir: infoDump.dir, dispose: infoDump.dispose });
+        }
+        // Fallback-выгрузка (full) тоже проваливается — сама операция захвата уже состоялась.
+        return Promise.resolve({ ok: false, reason: 'диск переполнен' });
+      },
+    });
+
+    const outcome = await runRepositoryLockFlow(
+      { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(harness.configRoot, 'Configuration.xml') },
+      true,
+      harness.services,
+      deps
+    );
+
+    assert.strictEqual(outcome, 'done');
+    assert.deepStrictEqual(modes, ['update-info', 'full']);
+    assert.ok(harness.outputLines.some((line) => line.includes('изменено владельцев больше порога')));
+    assert.ok(harness.outputLines.some((line) => line.includes('диск переполнен')));
   });
 });

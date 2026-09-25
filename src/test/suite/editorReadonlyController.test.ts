@@ -183,6 +183,182 @@ suite('EditorReadonlyController — issue #1: readonly-переходы уже �
     }
   });
 
+  test('вкладка сравнения (diff): переход выполняется через vscode.diff, reset — только для writable', async function () {
+    this.timeout(10_000);
+    const originalPath = path.join(tmpDir, 'Original.bsl');
+    fs.writeFileSync(originalPath, 'старое', 'utf-8');
+    const modifiedUri = vscode.Uri.file(filePathA);
+    await vscode.commands.executeCommand('vscode.diff', vscode.Uri.file(originalPath), modifiedUri, 'Сравнение', { preview: false });
+
+    let listener: ChangeLocksListener | undefined;
+    const repositoryService = fakeRepositoryService({
+      isEditRestricted: () => false,
+      onDidChangeLocks: (l: ChangeLocksListener) => { listener = l; return { dispose: () => { listener = undefined; } }; },
+    });
+    const supportService = fakeSupportService(() => false);
+    const guard = new BslReadonlyGuard(supportService, repositoryService, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const controller = new EditorReadonlyController(repositoryService, supportService, guard, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const disposable = controller.register();
+
+    let diffCalls = 0;
+    let resetCalls = 0;
+    const originalExecuteCommand = vscode.commands.executeCommand;
+    (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = ((command: string, ...rest: unknown[]) => {
+      if (command === 'vscode.diff') {
+        diffCalls += 1;
+      }
+      if (command === 'workbench.action.files.resetActiveEditorReadonlyInSession') {
+        resetCalls += 1;
+      }
+      return (originalExecuteCommand as (c: string, ...r: unknown[]) => Thenable<unknown>)(command, ...rest);
+    }) as typeof vscode.commands.executeCommand;
+
+    try {
+      assert.ok(listener);
+      listener({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: ['Справочник.А'] });
+      await waitUntil(() => resetCalls >= 1, 3000);
+      assert.ok(diffCalls >= 1, 'вкладка сравнения обязана переоткрываться через vscode.diff, а не showTextDocument.');
+      assert.strictEqual(resetCalls, 1);
+    } finally {
+      disposable.dispose();
+      (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = originalExecuteCommand;
+    }
+  });
+
+  test('«широкое» событие корня (fullNames содержит сентинел корня) — файлы объектов внутри configRoot тоже обрабатываются', async function () {
+    this.timeout(10_000);
+    const uri = vscode.Uri.file(filePathA);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(doc, { preview: false });
+
+    let listener: ChangeLocksListener | undefined;
+    const repositoryService = fakeRepositoryService({
+      isEditRestricted: () => false,
+      onDidChangeLocks: (l: ChangeLocksListener) => { listener = l; return { dispose: () => { listener = undefined; } }; },
+    });
+    const supportService = fakeSupportService(() => false);
+    const guard = new BslReadonlyGuard(supportService, repositoryService, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const controller = new EditorReadonlyController(repositoryService, supportService, guard, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const disposable = controller.register();
+
+    let resetCalls = 0;
+    const originalExecuteCommand = vscode.commands.executeCommand;
+    (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = ((command: string, ...rest: unknown[]) => {
+      if (command === 'workbench.action.files.resetActiveEditorReadonlyInSession') {
+        resetCalls += 1;
+      }
+      return (originalExecuteCommand as (c: string, ...r: unknown[]) => Thenable<unknown>)(command, ...rest);
+    }) as typeof vscode.commands.executeCommand;
+
+    try {
+      assert.ok(listener);
+      // Рекурсивный тумблер корня не перечисляет затронутые объекты явно — только сентинел.
+      listener({ target: { configRoot: tmpDir }, fullNames: ['__configuration_root__'], allObjects: ['__configuration_root__'] });
+      await waitUntil(() => resetCalls >= 1, 3000);
+      assert.strictEqual(resetCalls, 1, 'файл внутри configRoot должен обрабатываться и при «широком» событии корня.');
+    } finally {
+      disposable.dispose();
+      (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = originalExecuteCommand;
+    }
+  });
+
+  test('восстановление исходного активного редактора: обработка видимого файла в другой колонке не должна оставлять его активным', async function () {
+    this.timeout(10_000);
+    const filePathB = path.join(tmpDir, 'ВКолонке2.bsl');
+    fs.writeFileSync(filePathB, 'Процедура Z() КонецПроцедуры', 'utf-8');
+    const uriA = vscode.Uri.file(filePathA);
+    const uriB = vscode.Uri.file(filePathB);
+    const docA = await vscode.workspace.openTextDocument(uriA);
+    await vscode.window.showTextDocument(docA, { viewColumn: vscode.ViewColumn.One, preview: false });
+    const docB = await vscode.workspace.openTextDocument(uriB);
+    // Открывается РЯДОМ (вторая колонка) — обе вкладки остаются одновременно видимыми.
+    await vscode.window.showTextDocument(docB, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+    // Возвращаем фокус на A — активным редактором должен снова стать именно он.
+    await vscode.window.showTextDocument(docA, { viewColumn: vscode.ViewColumn.One, preview: false });
+    assert.strictEqual(vscode.window.activeTextEditor?.document.uri.toString(), uriA.toString(), 'предпосылка: A обязан быть активным редактором перед событием.');
+
+    let listener: ChangeLocksListener | undefined;
+    const repositoryService = fakeRepositoryService({
+      isEditRestricted: () => false,
+      onDidChangeLocks: (l: ChangeLocksListener) => { listener = l; return { dispose: () => { listener = undefined; } }; },
+    });
+    const supportService = fakeSupportService(() => false);
+    const guard = new BslReadonlyGuard(supportService, repositoryService, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const controller = new EditorReadonlyController(repositoryService, supportService, guard, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const disposable = controller.register();
+
+    let resetCalls = 0;
+    const originalExecuteCommand = vscode.commands.executeCommand;
+    (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = ((command: string, ...rest: unknown[]) => {
+      if (command === 'workbench.action.files.resetActiveEditorReadonlyInSession') {
+        resetCalls += 1;
+      }
+      return (originalExecuteCommand as (c: string, ...r: unknown[]) => Thenable<unknown>)(command, ...rest);
+    }) as typeof vscode.commands.executeCommand;
+
+    try {
+      assert.ok(listener);
+      // Затрагивается ТОЛЬКО файл во второй колонке (B) — он видим, хотя активна колонка с A.
+      listener({ target: { configRoot: tmpDir }, fullNames: ['Справочник.Б'], allObjects: ['Справочник.Б'] });
+      await waitUntil(() => resetCalls >= 1, 3000);
+
+      // Обработка B временно делала его активным — контроллер обязан вернуть фокус на A.
+      await waitUntil(() => vscode.window.activeTextEditor?.document.uri.toString() === uriA.toString(), 3000);
+      assert.strictEqual(vscode.window.activeTextEditor.document.uri.toString(), uriA.toString());
+    } finally {
+      disposable.dispose();
+      (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = originalExecuteCommand;
+    }
+  });
+
+  test('исключение внутри обработчика события (isEditRestricted бросает) — перехватывается в очереди, логируется, следующее событие обрабатывается', async function () {
+    this.timeout(10_000);
+    const uri = vscode.Uri.file(filePathA);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(doc, { preview: false });
+
+    let listener: ChangeLocksListener | undefined;
+    let throwOnRestrictedCheck = true;
+    const repositoryService = fakeRepositoryService({
+      isEditRestricted: () => {
+        if (throwOnRestrictedCheck) {
+          throw new Error('сбой чтения состояния захвата');
+        }
+        return false;
+      },
+      onDidChangeLocks: (l: ChangeLocksListener) => { listener = l; return { dispose: () => { listener = undefined; } }; },
+    });
+    const supportService = fakeSupportService(() => false);
+    const guard = new BslReadonlyGuard(supportService, repositoryService, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const logLines: string[] = [];
+    const controller = new EditorReadonlyController(repositoryService, supportService, guard, { appendLine: (line: string) => logLines.push(line) } as unknown as vscode.OutputChannel);
+    const disposable = controller.register();
+
+    let resetCalls = 0;
+    const originalExecuteCommand = vscode.commands.executeCommand;
+    (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = ((command: string, ...rest: unknown[]) => {
+      if (command === 'workbench.action.files.resetActiveEditorReadonlyInSession') {
+        resetCalls += 1;
+      }
+      return (originalExecuteCommand as (c: string, ...r: unknown[]) => Thenable<unknown>)(command, ...rest);
+    }) as typeof vscode.commands.executeCommand;
+
+    try {
+      assert.ok(listener);
+      listener({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: ['Справочник.А'] });
+      await waitUntil(() => logLines.some((line) => line.includes('[readonly][error]') && line.includes('сбой чтения состояния захвата')), 3000);
+
+      // Очередь не должна «застрять» — следующее событие обязано обработаться штатно.
+      throwOnRestrictedCheck = false;
+      listener({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: ['Справочник.А'] });
+      await waitUntil(() => resetCalls >= 1, 3000);
+      assert.strictEqual(resetCalls, 1);
+    } finally {
+      disposable.dispose();
+      (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = originalExecuteCommand;
+    }
+  });
+
   test('dispose() прекращает реакцию на дальнейшие события', async function () {
     this.timeout(10_000);
     const uri = vscode.Uri.file(filePathA);

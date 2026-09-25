@@ -487,6 +487,36 @@ suite('RepositoryFileSyncShared — reportMergeOutcome', () => {
     }
   });
 
+  test('choice="keep-local", repositoryService разрешает, но supportService.isLocked=true — подсказка о захвате (правая часть &&)', async () => {
+    const harness = createHarness();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-filesync-keeplocal-support-'));
+    try {
+      const projectPath = path.join(dir, 'Module.bsl');
+      fs.writeFileSync(projectPath, 'локальный код', 'utf-8');
+      const repositoryPath = path.join(dir, 'repo-Module.bsl');
+      fs.writeFileSync(repositoryPath, 'код хранилища', 'utf-8');
+
+      const servicesWithSupportLock: RepositoryFileSyncServices = {
+        ...harness.services,
+        repositoryService: { isEditRestricted: () => false } as unknown as RepositoryFileSyncServices['repositoryService'],
+        supportService: { isLocked: () => true } as unknown as RepositoryFileSyncServices['supportService'],
+      };
+      let infoMessage: string | undefined;
+      const deps = baseDeps({ notifyInfo: (message) => { infoMessage = message; } });
+      const merge = {
+        ...emptyMerge(),
+        keptLocalFiles: [projectPath],
+        repositoryCopies: [{ rel: 'Module.bsl', repositoryPath, projectPath }],
+      };
+
+      await reportMergeOutcome(servicesWithSupportLock, deps, [], { merge, changedFiles: [] }, 'keep-local', 'Товары');
+
+      assert.ok(infoMessage?.includes('Захватите объект, чтобы перенести правки.'), 'поддержка запрещает редактирование — подсказка обязана появиться, даже если repositoryService разрешает.');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('choice="keep-local", 0 валидных пар для сравнения — notifyInfo без кнопок', async () => {
     const harness = createHarness();
     let infoActions: { label: string; run: () => void }[] | undefined;
