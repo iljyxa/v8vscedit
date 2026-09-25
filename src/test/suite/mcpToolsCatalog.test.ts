@@ -583,7 +583,7 @@ const EXPECTED_TOOLS: readonly ExpectedTool[] = [
   {
     name: 'v8vscedit_execute_command',
     title: 'Выполнить команду расширения',
-    description: 'Безопасный мост только для явно разрешённых команд расширения: refresh, importConfigurations, updateChangedConfigurations.',
+    description: 'Безопасный мост только для явно разрешённых команд расширения: refresh, importConfigurations, updateChangedConfigurations. Ответ: command, outcome (done|no-changes|no-targets|cancelled|busy|failed), result (true при done/no-changes), heldBy при busy — выполняющаяся операция, completed/stoppedAt/error при done/failed. importConfigurations и updateChangedConfigurations при нескольких конфигурациях ждут выбора пользователя.',
     schemaKeys: { command: false },
   },
 ];

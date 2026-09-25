@@ -206,6 +206,54 @@ suite('ConfigurationOperationGuard', () => {
     assert.deepStrictEqual(events, []);
   });
 
+  suite('tryAcquireOrHeldBy', () => {
+    test('guard свободен: {acquired:true,lease}, guard занят под тем же title, событие [true]', () => {
+      const guard = new ConfigurationOperationGuard();
+      const events: boolean[] = [];
+      guard.onDidChangeBusy((busy) => events.push(busy));
+
+      const result = guard.tryAcquireOrHeldBy('Импорт конфигураций');
+
+      assert.strictEqual(result.acquired, true);
+      assert.strictEqual(guard.isBusy, true);
+      assert.strictEqual(guard.heldBy, 'Импорт конфигураций');
+      assert.deepStrictEqual(events, [true]);
+      // assert.strictEqual(result.acquired, true) выше — сигнатура `asserts` в
+      // @types/node, поэтому TS уже сузил объединение до ветки {acquired:true}.
+      result.lease.release();
+      assert.strictEqual(guard.isBusy, false);
+      assert.deepStrictEqual(events, [true, false]);
+    });
+
+    test('guard занят — {acquired:false,heldBy}, событий нет, держатель не меняется', () => {
+      const guard = new ConfigurationOperationGuard();
+      const holderLease = guard.tryAcquire('Импорт конфигураций');
+      const events: boolean[] = [];
+      guard.onDidChangeBusy((busy) => events.push(busy));
+
+      const result = guard.tryAcquireOrHeldBy('Обновление конфигураций');
+
+      assert.deepStrictEqual(result, { acquired: false, heldBy: 'Импорт конфигураций' });
+      assert.strictEqual(guard.heldBy, 'Импорт конфигураций');
+      assert.deepStrictEqual(events, []);
+      holderLease?.release();
+    });
+
+    test('протухшая аренда, полученная через tryAcquireOrHeldBy, не снимает новую чужую аренду', () => {
+      const guard = new ConfigurationOperationGuard();
+      const resultA = guard.tryAcquireOrHeldBy('A');
+      assert.strictEqual(resultA.acquired, true);
+      resultA.lease.release();
+      const leaseB = guard.tryAcquire('B');
+
+      resultA.lease.release();
+
+      assert.strictEqual(guard.isBusy, true);
+      assert.strictEqual(guard.heldBy, 'B');
+      leaseB?.release();
+    });
+  });
+
   [
     { label: 'onListenerError задан', withHandler: true },
     { label: 'onListenerError не задан', withHandler: false },

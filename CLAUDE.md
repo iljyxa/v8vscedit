@@ -338,7 +338,8 @@ Vue-приложения (сборка `vite.webview.config.ts`, проверк�
   базе** (аналог `importConfigurations`/`updateChangedConfigurations`/`runPostRepositorySync`): захват —
   через `services.configurationOperationGuard` (`runExclusive(title, op)` для одной атомарной цепочки
   либо `tryAcquire(title)` + `release()` в `finally`, если между проверкой и запуском есть модальный
-  диалог) → сообщение о занятости — только `notifyConfigurationOperationBusy`
+  диалог, тогда отказ отдаётся вызовом `tryAcquireOrHeldBy(title)` — единая точка, сразу возвращающая
+  `heldBy` держателя) → сообщение о занятости — только `notifyConfigurationOperationBusy`
   (`ui/commands/ext/configurationOperationBusy.ts`), **без `await`** (см. запрет №18) → фоновый (`void`)
   путь без ожидающего пользователя логирует исход в `outputChannel` и уведомляет тем же способом, а не
   падает молча → контекст enablement `v8vscedit.isUpdatingConfigurations` вручную нигде не выставлять —
@@ -346,7 +347,12 @@ Vue-приложения (сборка `vite.webview.config.ts`, проверк�
   `guard.onDidChangeBusy` → модальные диалоги подтверждения по возможности держать ВНЕ аренды (проверка
   занятости — до диалога, повторный захват — после) → runner'ы Конфигуратора и диалоги внедряются через
   `deps`-объект по умолчанию (образец — `RepositoryDatabaseSync.ts`/`RepositoryDatabaseSyncDeps`), чтобы
-  логику захвата можно было протестировать без реального процесса 1С. Подробности —
+  логику захвата можно было протестировать без реального процесса 1С → **если команда доступна MCP-мосту
+  `v8vscedit_execute_command`** (`V8McpServer`/`McpConfigLifecycleTools.ts`), она обязана на КАЖДОМ пути
+  возвращать `ConfigurationCommandOutcome` (`ui/commands/ext/configurationCommandOutcome.ts`:
+  `done`/`no-changes`/`no-targets`/`cancelled`/`busy`/`failed`), а при занятости — `{ status: 'busy',
+  heldBy }`; мост транслирует этот исход как есть и НЕ опрашивает guard заранее (второй источник правды +
+  TOCTOU между проверкой и запуском команды). Подробности —
   [architecture.md](./docs/architecture.md#сериализация-операций-конфигуратора-с-базой-configurationoperationguard).
 - **Изменение жизненного цикла/безопасности встроенного MCP-сервера** (порт, идентичность процесса,
   graceful shutdown, Host/Origin, отличается от «новый MCP-инструмент» из раздела выше): чистая логика —

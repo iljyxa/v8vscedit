@@ -203,6 +203,12 @@ API:
 - `tryAcquire(title) → lease | undefined` — проверка и захват одной синхронной операцией (между ними нет
   `await`), поэтому два вызова, стартовавшие в одном тике, не займут guard оба; `lease.release()`
   идемпотентен и не снимает чужую (уже сменившуюся) аренду — сравнение по внутреннему токену держателя.
+  Выражен через `tryAcquireOrHeldBy` (одна точка проверки занятости).
+- `tryAcquireOrHeldBy(title) → { acquired: true; lease } | { acquired: false; heldBy }` (issue #39) — тот же
+  захват, но при отказе сразу отдаёт держателя одним вызовом: без него вызывающему пришлось бы отдельно
+  перечитывать `heldBy` после отказа, что формально могло вернуть `undefined` (аренда снялась между двумя
+  вызовами) и требовало обрабатывать невозможную ветку. Используется везде, где отказ должен нести имя
+  держателя наружу (`ExtensionCommands.importConfigurations`, MCP-мост).
 - `runExclusive(title, op) → { acquired: true, value } | { acquired: false, heldBy }` — нереентерабельная
   обёртка `tryAcquire` + `try/finally { release() }`; исключение `op()` пробрасывается тем же объектом,
   guard освобождается независимо от исхода.
@@ -218,10 +224,22 @@ outputChannel) и в `bootstrap()` подписывается на `onDidChangeB
 (и автоматически попадает в `buildMcpCommandServices` — MCP-мост `v8vscedit_execute_command` синхронизован
 с UI-командами через тот же guard).
 
+Обе команды, доступные MCP-мосту (`importConfigurations`, `updateChangedConfigurations`), возвращают
+`ConfigurationCommandOutcome` (`ui/commands/ext/configurationCommandOutcome.ts`, без `vscode`) на каждом
+пути — `done`/`no-changes`/`no-targets`/`cancelled`/`busy`/`failed` — вместо прежних `boolean`/`undefined`,
+которые не различали «занято», «отменено» и «сбой». Мост `v8vscedit_execute_command`
+(`ui/mcp/registration/McpConfigLifecycleTools.ts`) сам guard заранее не опрашивает и не подменяет исход —
+он вызывает команду через `vscode.commands.executeCommand` и транслирует её `ConfigurationCommandOutcome`
+в ответ как есть (`busy` + `heldBy` при занятости приходят от самой команды). Предпроверка guard'а в мосте
+была отвергнута при разработке (issue #39): это второй источник правды о занятости и разрыв TOCTOU — между
+проверкой в мосте и фактическим запуском команды есть `await`, за время которого guard мог освободиться
+или, наоборот, оказаться занятым другой операцией.
+
 Пользователи:
 - `ui/commands/ext/ExtensionCommands.ts` — `importConfigurations` (ранняя проверка `isBusy` до QuickPick,
-  затем `tryAcquire` после него — защита от TOCTOU, пока пользователь выбирал конфигурации),
-  `updateChangedConfigurations`, `runExclusiveConfigurationOperation`. Занятость сообщается
+  затем `tryAcquireOrHeldBy` после него — защита от TOCTOU, пока пользователь выбирал конфигурации; отказ
+  в обеих точках возвращает `{ status: 'busy', heldBy }`), `updateChangedConfigurations`,
+  `runExclusiveConfigurationOperation`. Занятость сообщается
   `notifyConfigurationOperationBusy` (`ui/commands/ext/configurationOperationBusy.ts`) **без `await`**
   (запрет №18 в `CLAUDE.md`): раньше нотификация await'илась внутри критической секции, и любой
   параллельный вызывающий (`DbCommands`, MCP-мост) висел до закрытия сообщения пользователем, хотя
@@ -238,7 +256,11 @@ outputChannel) и в `bootstrap()` подписывается на `onDidChangeB
   расширений из базы (сам запрос — отдельный запуск Конфигуратора), каталог `src/cfe/<имя>` создаётся
   только внутри захваченной операции: при отказе в захвате `afterFailure` не вызывается, и созданный
   заранее пустой каталог заблокировал бы повторное подключение того же расширения (issue #38). Запрос
-  списка и декомпиляция внедряются через `ConnectExtensionDeps` (необязательный третий параметр
+  списка и декомпиляция внедряются через `ExtensionCommandsDeps` (переименован из `ConnectExtensionDeps`
+  при issue #39 — тот же deps-объект стал общим для `connectExtension`, `importConfigurations` и
+  `updateChangedConfigurations`: поля `decompileExtension`/`decompileMainConfiguration`/
+  `updateMainConfiguration`/`updateExtension`/`pickImportTargets`/`pickChangedConfigurations`,
+  значение по умолчанию — `DEFAULT_EXTENSION_COMMANDS_DEPS`; необязательный параметр `deps` у
   `registerExtensionCommands`).
 
 Известные ограничения:

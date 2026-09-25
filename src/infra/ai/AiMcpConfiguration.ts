@@ -544,7 +544,7 @@ export const EXTENSION_MCP_TOOLS: readonly AiMcpToolInfo[] = [
   {
     profile: 'extension',
     name: 'v8vscedit_execute_command',
-    description: 'Безопасный мост к разрешённым командам refresh, importConfigurations, updateChangedConfigurations.',
+    description: 'Безопасный мост к разрешённым командам refresh, importConfigurations, updateChangedConfigurations; возвращает явный исход outcome (busy — с именем выполняющейся операции heldBy).',
     requirement: 'Команда должна быть в allowlist расширения',
   },
 ];

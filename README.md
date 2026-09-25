@@ -253,7 +253,7 @@ http://127.0.0.1:38481/mcp
 - `v8vscedit_rename_metadata` — переименование объекта или дочернего элемента через общий XML-сервис.
 - `v8vscedit_add_metadata_by_path` — добавление объекта, реквизита, табличной части, колонки, формы, команды или макета по предметному пути.
 - `v8vscedit_remove_metadata` — удаление объекта или дочернего элемента по предметному пути.
-- `v8vscedit_execute_command` — ограниченный запуск разрешённых команд расширения: `v8vscedit.refresh`, `v8vscedit.importConfigurations`, `v8vscedit.updateChangedConfigurations`.
+- `v8vscedit_execute_command` — ограниченный запуск разрешённых команд расширения: `v8vscedit.refresh`, `v8vscedit.importConfigurations`, `v8vscedit.updateChangedConfigurations`. Ответ содержит явный исход `outcome` (`done`/`no-changes`/`no-targets`/`cancelled`/`busy`/`failed`) и `result` (успех при `done`/`no-changes`); при `busy` — `heldBy` с именем занявшей guard операции. `importConfigurations` и `updateChangedConfigurations` при нескольких найденных конфигурациях открывают выбор пользователю и ждут его ответа, прежде чем вернуть исход.
 
 Предметные пути принимают русские группы и технические имена типов. Примеры:
 
