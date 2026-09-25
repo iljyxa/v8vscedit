@@ -153,6 +153,22 @@ suite('readonlyTransitionPlan — planReadonlyTransitions', () => {
     assert.deepStrictEqual(result, { applyNow: [], defer: [] });
   });
 
+  test('один и тот же файл открыт в нескольких вкладках (видимая + скрытая) — одна запись, видимая побеждает', () => {
+    const result = planReadonlyTransitions({
+      openFiles: [
+        { path: filePath('Catalogs', 'А', 'Ext', 'ObjectModule.bsl'), visible: false },
+        { path: filePath('Catalogs', 'А', 'Ext', 'ObjectModule.bsl'), visible: true },
+      ],
+      changedOwnerFullNames: ['Справочник.А'],
+      allObjects: ['Справочник.А'],
+      configRoot: CONFIG_ROOT,
+      ownerOf: ownerOfCatalog,
+      isRestricted: () => false,
+    });
+    assert.deepStrictEqual(result.applyNow, [{ path: filePath('Catalogs', 'А', 'Ext', 'ObjectModule.bsl'), readonly: false }]);
+    assert.deepStrictEqual(result.defer, []);
+  });
+
   test('несколько затронутых файлов одного объекта — все попадают в результат', () => {
     const result = planReadonlyTransitions({
       openFiles: [

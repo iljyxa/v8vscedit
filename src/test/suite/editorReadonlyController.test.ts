@@ -67,7 +67,7 @@ suite('EditorReadonlyController — issue #1: readonly-переходы уже �
     const originalForget = guard.forget.bind(guard);
     guard.forget = (forgetUri: vscode.Uri) => {
       forgetCalls.push(forgetUri.toString());
-      return originalForget(forgetUri);
+      originalForget(forgetUri);
     };
 
     const controller = new EditorReadonlyController(repositoryService, supportService, guard, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
@@ -84,7 +84,7 @@ suite('EditorReadonlyController — issue #1: readonly-переходы уже �
 
     try {
       assert.ok(listener, 'register() должен подписаться на onDidChangeLocks.');
-      await listener?.({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: ['Справочник.А'] });
+      listener({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: ['Справочник.А'] });
       await waitUntil(() => resetCalls >= 1, 3000);
 
       assert.strictEqual(resetCalls, 1);
@@ -127,7 +127,7 @@ suite('EditorReadonlyController — issue #1: readonly-переходы уже �
     }) as typeof vscode.commands.executeCommand;
 
     try {
-      await listener?.({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: [] });
+      listener?.({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: [] });
       await waitUntil(() => setCalls >= 1, 3000);
 
       assert.strictEqual(setCalls, 1);
@@ -171,7 +171,7 @@ suite('EditorReadonlyController — issue #1: readonly-переходы уже �
 
       try {
         // Событие относится к СОВСЕМ ДРУГОМУ configRoot (tmpDir), файл открыт из outsideDir.
-        await listener?.({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: ['Справочник.А'] });
+        listener?.({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: ['Справочник.А'] });
         await new Promise((resolve) => setTimeout(resolve, 100));
         assert.strictEqual(anyReadonlyCommandCalls, 0);
       } finally {

@@ -155,7 +155,7 @@ suite('RepositoryUnlockSync — снимок без изменений (тихо
 });
 
 suite('RepositoryUnlockSync — расхождение со снимком × {откат, оставить, Esc}', () => {
-  function setupDivergedSnapshot(harness: Harness, node: RepositoryNodeRef): { objectModulePath: string; snapshotContent: string } {
+  function setupDivergedSnapshot(harness: Harness): { objectModulePath: string; snapshotContent: string } {
     const objectModulePath = path.join(harness.configRoot, 'Catalogs', 'Товары', 'Ext', 'ObjectModule.bsl');
     fs.mkdirSync(path.dirname(objectModulePath), { recursive: true });
     const snapshotContent = 'содержимое на момент захвата';
@@ -172,7 +172,7 @@ suite('RepositoryUnlockSync — расхождение со снимком × {�
   test('пользователь выбирает откат — файл восстанавливается к снимку, hasConflicts диалог показан вне аренды', async () => {
     const harness = createHarness();
     const node = catalogNode(harness, 'Товары');
-    const { objectModulePath, snapshotContent } = setupDivergedSnapshot(harness, node);
+    const { objectModulePath, snapshotContent } = setupDivergedSnapshot(harness);
 
     let observedBusyDuringDialog: boolean | undefined;
     const deps = baseDeps({
@@ -193,7 +193,7 @@ suite('RepositoryUnlockSync — расхождение со снимком × {�
   test('пользователь выбирает "оставить изменения" — файл не трогается, помечается изменённым', async () => {
     const harness = createHarness();
     const node = catalogNode(harness, 'Товары');
-    const { objectModulePath } = setupDivergedSnapshot(harness, node);
+    const { objectModulePath } = setupDivergedSnapshot(harness);
 
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
@@ -210,7 +210,7 @@ suite('RepositoryUnlockSync — расхождение со снимком × {�
   test('Esc (диалог закрыт без выбора) трактуется как "оставить" — файл не трогается', async () => {
     const harness = createHarness();
     const node = catalogNode(harness, 'Товары');
-    const { objectModulePath } = setupDivergedSnapshot(harness, node);
+    const { objectModulePath } = setupDivergedSnapshot(harness);
 
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),

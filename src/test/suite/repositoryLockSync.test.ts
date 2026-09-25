@@ -13,7 +13,7 @@ import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOp
 import { RepositoryService, type RepositoryNodeRef, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import { buildScopeKey, computeFileHash, saveHashCache, loadHashCache } from '../../infra/cache/HashCache';
-import { getRootLockName, buildRootDumpListName } from '../../infra/repository/RepositoryObjectNames';
+import { buildRootDumpListName } from '../../infra/repository/RepositoryObjectNames';
 import type { ConfigurationDumpRequest } from '../../infra/agent';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import type { MetadataTreeProvider } from '../../ui/tree/MetadataTreeProvider';
@@ -73,7 +73,11 @@ function createHarness(): Harness {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lock-sync-'));
   const configRoot = path.join(workspaceRoot, 'src', 'cf');
   fs.mkdirSync(configRoot, { recursive: true });
-  fs.writeFileSync(path.join(configRoot, 'Configuration.xml'), '<MetaDataObject/>', 'utf-8');
+  // <Name> обязателен: resolveTargetByConfigRoot() читает реальное имя из
+  // Configuration.xml (не из RepositoryTarget.displayName, задаваемого ниже
+  // отдельно только для isLocked/isRootLocked-проверок) — без тега displayName
+  // при резолве узла становится именем каталога ("cf"), а не "Тест".
+  fs.writeFileSync(path.join(configRoot, 'Configuration.xml'), '<MetaDataObject><Name>Тест</Name></MetaDataObject>', 'utf-8');
 
   const repositoryService = new RepositoryService(workspaceRoot, new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot));
   const target: RepositoryTarget = { configRoot, configKind: 'cf', displayName: 'Тест' };
@@ -298,7 +302,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: happy path без конф�
 });
 
 suite('RepositoryLockSync — runRepositoryLockFlow: конфликт × {compare, replace, keep-local}', () => {
-  function setupConflict(harness: Harness, node: RepositoryNodeRef) {
+  function setupConflict(harness: Harness) {
     const objectModulePath = path.join(harness.configRoot, 'Catalogs', 'Товары', 'Ext', 'ObjectModule.bsl');
     fs.mkdirSync(path.dirname(objectModulePath), { recursive: true });
     fs.writeFileSync(objectModulePath, 'локальная правка', 'utf-8');
@@ -315,7 +319,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: конфликт × {compar
   test('choice="replace" — файл перезаписывается версией хранилища, диалог показан ВНЕ аренды (guard.isBusy=false)', async () => {
     const harness = createHarness();
     const node = catalogNode(harness, 'Товары');
-    const { objectModulePath, dump } = setupConflict(harness, node);
+    const { objectModulePath, dump } = setupConflict(harness);
 
     let observedBusyDuringDialog: boolean | undefined;
     const deps = baseDeps({
@@ -337,7 +341,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: конфликт × {compar
   test('choice="compare" — файл перезаписывается версией хранилища, openDiffs вызван с текстовой парой', async () => {
     const harness = createHarness();
     const node = catalogNode(harness, 'Товары');
-    const { objectModulePath, dump } = setupConflict(harness, node);
+    const { objectModulePath, dump } = setupConflict(harness);
 
     let openDiffsCalls = 0;
     const deps = baseDeps({
@@ -357,7 +361,11 @@ suite('RepositoryLockSync — runRepositoryLockFlow: конфликт × {compar
   test('choice="keep-local" — файл НЕ перезаписывается, помечается изменённым, хеш-кэш = хеш хранилища', async () => {
     const harness = createHarness();
     const node = catalogNode(harness, 'Товары');
-    const { objectModulePath, dump } = setupConflict(harness, node);
+    const { objectModulePath, dump } = setupConflict(harness);
+    // Хеш версии хранилища снимается ДО прогона потока: `runRepositoryLockFlow`
+    // обязан удалить временный каталог выгрузки (`dispose()`) в finally, поэтому
+    // после await-а каталога уже не существует.
+    const repositoryHash = computeFileHash(path.join(dump.dir, 'Catalogs/Товары/Ext/ObjectModule.bsl'));
 
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
@@ -373,7 +381,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: конфликт × {compar
 
     const scopeKey = buildScopeKey('cf', harness.configRoot, '');
     const cache = loadHashCache(harness.workspaceRoot, scopeKey);
-    assert.strictEqual(cache.files['Catalogs/Товары/Ext/ObjectModule.bsl'], computeFileHash(path.join(dump.dir, 'Catalogs/Товары/Ext/ObjectModule.bsl')));
+    assert.strictEqual(cache.files['Catalogs/Товары/Ext/ObjectModule.bsl'], repositoryHash);
   });
 
   test('несохранённый редактор (getDirtyFilePaths) принудительно даёт конфликт даже при отсутствии расхождения по хешу', async () => {
@@ -490,7 +498,7 @@ suite('RepositoryLockSync — runRepositoryUpdateFlow', () => {
     const outcome = await runRepositoryUpdateFlow(node, { recursive: false, force: true, version: '125' }, harness.services, deps);
 
     assert.strictEqual(outcome, 'done');
-    assert.ok(observedExtraArgs?.includes('-Force') || observedExtraArgs?.includes('-force'));
+    assert.ok(observedExtraArgs?.includes('-Force') ?? observedExtraArgs?.includes('-force'));
     assert.ok(observedExtraArgs?.some((arg) => arg === '125'));
   });
 
@@ -524,5 +532,416 @@ suite('RepositoryLockSync — runRepositoryUpdateFlow', () => {
 
     assert.strictEqual(outcome, 'done', 'CLI успешно отработал — сама операция update не должна считаться проваленной из-за сбоя довыгрузки.');
     assert.ok(notifyErrorCalls >= 1, 'Пользователь должен быть уведомлён о том, что автоматическая синхронизация файлов не удалась.');
+  });
+});
+
+suite('RepositoryLockSync — runRepositoryLockFlow: узел без валидной цели', () => {
+  test('xmlPath не резолвится в корень конфигурации — outcome "failed", state не меняется', async () => {
+    const harness = createHarness();
+    const node: RepositoryNodeRef = {
+      nodeKind: 'Catalog',
+      label: 'Товары',
+      xmlPath: path.join(harness.workspaceRoot, 'нет-такого-каталога', 'Товары.xml'),
+    };
+    let notifyErrorCalls = 0;
+    const deps = baseDeps({ notifyError: () => { notifyErrorCalls += 1; } });
+
+    const outcome = await runRepositoryLockFlow(node, false, harness.services, deps);
+
+    assert.strictEqual(outcome, 'failed');
+    assert.strictEqual(notifyErrorCalls, 1);
+  });
+});
+
+function buildSubsystemXml(name: string, refs: string[], childSubsystems: string[]): string {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<MetaDataObject>
+  <Subsystem>
+    <Properties>
+      <Name>${name}</Name>
+      <Synonym/>
+      ${refs.length > 0
+        ? `<Content>${refs.map((ref) => `<xr:Item xsi:type="xr:MDObjectRef">${ref}</xr:Item>`).join('')}</Content>`
+        : '<Content/>'}
+    </Properties>
+    ${childSubsystems.length > 0
+      ? `<ChildObjects>${childSubsystems.map((child) => `<Subsystem>${child}</Subsystem>`).join('')}</ChildObjects>`
+      : '<ChildObjects/>'}
+  </Subsystem>
+</MetaDataObject>`;
+}
+
+function subsystemNode(harness: Harness, name: string): RepositoryNodeRef {
+  const xmlPath = path.join(harness.configRoot, 'Subsystems', `${name}.xml`);
+  return { nodeKind: 'Subsystem', label: name, xmlPath };
+}
+
+suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная подсистема — довыгрузка недостающих участников', () => {
+  test('несколько раундов довыгрузки до неподвижной точки: новый объект найден в раунде 1, раунд 2 ничего не находит — 2 вызова dumpToTemp', async () => {
+    const harness = createHarness();
+    fs.mkdirSync(path.join(harness.configRoot, 'Subsystems'), { recursive: true });
+    fs.writeFileSync(
+      path.join(harness.configRoot, 'Subsystems', 'Продажи.xml'),
+      buildSubsystemXml('Продажи', ['Catalog.Товары'], []),
+      'utf-8'
+    );
+    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
+    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Товары.xml'), '<MetaDataObject/>', 'utf-8');
+
+    let calls = 0;
+    // Версия хранилища подсистемы (Subsystems/Продажи.xml) отличается от локальной —
+    // это законный конфликт по её СОБСТВЕННОМУ XML (без хеш-кэша нет способа отличить
+    // «локально не менялось» от «изменилось»), поэтому choice="replace" — принять версию
+    // хранилища (в проекте правок не было, сценарий проверяет сам механизм довыгрузки).
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      chooseConflictResolution: () => Promise.resolve('replace'),
+      dumpToTemp: () => {
+        calls += 1;
+        if (calls === 1) {
+          // Первая (основная) выгрузка подсистемы: сервер уже содержит новый объект "Новый",
+          // ещё не известный локальному проекту.
+          const dump = makeTempDump({
+            'Subsystems/Продажи.xml': buildSubsystemXml('Продажи', ['Catalog.Товары', 'Catalog.Новый'], []),
+            'Catalogs/Товары.xml': '<MetaDataObject/>',
+          });
+          return Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose });
+        }
+        // Раунд довыгрузки: приходит только сам новый объект, без обновлённой подсистемы —
+        // следующий раунд не найдёт в нём ничего нового и завершит цикл.
+        const dump = makeTempDump({ 'Catalogs/Новый.xml': '<MetaDataObject/>' });
+        return Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose });
+      },
+    });
+
+    const outcome = await runRepositoryLockFlow(subsystemNode(harness, 'Продажи'), true, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(calls, 2, 'основная выгрузка + ровно один продуктивный раунд довыгрузки.');
+    assert.strictEqual(fs.existsSync(path.join(harness.configRoot, 'Catalogs', 'Новый.xml')), true, 'найденный довыгрузкой объект должен быть слит в проект.');
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Новый'), true, 'найденный довыгрузкой участник должен попасть в состав захвата.');
+  });
+
+  test('лимит 5 раундов: участники находятся бесконечной цепочкой — довыгрузка останавливается ровно на 4-м раунде', async () => {
+    const harness = createHarness();
+    fs.mkdirSync(path.join(harness.configRoot, 'Subsystems'), { recursive: true });
+    fs.writeFileSync(
+      path.join(harness.configRoot, 'Subsystems', 'Продажи.xml'),
+      buildSubsystemXml('Продажи', ['Catalog.Товары'], []),
+      'utf-8'
+    );
+    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
+    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Товары.xml'), '<MetaDataObject/>', 'utf-8');
+
+    let calls = 0;
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      // Собственный XML подсистемы каждый раунд отличается от локального — законный
+      // конфликт без хеш-кэша; "replace" принимает версию хранилища.
+      chooseConflictResolution: () => Promise.resolve('replace'),
+      dumpToTemp: () => {
+        calls += 1;
+        if (calls === 1) {
+          const dump = makeTempDump({
+            'Subsystems/Продажи.xml': buildSubsystemXml('Продажи', ['Catalog.Товары', 'Catalog.New1'], []),
+            'Catalogs/Товары.xml': '<MetaDataObject/>',
+          });
+          return Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose });
+        }
+        // Каждый раунд «сервер» вдобавок сообщает об ОДНОМ ещё более новом участнике —
+        // патологический, но допустимый с т.з. интерфейса ответ, которым проверяется
+        // защитный предел MAX_SUBSYSTEM_DUMP_ROUNDS (иначе цикл был бы бесконечным.
+        const round = calls - 1;
+        const refs = ['Catalog.Товары', ...Array.from({ length: round + 1 }, (_v, i) => `Catalog.New${String(i + 1)}`)];
+        const dump = makeTempDump({
+          [`Catalogs/New${String(round)}.xml`]: '<MetaDataObject/>',
+          'Subsystems/Продажи.xml': buildSubsystemXml('Продажи', refs, []),
+        });
+        return Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose });
+      },
+    });
+
+    const outcome = await runRepositoryLockFlow(subsystemNode(harness, 'Продажи'), true, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(calls, 5, 'основная выгрузка + ровно 4 раунда (MAX_SUBSYSTEM_DUMP_ROUNDS-1) — дальше цикл обязан остановиться.');
+    ['New1', 'New2', 'New3', 'New4'].forEach((name) => {
+      assert.strictEqual(harness.repositoryService.isLocked(harness.target, `Справочник.${name}`), true, `${name} должен быть найден в пределах лимита раундов.`);
+      assert.strictEqual(fs.existsSync(path.join(harness.configRoot, 'Catalogs', `${name}.xml`)), true, `${name} должен быть слит в проект.`);
+    });
+  });
+
+  test('раунд довыгрузки провалился — цикл останавливается с предупреждением в журнале, ранее найденное сохраняется', async () => {
+    const harness = createHarness();
+    fs.mkdirSync(path.join(harness.configRoot, 'Subsystems'), { recursive: true });
+    fs.writeFileSync(
+      path.join(harness.configRoot, 'Subsystems', 'Продажи.xml'),
+      buildSubsystemXml('Продажи', ['Catalog.Товары'], []),
+      'utf-8'
+    );
+    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
+    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Товары.xml'), '<MetaDataObject/>', 'utf-8');
+
+    let calls = 0;
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      chooseConflictResolution: () => Promise.resolve('replace'),
+      dumpToTemp: () => {
+        calls += 1;
+        if (calls === 1) {
+          const dump = makeTempDump({
+            'Subsystems/Продажи.xml': buildSubsystemXml('Продажи', ['Catalog.Товары', 'Catalog.New1'], []),
+            'Catalogs/Товары.xml': '<MetaDataObject/>',
+          });
+          return Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose });
+        }
+        if (calls === 2) {
+          // Раунд 1 успешен и сообщает ещё об одном новом участнике — иначе цикл
+          // остановился бы после первого же раунда и сбой довыгрузки не был бы достигнут.
+          const dump = makeTempDump({
+            'Catalogs/New1.xml': '<MetaDataObject/>',
+            'Subsystems/Продажи.xml': buildSubsystemXml('Продажи', ['Catalog.Товары', 'Catalog.New1', 'Catalog.New2'], []),
+          });
+          return Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose });
+        }
+        // Раунд 2 — сбой выгрузки.
+        return Promise.resolve({ ok: false, reason: 'сеть недоступна' });
+      },
+    });
+
+    const outcome = await runRepositoryLockFlow(subsystemNode(harness, 'Продажи'), true, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done', 'сбой довыгрузки НЕ отменяет уже выполненный захват.');
+    assert.strictEqual(calls, 3, 'основная выгрузка + успешный раунд 1 + провалившийся раунд 2.');
+    assert.ok(
+      harness.outputLines.some((line) => line.includes('довыгрузка участников подсистемы не удалась') && line.includes('сеть недоступна')),
+      'должен быть залогирован факт сбоя довыгрузки.'
+    );
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.New1'), true, 'участник, найденный до сбоя, остаётся в составе захвата.');
+    assert.strictEqual(fs.existsSync(path.join(harness.configRoot, 'Catalogs', 'New1.xml')), true, 'участник, найденный до сбоя, должен быть слит в проект.');
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.New2'), false, 'участник, обнаруженный только в провалившемся раунде, не может быть довыгружен.');
+  });
+
+  test('вложенная дочерняя подсистема: собственная область НЕ мержится отдельно (её файлы уже покрыты областью корневой подсистемы)', async () => {
+    const harness = createHarness();
+    fs.mkdirSync(path.join(harness.configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница'), { recursive: true });
+    fs.writeFileSync(
+      path.join(harness.configRoot, 'Subsystems', 'Продажи.xml'),
+      buildSubsystemXml('Продажи', ['Catalog.Товары'], ['Розница']),
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(harness.configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница', 'Розница.xml'),
+      buildSubsystemXml('Розница', ['Document.ЗаказПокупателя'], []),
+      'utf-8'
+    );
+    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
+    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Товары.xml'), '<MetaDataObject/>', 'utf-8');
+    fs.mkdirSync(path.join(harness.configRoot, 'Documents', 'ЗаказПокупателя'), { recursive: true });
+    fs.writeFileSync(
+      path.join(harness.configRoot, 'Documents', 'ЗаказПокупателя', 'ЗаказПокупателя.xml'),
+      '<MetaDataObject/>',
+      'utf-8'
+    );
+
+    const dump = makeTempDump({
+      'Subsystems/Продажи.xml': buildSubsystemXml('Продажи', ['Catalog.Товары'], ['Розница']),
+      'Subsystems/Продажи/Subsystems/Розница/Розница.xml': buildSubsystemXml('Розница', ['Document.ЗаказПокупателя'], []),
+      'Catalogs/Товары.xml': '<MetaDataObject/>',
+      'Documents/ЗаказПокупателя/ЗаказПокупателя.xml': '<MetaDataObject/>',
+    });
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      dumpToTemp: () => Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose }),
+    });
+
+    const outcome = await runRepositoryLockFlow(subsystemNode(harness, 'Продажи'), true, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.ok(
+      !harness.outputLines.some((line) => line.includes('область файлов не определена') && line.includes('Розница')),
+      'дочерняя подсистема пропускается через isNestedSubsystemMember ДО попытки резолва области, а не из-за ошибки резолва.'
+    );
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Подсистема.Розница'), true, 'состав захвата (state) всё равно включает дочернюю подсистему.');
+  });
+});
+
+suite('RepositoryLockSync — runRepositoryLockFlow: область объекта не определена', () => {
+  test('fullName узла не резолвится ни в проекте, ни в выгрузке — лог, объект пропущен, остальной поток не ломается', async () => {
+    const harness = createHarness();
+    // xmlPath указывает на РЕАЛЬНЫЙ существующий файл (чтобы резолвился корень конфигурации),
+    // но label подставлен так, что итоговый fullName не соответствует никакому реальному объекту.
+    const real = catalogNode(harness, 'РеальныйОбъект');
+    const node: RepositoryNodeRef = { nodeKind: 'Catalog', label: 'НесуществующийОбъект', xmlPath: real.xmlPath };
+    const dump = makeTempDump({});
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      dumpToTemp: () => Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose }),
+    });
+
+    const outcome = await runRepositoryLockFlow(node, false, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.ok(harness.outputLines.some((line) => line.includes('область файлов не определена') && line.includes('НесуществующийОбъект')));
+  });
+});
+
+suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурсивно — режим "partial" (изменённые/добавленные/удалённые владельцы)', () => {
+  function configDumpInfoXml(entries: { name: string; version: string }[]): string {
+    const items = entries.map((entry) => `<Metadata name="${entry.name}" id="${entry.name}-id" configVersion="${entry.version}"/>`).join('');
+    return `<ConfigDumpInfo xmlns="http://v8.1c.ru/8.3/xcf/dumpinfo">${items}</ConfigDumpInfo>`;
+  }
+
+  test('изменён один владелец (доля ниже порога) — частичная выгрузка ровно по нему, ConfigDumpInfo.xml заменён', async () => {
+    const harness = createHarness();
+    // Ещё 3 "молчаливых" владельца нужны только для знаменателя decideRootIncrementalStrategy
+    // (доля изменений должна остаться <=50%, иначе стратегия перейдёт на "full").
+    const projectInfo = configDumpInfoXml([
+      { name: 'Catalog.Изменяемый.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий1.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий2.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий3.ObjectModule', version: '1' },
+    ]);
+    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), projectInfo, 'utf-8');
+    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
+    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Изменяемый.xml'), '<MetaDataObject>старое</MetaDataObject>', 'utf-8');
+
+    const nextInfo = configDumpInfoXml([
+      { name: 'Catalog.Изменяемый.ObjectModule', version: '2' },
+      { name: 'Catalog.Тихий1.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий2.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий3.ObjectModule', version: '1' },
+    ]);
+    const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextInfo });
+    const partialDump = makeTempDump({ 'Catalogs/Изменяемый.xml': '<MetaDataObject>новое из хранилища</MetaDataObject>' });
+
+    const requests: ConfigurationDumpRequest[] = [];
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      // Локальная копия объекта отличается от версии хранилища и хеш-кэш пуст — законный
+      // конфликт по правилам трёхстороннего слияния; "replace" принимает версию хранилища.
+      chooseConflictResolution: () => Promise.resolve('replace'),
+      dumpToTemp: (_target, request) => {
+        requests.push(request);
+        return Promise.resolve(request.mode === 'update-info'
+          ? { ok: true, dir: infoDump.dir, dispose: infoDump.dispose }
+          : { ok: true, dir: partialDump.dir, dispose: partialDump.dispose });
+      },
+    });
+
+    const outcome = await runRepositoryLockFlow(
+      { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(harness.configRoot, 'Configuration.xml') },
+      true,
+      harness.services,
+      deps
+    );
+
+    assert.strictEqual(outcome, 'done');
+    assert.deepStrictEqual(requests.map((r) => r.mode), ['update-info', 'partial']);
+    assert.deepStrictEqual(requests[1], { mode: 'partial', fullNames: ['Справочник.Изменяемый'] });
+    assert.strictEqual(fs.readFileSync(path.join(harness.configRoot, 'Catalogs', 'Изменяемый.xml'), 'utf-8'), '<MetaDataObject>новое из хранилища</MetaDataObject>');
+    assert.strictEqual(fs.readFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), 'utf-8'), nextInfo, 'проектный ConfigDumpInfo.xml обязан замениться версией из выгрузки.');
+    assert.strictEqual(harness.repositoryService.isRootLocked(harness.target), true);
+  });
+
+  test('добавленный владелец → ChildObjects Configuration.xml пополняется; неопознанный владелец в diff — пропускается с логом', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lock-sync-root-added-'));
+    try {
+      fs.cpSync(path.resolve(__dirname, '../../../example/2.21/src/cf'), tempRoot, { recursive: true });
+      const guard = new ConfigurationOperationGuard();
+      const outputLines: string[] = [];
+      const suppressCalls: string[][] = [];
+      const markChangedCalls: string[][] = [];
+      let reloadCalls = 0;
+      const workspaceRootForTarget = tempRoot;
+      const repositoryService = new RepositoryService(workspaceRootForTarget, new ProjectSecretStorage(createFakeSecretStore(), workspaceRootForTarget));
+      const target = repositoryService.resolveTargetByConfigRoot(tempRoot);
+      assert.ok(target, 'предпосылка: реальная фикстура example/2.21/src/cf должна резолвиться в target.');
+      const services: RepositoryFileSyncServices = {
+        configurationOperationGuard: guard,
+        workspaceFolder: { uri: vscode.Uri.file(workspaceRootForTarget), name: 'test', index: 0 },
+        outputChannel: { appendLine: (line: string) => outputLines.push(line) } as unknown as vscode.OutputChannel,
+        repositoryService,
+        projectSecretStorage: {} as unknown as RepositoryFileSyncServices['projectSecretStorage'],
+        supportService: undefined,
+        suppressConfigurationReloadForFiles: (files: string[]) => suppressCalls.push(files),
+        markChangedConfigurationByFiles: (files: string[]) => markChangedCalls.push(files),
+        treeProvider: { refresh: () => undefined, refreshCacheForFiles: () => true } as unknown as MetadataTreeProvider,
+        refreshActionsView: () => undefined,
+        reloadEntries: () => { reloadCalls += 1; return Promise.resolve(); },
+      };
+
+      const projectConfigDumpInfo = fs.readFileSync(path.join(tempRoot, 'ConfigDumpInfo.xml'), 'utf-8');
+      // "Неопознанный" владелец — префикс, которого нет в таблице соответствия типов,
+      // проверяет ветку toFullName(...)===null (лог и фильтрация, а не исключение).
+      const nextConfigDumpInfo = projectConfigDumpInfo.replace('</ConfigDumpInfo>', '') +
+        '<Metadata name="Catalog.НовыйКорневойСправочник.ObjectModule" id="new-id" configVersion="1"/>' +
+        '<Metadata name="НеизвестныйПрефикс.Что-то.ObjectModule" id="unknown-id" configVersion="1"/>' +
+        '</ConfigDumpInfo>';
+      const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextConfigDumpInfo });
+      const partialDump = makeTempDump({ 'Catalogs/НовыйКорневойСправочник.xml': '<MetaDataObject/>' });
+
+      const deps = baseDeps({
+        runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+        dumpToTemp: (_t, request) => Promise.resolve(request.mode === 'update-info'
+          ? { ok: true, dir: infoDump.dir, dispose: infoDump.dispose }
+          : { ok: true, dir: partialDump.dir, dispose: partialDump.dispose }),
+      });
+
+      const outcome = await runRepositoryLockFlow(
+        { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(tempRoot, 'Configuration.xml') },
+        true,
+        services,
+        deps
+      );
+
+      assert.strictEqual(outcome, 'done');
+      assert.strictEqual(fs.existsSync(path.join(tempRoot, 'Catalogs', 'НовыйКорневойСправочник.xml')), true);
+      const configXmlText = fs.readFileSync(path.join(tempRoot, 'Configuration.xml'), 'utf-8');
+      assert.ok(configXmlText.includes('<Catalog>НовыйКорневойСправочник</Catalog>'), 'новый владелец должен появиться в ChildObjects Configuration.xml.');
+      assert.ok(
+        outputLines.some((line) => line.includes('владелец') && line.includes('не распознан') && line.includes('НеизвестныйПрефикс')),
+        'нераспознанный владелец из diff обязан быть залогирован, а не привести к исключению.'
+      );
+      assert.strictEqual(reloadCalls, 1, 'структурное изменение (новый ChildObjects) требует полного reloadEntries.');
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('частичная выгрузка изменённых владельцев провалилась — outcome "done" (захват уже состоялся), лог сбоя', async () => {
+    const harness = createHarness();
+    const projectInfo = '<ConfigDumpInfo xmlns="http://v8.1c.ru/8.3/xcf/dumpinfo">' +
+      '<Metadata name="Catalog.Изменяемый.ObjectModule" id="a" configVersion="1"/>' +
+      '<Metadata name="Catalog.Тихий1.ObjectModule" id="b" configVersion="1"/>' +
+      '<Metadata name="Catalog.Тихий2.ObjectModule" id="c" configVersion="1"/>' +
+      '<Metadata name="Catalog.Тихий3.ObjectModule" id="d" configVersion="1"/>' +
+      '</ConfigDumpInfo>';
+    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), projectInfo, 'utf-8');
+    const nextInfo = projectInfo.replace('configVersion="1"/>\n    <Metadata name="Catalog.Тихий1', 'configVersion="2"/><Metadata name="Catalog.Тихий1')
+      .replace('name="Catalog.Изменяемый.ObjectModule" id="a" configVersion="1"', 'name="Catalog.Изменяемый.ObjectModule" id="a" configVersion="2"');
+    const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextInfo });
+    let partialCalls = 0;
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      dumpToTemp: (_t, request) => {
+        if (request.mode === 'update-info') {
+          return Promise.resolve({ ok: true, dir: infoDump.dir, dispose: infoDump.dispose });
+        }
+        partialCalls += 1;
+        return Promise.resolve({ ok: false, reason: 'сервер хранилища недоступен' });
+      },
+    });
+
+    const outcome = await runRepositoryLockFlow(
+      { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(harness.configRoot, 'Configuration.xml') },
+      true,
+      harness.services,
+      deps
+    );
+
+    assert.strictEqual(outcome, 'done', 'сама операция захвата корня уже выполнена CLI-командой — сбой довыгрузки объектов её не отменяет.');
+    assert.strictEqual(partialCalls, 1);
+    assert.ok(harness.outputLines.some((line) => line.includes('сервер хранилища недоступен')));
   });
 });

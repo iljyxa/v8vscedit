@@ -146,10 +146,10 @@ suite('RepositoryCommandRunner — executeRepositoryCli: гарантирова�
     };
     errorMessageCalls = [];
     originalShowErrorMessage = vscode.window.showErrorMessage;
-    (vscode.window as { showErrorMessage: typeof vscode.window.showErrorMessage }).showErrorMessage = ((...args: unknown[]) => {
+    (vscode.window as { showErrorMessage: typeof vscode.window.showErrorMessage }).showErrorMessage = (...args: unknown[]) => {
       errorMessageCalls.push(args);
       return Promise.resolve(undefined);
-    }) as typeof vscode.window.showErrorMessage;
+    };
   });
 
   teardown(() => {
