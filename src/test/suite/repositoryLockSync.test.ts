@@ -13,7 +13,7 @@ import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOp
 import { RepositoryService, type RepositoryNodeRef, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import { buildScopeKey, computeFileHash, saveHashCache, loadHashCache } from '../../infra/cache/HashCache';
-import { buildRootDumpListName, subordinateUnitFullName } from '../../infra/repository/RepositoryObjectNames';
+import { buildRootDumpListName, getRootLockName, subordinateUnitFullName } from '../../infra/repository/RepositoryObjectNames';
 import { MAX_DUMP_ROUNDS } from '../../infra/repository/RepositoryDumpRounds';
 import type { ConfigurationDumpRequest } from '../../infra/agent';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
@@ -801,9 +801,11 @@ suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная по
     const level1 = subordinateUnitFullName('Подсистема.Продажи', 'Subsystem', 'Level1');
     const level2 = subordinateUnitFullName(level1, 'Subsystem', 'Level2');
     let calls = 0;
+    const notifyWarningCalls: { message: string; guardBusy: boolean }[] = [];
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
       chooseConflictResolution: () => Promise.resolve('replace'),
+      notifyWarning: (message: string) => { notifyWarningCalls.push({ message, guardBusy: harness.guard.isBusy }); },
       dumpToTemp: () => {
         calls += 1;
         if (calls === 1) {
@@ -837,6 +839,9 @@ suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная по
     assert.strictEqual(harness.repositoryService.isLocked(harness.target, level1), true, 'участник, найденный до сбоя, остаётся в составе захвата.');
     assert.strictEqual(fs.existsSync(path.join(harness.configRoot, nestedSubsystemXmlRel(['Продажи', 'Level1']))), true, 'участник, найденный до сбоя, должен быть слит в проект.');
     assert.strictEqual(harness.repositoryService.isLocked(harness.target, level2), false, 'участник, обнаруженный только в провалившемся раунде, не может быть довыгружен.');
+    assert.strictEqual(notifyWarningCalls.length, 1, 'о недовыгруженном участнике должно быть выдано ровно одно предупреждение пользователю.');
+    assert.ok(notifyWarningCalls[0].message.includes('1'), 'сообщение должно называть число недовыгруженных единиц.');
+    assert.strictEqual(notifyWarningCalls[0].guardBusy, false, 'предупреждение о missing показывается ПОСЛЕ освобождения аренды guard.');
   });
 
   test('вложенная дочерняя подсистема: единица с каноничным D3-именем находится и захватывается отдельно от корневой', async () => {
@@ -1149,5 +1154,87 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
     assert.deepStrictEqual(modes, ['update-info', 'full']);
     assert.ok(harness.outputLines.some((line) => line.includes('изменено владельцев больше порога')));
     assert.ok(harness.outputLines.some((line) => line.includes('диск переполнен')));
+  });
+
+  test('изменён владелец, choice="keep-local" — хеш-манифест корня получает хеш ХРАНИЛИЩА через overrides, а не оставленного локального содержимого', async () => {
+    const harness = createHarness();
+    const projectInfo = configDumpInfoXml([
+      { name: 'Catalog.Изменяемый.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий1.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий2.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий3.ObjectModule', version: '1' },
+    ]);
+    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), projectInfo, 'utf-8');
+    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
+    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Изменяемый.xml'), '<MetaDataObject>локальная правка</MetaDataObject>', 'utf-8');
+
+    const nextInfo = configDumpInfoXml([
+      { name: 'Catalog.Изменяемый.ObjectModule', version: '2' },
+      { name: 'Catalog.Тихий1.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий2.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий3.ObjectModule', version: '1' },
+    ]);
+    const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextInfo });
+    const partialDump = makeTempDump({ 'Catalogs/Изменяемый.xml': '<MetaDataObject>версия хранилища</MetaDataObject>' });
+    // Хеш version-хранилища снимается ДО запуска потока: applyMergeWithPostMutation
+    // вызывает dump.dispose() в finally, temp-каталог выгрузки к концу теста уже удалён.
+    const repositoryHash = computeFileHash(path.join(partialDump.dir, 'Catalogs', 'Изменяемый.xml'));
+
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      chooseConflictResolution: () => Promise.resolve('keep-local'),
+      dumpToTemp: (_target, request) => Promise.resolve(request.mode === 'update-info'
+        ? { ok: true, dir: infoDump.dir, dispose: infoDump.dispose }
+        : { ok: true, dir: partialDump.dir, dispose: partialDump.dispose }),
+    });
+
+    const outcome = await runRepositoryLockFlow(
+      { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(harness.configRoot, 'Configuration.xml') },
+      true,
+      harness.services,
+      deps
+    );
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(fs.readFileSync(path.join(harness.configRoot, 'Catalogs', 'Изменяемый.xml'), 'utf-8'), '<MetaDataObject>локальная правка</MetaDataObject>', 'keep-local — локальный файл не трогается.');
+    const manifestHashes = harness.repositoryService.snapshots.readRootManifestHashes(harness.target);
+    assert.ok(manifestHashes);
+    assert.strictEqual(
+      manifestHashes['Catalogs/Изменяемый.xml'],
+      repositoryHash,
+      'Эталон отмены обязан отражать версию ХРАНИЛИЩА для keep-local файла, а не оставленную локальную (иначе изменения будут потеряны при следующем сравнении с базой).'
+    );
+  });
+});
+
+suite('RepositoryLockSync — runRepositoryUpdateFlow: корень рекурсивно, ранее захваченный (issue #1)', () => {
+  test('получение (update) без изменений на уже рекурсивно захваченном корне — хеш-манифест всё равно пересоздаётся (shouldCaptureRootManifest по isRootRecursiveLocked)', async () => {
+    const harness = createHarness();
+    const configDumpInfoContent = '<ConfigDumpInfo xmlns="http://v8.1c.ru/8.3/xcf/dumpinfo"><ConfigVersions/></ConfigDumpInfo>';
+    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), configDumpInfoContent, 'utf-8');
+    const dump = makeTempDump({ 'ConfigDumpInfo.xml': configDumpInfoContent });
+    // Корень уже захвачен рекурсивно РАНЕЕ (в этом сценарии проверяется именно
+    // update, а не сам захват) — operation==='update', поэтому shouldCaptureRootManifest
+    // обязан сработать через ВТОРОЙ операнд (isRootRecursiveLocked), не через первый.
+    harness.repositoryService.lockState.applyLock(harness.target, {
+      anchor: getRootLockName(harness.target),
+      members: [getRootLockName(harness.target)],
+      recursiveRoot: true,
+    });
+
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      dumpToTemp: () => Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose }),
+    });
+
+    const outcome = await runRepositoryUpdateFlow(
+      { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(harness.configRoot, 'Configuration.xml') },
+      { recursive: true, force: false },
+      harness.services,
+      deps
+    );
+
+    assert.strictEqual(outcome, 'done');
+    assert.ok(harness.repositoryService.snapshots.readRootManifestHashes(harness.target), 'Манифест обязан быть создан даже для update — операция всё ещё держит корень захваченным рекурсивно.');
   });
 });
