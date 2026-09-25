@@ -4,14 +4,10 @@ import type { MetaKind } from '../../domain/MetaTypes';
 import type { ProjectSecretStorage } from '../environment/ProjectSecretStorage';
 import { findObjectXmlInFolder } from '../fs/ObjectLocation';
 import { escapeXmlAttribute as escapeXml, parseConfigXml, parseObjectXml } from '../xml';
-import { computeFileHash } from '../cache/HashCache';
 import { RepositoryBindingStore } from './RepositoryBindingStore';
-import { buildRepositoryDumpPlan, resolveXmlPathByFullName } from './RepositoryDumpPlan';
 import { buildRepositoryScopeKey, RepositoryLockState } from './RepositoryLockState';
 import { RepositoryLockSnapshotStore } from './RepositoryLockSnapshotStore';
-import { buildMergeBackupDir } from './RepositoryMergeApplier';
 import { getRootLockName, ONE_C_TYPE_NAMES } from './RepositoryObjectNames';
-import { resolveObjectScope } from './RepositoryObjectScope';
 
 export interface RepositoryBinding {
   repoPath: string;
@@ -45,22 +41,6 @@ export interface RepositoryNodeRef {
     tabularSectionName?: string;
     ownerObjectXmlPath?: string;
   };
-}
-
-/**
- * Результат сравнения файлов объекта со снимком захвата (прежний API команд хранилища).
- * `hasSnapshot: false` — снимка нет, что не равно «изменений нет».
- */
-export interface RepositorySnapshotDiff {
-  hasSnapshot: boolean;
-  /** Пути (относительно `configRoot`) файлов, изменившихся или удалённых после захвата. */
-  changedFiles: string[];
-}
-
-/** Прежняя форма плана выгрузки: `rootCaptureFull` — захвачен корень целиком. */
-export interface RepositoryPartialDumpPlan {
-  readonly rootCaptureFull: boolean;
-  readonly fullNames: readonly string[];
 }
 
 /**
@@ -106,8 +86,7 @@ const CHILD_LIKE_KINDS: ReadonlySet<string> = new Set([
 
 /**
  * Виды узлов, у которых нет собственного XML-файла объекта: корень конфигурации/расширения
- * и узлы группировки дерева. У них не бывает ни полного имени объекта (`resolveFullName`),
- * ни файлов для снапшота захвата (`resolveObjectXmlPathForSnapshot`).
+ * и узлы группировки дерева. У них не бывает полного имени объекта (`resolveFullName`).
  */
 const ROOT_OR_GROUP_KINDS_WITHOUT_OWN_XML: ReadonlySet<string> = new Set([
   'configuration',
@@ -383,85 +362,6 @@ export class RepositoryService {
     };
   }
 
-  // --- Совместимость: прежний API снимков и плана выгрузки для команд хранилища,
-  // ещё не переведённых на потоки RepositoryLockSync/RepositoryUnlockSync. ---
-
-  captureLockSnapshot(target: RepositoryTarget, node: RepositoryNodeRef): void {
-    const fullName = this.resolveObjectXmlPathForSnapshot(node) ? this.resolveFullName(node) : null;
-    if (fullName) {
-      this.captureLockSnapshotForFullName(target, fullName);
-    }
-  }
-
-  captureLockSnapshotForFullName(target: RepositoryTarget, fullName: string, xmlPath?: string): void {
-    // Путь XML больше не нужен: область объекта резолвится по fullName в обеих раскладках.
-    void xmlPath;
-    const scope = resolveObjectScope(target.configRoot, fullName, target);
-    if (scope) {
-      this.snapshotStore.captureFromProject(target, fullName, scope);
-    }
-  }
-
-  getLockSnapshotDiff(target: RepositoryTarget, node: RepositoryNodeRef): RepositorySnapshotDiff {
-    const fullName = this.resolveFullName(node);
-    return fullName ? this.getLockSnapshotDiffForFullName(target, fullName) : { hasSnapshot: false, changedFiles: [] };
-  }
-
-  getLockSnapshotDiffForFullName(target: RepositoryTarget, fullName: string): RepositorySnapshotDiff {
-    const hashes = this.snapshotStore.readSnapshotHashes(target, fullName);
-    if (!hashes) {
-      return { hasSnapshot: false, changedFiles: [] };
-    }
-    const changedFiles = Object.entries(hashes)
-      .filter(([rel, hash]) => {
-        const currentPath = path.join(target.configRoot, rel);
-        return !fs.existsSync(currentPath) || computeFileHash(currentPath) !== hash;
-      })
-      .map(([rel]) => rel);
-    return { hasSnapshot: true, changedFiles };
-  }
-
-  restoreLockSnapshot(target: RepositoryTarget, node: RepositoryNodeRef): string[] {
-    const fullName = this.resolveFullName(node);
-    return fullName ? this.restoreLockSnapshotForFullName(target, fullName) : [];
-  }
-
-  restoreLockSnapshotForFullName(target: RepositoryTarget, fullName: string): string[] {
-    const scope = resolveObjectScope(target.configRoot, fullName, target);
-    if (!scope) {
-      return [];
-    }
-    const backupDir = buildMergeBackupDir(this.workspaceRoot, buildRepositoryScopeKey(target), 'unlock', new Date());
-    const result = this.snapshotStore.restoreToProject(target, fullName, scope, backupDir);
-    return [...result.restored, ...result.deleted];
-  }
-
-  discardLockSnapshot(target: RepositoryTarget, node: RepositoryNodeRef): void {
-    const fullName = this.resolveFullName(node);
-    if (fullName) {
-      this.snapshotStore.discard(target, fullName);
-    }
-  }
-
-  discardLockSnapshotForFullName(target: RepositoryTarget, fullName: string): void {
-    this.snapshotStore.discard(target, fullName);
-  }
-
-  buildPartialDumpPlan(
-    node: RepositoryNodeRef,
-    objects: { fullNames: string[] },
-    recursive: boolean
-  ): RepositoryPartialDumpPlan {
-    const plan = buildRepositoryDumpPlan(node, objects, recursive);
-    return plan.kind === 'objects'
-      ? { rootCaptureFull: false, fullNames: plan.fullNames }
-      : { rootCaptureFull: true, fullNames: [] };
-  }
-
-  resolveXmlPathByFullName(configRoot: string, fullName: string): string | null {
-    return resolveXmlPathByFullName(configRoot, fullName);
-  }
-
   private buildRootObjectFullName(kind: MetaKind, xmlPath: string | undefined, fallbackLabel: string | undefined): string | null {
     const rootKindName = ONE_C_TYPE_NAMES[kind];
     if (!rootKindName) {
@@ -494,29 +394,6 @@ export class RepositoryService {
       : null;
     this.rootFullNameCache.set(cacheKey, { mtimeMs, value: fullName });
     return fullName;
-  }
-
-  /**
-   * Путь к XML корневого объекта-владельца для целей снапшота захвата. Повторяет маршрутизацию
-   * `resolveFullName`: для дочерних узлов (реквизит/ТЧ/форма/…) снапшотится не сам узел,
-   * а владелец — именно владелец захватывается и именно его файлы могут быть изменены.
-   * Для корня конфигурации/расширения и узлов группировки собственного XML-файла нет — `null`.
-   */
-  private resolveObjectXmlPathForSnapshot(node: RepositoryNodeRef): string | null {
-    const kind = node.nodeKind as MetaKind | undefined;
-    if (!kind) {
-      return null;
-    }
-
-    if (CHILD_LIKE_KINDS.has(kind)) {
-      return node.metaContext?.ownerObjectXmlPath ?? null;
-    }
-
-    if (ROOT_OR_GROUP_KINDS_WITHOUT_OWN_XML.has(kind)) {
-      return null;
-    }
-
-    return node.xmlPath ?? null;
   }
 
   private resolveOwnerObjectXmlPath(filePath: string): string | null {
