@@ -5,8 +5,10 @@ import * as path from 'path';
 import {
   buildHashSnapshot,
   buildScopeKey,
+  createHashSnapshot,
   diffHashSnapshots,
   loadHashCache,
+  resolveHashCacheFileStem,
   saveHashCache,
 } from '../../infra/cache/HashCache';
 import { collectConfigFilesForLoad, detectPotentialRename } from '../../infra/agent/ConfigLoadFileCollector';
@@ -96,6 +98,36 @@ suite('HashCache', () => {
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
+  });
+
+  test('saveHashCache бросает при каталоге на месте целевого файла и не оставляет .tmp', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-hash-cache-dirblock-'));
+    try {
+      const scopeKey = buildScopeKey('cf', path.join(tempRoot, 'src', 'cf'));
+      const stem = resolveHashCacheFileStem(tempRoot, scopeKey);
+      fs.mkdirSync(`${stem}.json`, { recursive: true });
+
+      assert.throws(() => saveHashCache(tempRoot, {
+        schemaVersion: 1,
+        scopeKey,
+        generatedAt: '',
+        files: {},
+      }));
+
+      const leftoverTmp = fs.readdirSync(path.dirname(stem)).filter((name) => name.endsWith('.tmp'));
+      assert.deepStrictEqual(leftoverTmp, []);
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('createHashSnapshot формирует снапшот текущей схемы с непустым generatedAt', () => {
+    const files = { 'Catalogs/Тест.xml': 'hash-1' };
+    const snapshot = createHashSnapshot('cf::scope', files);
+    assert.strictEqual(snapshot.schemaVersion, 1);
+    assert.strictEqual(snapshot.scopeKey, 'cf::scope');
+    assert.deepStrictEqual(snapshot.files, files);
+    assert.ok(snapshot.generatedAt.length > 0);
   });
 });
 
