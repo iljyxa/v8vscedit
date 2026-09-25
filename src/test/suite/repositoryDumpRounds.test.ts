@@ -354,7 +354,7 @@ suite('RepositoryDumpRounds — runDumpRounds: раунд 0 успешен (issu
     }
   });
 
-  test('рекурсивная операция над ИнтернетМагазин: подчинённые в хеш-кэше → 1 вызов, включая таблицы измерения куба (два раунда раскрытия свёрнуты оптимистично)', async () => {
+  test('рекурсивная операция над ИнтернетМагазин: подчинённые в хеш-кэше → 1 вызов, включая таблицы измерения куба (раскрытие куба берётся из его проектного XML в том же BFS-проходе)', async () => {
     const outputLines: string[] = [];
     const services = createServices(fs.mkdtempSync(path.join(os.tmpdir(), 'v8-dump-rounds-eds-')), outputLines);
     const fixture = createPartialDumpFixture(EXAMPLE_CF, cfTarget.displayName);
@@ -366,12 +366,13 @@ suite('RepositoryDumpRounds — runDumpRounds: раунд 0 успешен (issu
         'ExternalDataSources/ИнтернетМагазин/Cubes/Продажи/DimensionTables/Товары.xml': 'h3',
         'ExternalDataSources/ИнтернетМагазин/Cubes/Продажи/DimensionTables/Регионы.xml': 'h4',
       };
-      // Раскрытие суммарно за все раунды: owner→{Table,Cube}; Cube→{DimTable×2}. При
-      // buildOptimisticDumpList раунд 0 использует ТОЛЬКО прямое раскрытие owner'а
-      // (Table, Cube) — раскрытие Cube→DimensionTables появляется только когда Cube уже
-      // НАЙДЕН (после раунда 0), поэтому здесь ожидается ДВА раунда (owner+Table+Cube,
-      // затем 2 таблицы измерения), а не один — куб пока не был выгружен, чтобы прочитать
-      // его собственный XML.
+      // buildOptimisticDumpList раскрывает список раунда 0 по РЕАЛЬНОМУ ПРОЕКТНОМУ XML
+      // (не по временной выгрузке): owner→{Table,Cube} читается из проектного
+      // ИнтернетМагазин.xml, а Cube→{DimTable×2} — из проектного Cubes/Продажи.xml
+      // (тот же реальный файл, что уже лежит в фикстуре) за один и тот же BFS-проход,
+      // ДО первого запуска выгрузки. Поэтому при непустом, но ПОЛНОМ хеш-кэше (все 4
+      // подчинённых уже известны с прошлой синхронизации) весь список собирается сразу
+      // и выгружается ровно одним вызовом (10.1.5: «подчинённые в хеш-кэше → 1 вызов»).
       const result = await runDumpRounds({
         target: cfTarget,
         anchors: [KNOWN_FIXTURE_UNITS.internetMagazin],
@@ -383,7 +384,7 @@ suite('RepositoryDumpRounds — runDumpRounds: раунд 0 успешен (issu
         optimistic: true,
       });
       assert.strictEqual(result.status, 'ok');
-      assert.strictEqual(fixture.calls.length, 2, 'Куб — новая, ранее не выгруженная единица; его собственные подчинённые раскрываются вторым раундом.');
+      assert.strictEqual(fixture.calls.length, 1, 'Весь состав уже известен из проектного XML владельца и куба и подтверждён хеш-кэшем — один вызов выгрузки.');
       assert.deepStrictEqual([...result.found.map((f: FoundUnit) => f.fullName)].sort(), [
         KNOWN_FIXTURE_UNITS.internetMagazin,
         KNOWN_FIXTURE_UNITS.internetMagazinZakazy,
@@ -400,20 +401,25 @@ suite('RepositoryDumpRounds — runDumpRounds: раунд 0 успешен (issu
 });
 
 suite('RepositoryDumpRounds — runDumpRounds: раунд 0 упал (issue #1, раздел 10, Р4, критерий 10.1.6)', () => {
-  test('оптимистичный список длиннее якорей и упал → повтор только якорей, повтор успешен', async () => {
+  test('оптимистичный список длиннее якорей и упал → повтор только якорей, затем раунды по выгруженному XML — итог совпадает с успешным сценарием', async () => {
     const outputLines: string[] = [];
     const services = createServices(fs.mkdtempSync(path.join(os.tmpdir(), 'v8-dump-rounds-optfail-')), outputLines);
     const fixture = createPartialDumpFixture(EXAMPLE_CF, cfTarget.displayName);
     const lease = services.configurationOperationGuard.tryAcquire('Захват');
     try {
-      // baseHashes «подсказывает» форму, которой в этой версии фикстуры НЕТ (её имени нет
-      // в partialDumpFixture — симулируем расхождение локальных предположений с базой).
-      const baseHashes = { 'Catalogs/Контрагенты/Forms/ФормаЭлемента.xml': 'h1' };
+      // Пустой хеш-кэш (Р4.1: «при пустом кэше фильтр не применяется») — оптимистичный
+      // список раунда 0 берёт ВСЁ раскрытие по проектному XML как есть, включая имя,
+      // которого на самом деле нет в базе (симулируем расхождение проекта с базой).
+      // Условие на konkretный xmlPath (а не просто на unit) гарантирует, что призрак
+      // добавляется РОВНО один раз — при построении оптимистичного списка по проектному
+      // XML, а не повторно при дальнейших раундах по уже выгруженным копиям.
+      const realKontragentyXmlPath = path.join(EXAMPLE_CF, 'Catalogs', 'Контрагенты.xml');
+      const ghostFullName = 'Справочник.Контрагенты.Форма.ПризракНесуществующейФормы';
       const brokenExpansion: UnitExpansion = (unit: string, xmlPath: string) => {
-        if (unit === KNOWN_FIXTURE_UNITS.kontragenty) {
-          return [...expandSubordinateUnits(unit, xmlPath), 'Справочник.Контрагенты.Форма.ПризракНесуществующейФормы'];
-        }
-        return expandSubordinateUnits(unit, xmlPath);
+        const base = expandSubordinateUnits(unit, xmlPath);
+        return unit === KNOWN_FIXTURE_UNITS.kontragenty && xmlPath === realKontragentyXmlPath
+          ? [...base, ghostFullName]
+          : base;
       };
       const result = await runDumpRounds({
         target: cfTarget,
@@ -422,13 +428,35 @@ suite('RepositoryDumpRounds — runDumpRounds: раунд 0 упал (issue #1, 
         services,
         dumpToTemp: dumpToTempOf(fixture),
         toDumpListName,
-        baseHashes: { ...baseHashes, 'НекийФайлЧтобыФильтрНеБылПуст.xml': 'x' },
+        baseHashes: {},
         optimistic: true,
       });
-      assert.strictEqual(result.status, 'ok', 'Повтор только якорем должен пройти успешно.');
-      assert.strictEqual(fixture.calls.length, 2, 'Раунд 0 (с призрачной формой, провал) + повтор только якорем.');
-      assert.deepStrictEqual(fixture.calls[1].names, [KNOWN_FIXTURE_UNITS.kontragenty]);
-      assert.deepStrictEqual(result.found.map((f: FoundUnit) => f.fullName), [KNOWN_FIXTURE_UNITS.kontragenty]);
+      assert.strictEqual(result.status, 'ok', 'Повтор только якорем и последующие раунды должны пройти успешно.');
+      assert.strictEqual(fixture.calls.length, 3, 'Раунд 0 (оптимистичный список с призраком, провал) + повтор якорем + раунд довыгрузки реальных форм/макета.');
+      assert.deepStrictEqual([...fixture.calls[0].names].sort(), [
+        KNOWN_FIXTURE_UNITS.kontragenty,
+        KNOWN_FIXTURE_UNITS.kontragentyFormaElementa,
+        KNOWN_FIXTURE_UNITS.kontragentyFormaSpiska,
+        KNOWN_FIXTURE_UNITS.kontragentyMaket,
+        ghostFullName,
+      ].sort(), 'оптимистичный список раунда 0 включает призрака (кэш пуст — фильтра нет).');
+      assert.deepStrictEqual(fixture.calls[1].names, [KNOWN_FIXTURE_UNITS.kontragenty], 'повтор после провала — точно якоря, без призрака.');
+      assert.deepStrictEqual([...fixture.calls[2].names].sort(), [
+        KNOWN_FIXTURE_UNITS.kontragentyFormaElementa,
+        KNOWN_FIXTURE_UNITS.kontragentyFormaSpiska,
+        KNOWN_FIXTURE_UNITS.kontragentyMaket,
+      ].sort(), 'после успешного повтора якорем раскрытие продолжается по РЕАЛЬНОМУ выгруженному XML владельца (без призрака).');
+      assert.ok(
+        outputLines.some((line) => line.includes('оптимистичный список выгрузки отклонён') && line.includes(ghostFullName)),
+        'провал оптимистичного раунда 0 должен логироваться.'
+      );
+      assert.deepStrictEqual([...result.found.map((f: FoundUnit) => f.fullName)].sort(), [
+        KNOWN_FIXTURE_UNITS.kontragenty,
+        KNOWN_FIXTURE_UNITS.kontragentyFormaElementa,
+        KNOWN_FIXTURE_UNITS.kontragentyFormaSpiska,
+        KNOWN_FIXTURE_UNITS.kontragentyMaket,
+      ].sort(), 'итоговый набор найденных единиц совпадает с успешным сценарием (раунд 0 без провала).');
+      assert.deepStrictEqual(result.missing, []);
       result.dispose();
     } finally {
       fixture.disposeAll();

@@ -13,7 +13,8 @@ import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOp
 import { RepositoryService, type RepositoryNodeRef, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import { buildScopeKey, computeFileHash, saveHashCache, loadHashCache } from '../../infra/cache/HashCache';
-import { buildRootDumpListName } from '../../infra/repository/RepositoryObjectNames';
+import { buildRootDumpListName, subordinateUnitFullName } from '../../infra/repository/RepositoryObjectNames';
+import { MAX_DUMP_ROUNDS } from '../../infra/repository/RepositoryDumpRounds';
 import type { ConfigurationDumpRequest } from '../../infra/agent';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import type { MetadataTreeProvider } from '../../ui/tree/MetadataTreeProvider';
@@ -715,7 +716,19 @@ suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная по
     assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Новый'), true, 'найденный довыгрузкой участник должен попасть в состав захвата.');
   });
 
-  test('лимит 5 раундов: участники находятся бесконечной цепочкой — довыгрузка останавливается ровно на 4-м раунде', async () => {
+  /**
+   * Р4.3: раунд N+1 раскрывается ТОЛЬКО по XML единиц, найденных именно в раунде N
+   * (из каталога ЭТОГО раунда), а не повторным перечитыванием owner'а — поэтому
+   * бесконечная цепочка строится не через повторные Content подсистемы-владельца
+   * (как было раньше), а через цепочку ВЛОЖЕННЫХ подсистем: XML каждого уровня,
+   * попавший в раунд, ссылается на следующий уровень в СВОИХ ChildObjects.
+   */
+  function nestedSubsystemXmlRel(chain: readonly string[]): string {
+    const tail = chain.slice(1).flatMap((name) => ['Subsystems', name]);
+    return `${['Subsystems', chain[0], ...tail].join('/')}/${chain[chain.length - 1]}.xml`;
+  }
+
+  test(`лимит ${String(MAX_DUMP_ROUNDS)} раундов: цепочка вложенных подсистем длиннее лимита — довыгрузка останавливается на границе`, async () => {
     const harness = createHarness();
     fs.mkdirSync(path.join(harness.configRoot, 'Subsystems'), { recursive: true });
     fs.writeFileSync(
@@ -726,29 +739,29 @@ suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная по
     fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
     fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Товары.xml'), '<MetaDataObject/>', 'utf-8');
 
+    // Уровней в цепочке заведомо больше лимита раундов, чтобы дойти до обрыва.
+    const levels = Array.from({ length: MAX_DUMP_ROUNDS + 1 }, (_v, i) => `Level${String(i + 1)}`);
     let calls = 0;
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
-      // Собственный XML подсистемы каждый раунд отличается от локального — законный
-      // конфликт без хеш-кэша; "replace" принимает версию хранилища.
+      // Собственный XML корневой подсистемы отличается от локального (в ChildObjects
+      // появляется первый уровень цепочки) — законный конфликт без хеш-кэша.
       chooseConflictResolution: () => Promise.resolve('replace'),
       dumpToTemp: () => {
         calls += 1;
         if (calls === 1) {
           const dump = makeTempDump({
-            'Subsystems/Продажи.xml': buildSubsystemXml('Продажи', ['Catalog.Товары', 'Catalog.New1'], []),
+            'Subsystems/Продажи.xml': buildSubsystemXml('Продажи', ['Catalog.Товары'], [levels[0]]),
             'Catalogs/Товары.xml': '<MetaDataObject/>',
           });
           return Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose });
         }
-        // Каждый раунд «сервер» вдобавок сообщает об ОДНОМ ещё более новом участнике —
-        // патологический, но допустимый с т.з. интерфейса ответ, которым проверяется
-        // защитный предел MAX_SUBSYSTEM_DUMP_ROUNDS (иначе цикл был бы бесконечным.
-        const round = calls - 1;
-        const refs = ['Catalog.Товары', ...Array.from({ length: round + 1 }, (_v, i) => `Catalog.New${String(i + 1)}`)];
+        // Раунд K находит уровень levels[K-1] и сразу выгружает его собственный XML
+        // со ссылкой на следующий уровень цепочки — раскрытие продолжается неограниченно.
+        const levelIndex = calls - 2;
+        const chain = ['Продажи', ...levels.slice(0, levelIndex + 1)];
         const dump = makeTempDump({
-          [`Catalogs/New${String(round)}.xml`]: '<MetaDataObject/>',
-          'Subsystems/Продажи.xml': buildSubsystemXml('Продажи', refs, []),
+          [nestedSubsystemXmlRel(chain)]: buildSubsystemXml(levels[levelIndex], [], [levels[levelIndex + 1]]),
         });
         return Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose });
       },
@@ -756,12 +769,22 @@ suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная по
 
     const outcome = await runRepositoryLockFlow(subsystemNode(harness, 'Продажи'), true, harness.services, deps);
 
-    assert.strictEqual(outcome, 'done');
-    assert.strictEqual(calls, 5, 'основная выгрузка + ровно 4 раунда (MAX_SUBSYSTEM_DUMP_ROUNDS-1) — дальше цикл обязан остановиться.');
-    ['New1', 'New2', 'New3', 'New4'].forEach((name) => {
-      assert.strictEqual(harness.repositoryService.isLocked(harness.target, `Справочник.${name}`), true, `${name} должен быть найден в пределах лимита раундов.`);
-      assert.strictEqual(fs.existsSync(path.join(harness.configRoot, 'Catalogs', `${name}.xml`)), true, `${name} должен быть слит в проект.`);
-    });
+    assert.strictEqual(outcome, 'done', 'достижение предела раундов не отменяет уже выполненный захват.');
+    assert.strictEqual(calls, MAX_DUMP_ROUNDS, `основная выгрузка + ровно ${String(MAX_DUMP_ROUNDS - 1)} продуктивных раунда — дальше цикл обязан остановиться.`);
+    assert.ok(
+      harness.outputLines.some((line) => line.includes('достигнут предел') && line.includes(String(MAX_DUMP_ROUNDS))),
+      'должен быть залогирован факт достижения предела раундов.'
+    );
+    let fullName = 'Подсистема.Продажи';
+    // Найдены и слиты все уровни, кроме последнего (найденного бы только в раунде MAX_DUMP_ROUNDS+1).
+    for (let index = 0; index < MAX_DUMP_ROUNDS - 1; index += 1) {
+      fullName = subordinateUnitFullName(fullName, 'Subsystem', levels[index]);
+      assert.strictEqual(harness.repositoryService.isLocked(harness.target, fullName), true, `${levels[index]} должен быть найден в пределах лимита раундов.`);
+      const chain = ['Продажи', ...levels.slice(0, index + 1)];
+      assert.strictEqual(fs.existsSync(path.join(harness.configRoot, nestedSubsystemXmlRel(chain))), true, `${levels[index]} должен быть слит в проект.`);
+    }
+    const beyondLimit = subordinateUnitFullName(fullName, 'Subsystem', levels[MAX_DUMP_ROUNDS - 1]);
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, beyondLimit), false, 'уровень за пределом лимита раундов не может быть найден.');
   });
 
   test('раунд довыгрузки провалился — цикл останавливается с предупреждением в журнале, ранее найденное сохраняется', async () => {
@@ -775,6 +798,8 @@ suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная по
     fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
     fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Товары.xml'), '<MetaDataObject/>', 'utf-8');
 
+    const level1 = subordinateUnitFullName('Подсистема.Продажи', 'Subsystem', 'Level1');
+    const level2 = subordinateUnitFullName(level1, 'Subsystem', 'Level2');
     let calls = 0;
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
@@ -783,21 +808,20 @@ suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная по
         calls += 1;
         if (calls === 1) {
           const dump = makeTempDump({
-            'Subsystems/Продажи.xml': buildSubsystemXml('Продажи', ['Catalog.Товары', 'Catalog.New1'], []),
+            'Subsystems/Продажи.xml': buildSubsystemXml('Продажи', ['Catalog.Товары'], ['Level1']),
             'Catalogs/Товары.xml': '<MetaDataObject/>',
           });
           return Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose });
         }
         if (calls === 2) {
-          // Раунд 1 успешен и сообщает ещё об одном новом участнике — иначе цикл
-          // остановился бы после первого же раунда и сбой довыгрузки не был бы достигнут.
+          // Раунд 1 успешен и находит Level1, чей собственный XML ссылается на Level2 —
+          // иначе цикл остановился бы после первого же раунда и сбой довыгрузки Level2 не был бы достигнут.
           const dump = makeTempDump({
-            'Catalogs/New1.xml': '<MetaDataObject/>',
-            'Subsystems/Продажи.xml': buildSubsystemXml('Продажи', ['Catalog.Товары', 'Catalog.New1', 'Catalog.New2'], []),
+            [nestedSubsystemXmlRel(['Продажи', 'Level1'])]: buildSubsystemXml('Level1', [], ['Level2']),
           });
           return Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose });
         }
-        // Раунд 2 — сбой выгрузки.
+        // Раунд 2 (довыгрузка Level2) — сбой выгрузки.
         return Promise.resolve({ ok: false, reason: 'сеть недоступна' });
       },
     });
@@ -805,17 +829,17 @@ suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная по
     const outcome = await runRepositoryLockFlow(subsystemNode(harness, 'Продажи'), true, harness.services, deps);
 
     assert.strictEqual(outcome, 'done', 'сбой довыгрузки НЕ отменяет уже выполненный захват.');
-    assert.strictEqual(calls, 3, 'основная выгрузка + успешный раунд 1 + провалившийся раунд 2.');
+    assert.strictEqual(calls, 3, 'основная выгрузка + успешный раунд Level1 + провалившийся раунд Level2.');
     assert.ok(
-      harness.outputLines.some((line) => line.includes('довыгрузка участников подсистемы не удалась') && line.includes('сеть недоступна')),
+      harness.outputLines.some((line) => line.includes('довыгрузка') && line.includes('не удалась') && line.includes('сеть недоступна')),
       'должен быть залогирован факт сбоя довыгрузки.'
     );
-    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.New1'), true, 'участник, найденный до сбоя, остаётся в составе захвата.');
-    assert.strictEqual(fs.existsSync(path.join(harness.configRoot, 'Catalogs', 'New1.xml')), true, 'участник, найденный до сбоя, должен быть слит в проект.');
-    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.New2'), false, 'участник, обнаруженный только в провалившемся раунде, не может быть довыгружен.');
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, level1), true, 'участник, найденный до сбоя, остаётся в составе захвата.');
+    assert.strictEqual(fs.existsSync(path.join(harness.configRoot, nestedSubsystemXmlRel(['Продажи', 'Level1']))), true, 'участник, найденный до сбоя, должен быть слит в проект.');
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, level2), false, 'участник, обнаруженный только в провалившемся раунде, не может быть довыгружен.');
   });
 
-  test('вложенная дочерняя подсистема: собственная область НЕ мержится отдельно (её файлы уже покрыты областью корневой подсистемы)', async () => {
+  test('вложенная дочерняя подсистема: единица с каноничным D3-именем находится и захватывается отдельно от корневой', async () => {
     const harness = createHarness();
     fs.mkdirSync(path.join(harness.configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница'), { recursive: true });
     fs.writeFileSync(
@@ -853,9 +877,11 @@ suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная по
     assert.strictEqual(outcome, 'done');
     assert.ok(
       !harness.outputLines.some((line) => line.includes('область файлов не определена') && line.includes('Розница')),
-      'дочерняя подсистема пропускается через isNestedSubsystemMember ДО попытки резолва области, а не из-за ошибки резолва.'
+      'вложенная подсистема — обычная единица со своей областью (Р10/D3), резолв не должен падать.'
     );
-    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Подсистема.Розница'), true, 'состав захвата (state) всё равно включает дочернюю подсистему.');
+    // D3: вложенная подсистема называется по цепочке предков, а не коротким именем.
+    const nestedFullName = subordinateUnitFullName('Подсистема.Продажи', 'Subsystem', 'Розница');
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, nestedFullName), true, 'состав захвата (state) включает дочернюю подсистему под каноничным D3-именем.');
   });
 });
 
