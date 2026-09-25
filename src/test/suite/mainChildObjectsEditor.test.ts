@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import {
   MAIN_CHILD_OBJECTS_ENTRY_INDENT,
+  ensureMainChildObjects,
   registerChildInMainChildObjects,
 } from '../../infra/xml/MainChildObjectsEditor';
 
@@ -206,5 +207,27 @@ suite('MainChildObjectsEditor', () => {
         );
       });
     }
+  });
+
+  suite('ensureMainChildObjects', () => {
+    for (const block of ['<ChildObjects/>', '<ChildObjects>\n\t\t\t<Form>Ф</Form>\n\t\t</ChildObjects>']) {
+      test(`главный блок уже есть (${JSON.stringify(block)}) — строка возвращается без изменений`, () => {
+        const xml = `<Root>\n\t\t<Properties>\n\t\t\t<Name>X</Name>\n\t\t</Properties>\n\t\t${block}\n\t</Root>`;
+        assert.strictEqual(ensureMainChildObjects(xml), xml);
+      });
+    }
+
+    test('блока нет — пустой <ChildObjects/> вставляется сразу после </Properties> корня', () => {
+      const xml = '<Root>\n\t\t<InternalInfo/>\n\t\t<Properties>\n\t\t\t<Name>X</Name>\n\t\t</Properties>\n\t</Root>';
+      assert.strictEqual(
+        ensureMainChildObjects(xml),
+        '<Root>\n\t\t<InternalInfo/>\n\t\t<Properties>\n\t\t\t<Name>X</Name>\n\t\t</Properties>' +
+          '\n\t\t<ChildObjects/>\n\t</Root>'
+      );
+    });
+
+    test('нет ни <ChildObjects>, ни <Properties> — вставить некуда', () => {
+      assert.strictEqual(ensureMainChildObjects('<Root>\n\t\t<InternalInfo/>\n\t</Root>'), undefined);
+    });
   });
 });
