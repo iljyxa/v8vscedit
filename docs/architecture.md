@@ -190,6 +190,60 @@ XML, импорт/обновление конфигурации в базе). М
 относительно базы», использует `cleanWindow` через `markConfigurationsClean`, а не заводит третий
 параллельный механизм подавления.
 
+### Сериализация операций Конфигуратора с базой (`ConfigurationOperationGuard`)
+
+`infra/process/ConfigurationOperationGuard.ts` — чистый класс без `vscode`, единая блокировка полного
+импорта/обновления/применения конфигурации к базе в пределах одного окна VS Code. До issue #10 занятость
+жила модульным флагом `isUpdatingConfigurations` внутри `ExtensionCommands.ts`, и синхронизация с
+хранилищем (`RepositoryCommands`) шла мимо него — post-sync после `repository.connect`/`create` мог
+запустить свой Конфигуратор параллельно ручному импорту из UI, оба против одной базы.
+
+API:
+- `isBusy`/`heldBy` — текущее состояние и заголовок держащей операции.
+- `tryAcquire(title) → lease | undefined` — проверка и захват одной синхронной операцией (между ними нет
+  `await`), поэтому два вызова, стартовавшие в одном тике, не займут guard оба; `lease.release()`
+  идемпотентен и не снимает чужую (уже сменившуюся) аренду — сравнение по внутреннему токену держателя.
+- `runExclusive(title, op) → { acquired: true, value } | { acquired: false, heldBy }` — нереентерабельная
+  обёртка `tryAcquire` + `try/finally { release() }`; исключение `op()` пробрасывается тем же объектом,
+  guard освобождается независимо от исхода.
+- `onDidChangeBusy(listener)` — событие только на переходах `false→true`/`true→false`; ошибка подписчика
+  ловится и уходит в `onListenerError` конструктора, остальные подписчики уведомление всё равно получают.
+
+`Container` создаёт единственный экземпляр в конструкторе (`onListenerError` пишет `[guard][error] …` в
+outputChannel) и в `bootstrap()` подписывается на `onDidChangeBusy` в приватном
+`wireConfigurationOperationContext()` — это ЕДИНСТВЕННОЕ место, выставляющее контекст enablement
+`v8vscedit.isUpdatingConfigurations` (`package.json → contributes.commands[].enablement`); отказ
+`setContext` логируется отдельно (`[guard][error] setContext: …`), т.к. вызов асинхронный и не проходит
+через `onListenerError` самого guard'а. Экземпляр публикуется в `CommandServices.configurationOperationGuard`
+(и автоматически попадает в `buildMcpCommandServices` — MCP-мост `v8vscedit_execute_command` синхронизован
+с UI-командами через тот же guard).
+
+Пользователи:
+- `ui/commands/ext/ExtensionCommands.ts` — `importConfigurations` (ранняя проверка `isBusy` до QuickPick,
+  затем `tryAcquire` после него — защита от TOCTOU, пока пользователь выбирал конфигурации),
+  `updateChangedConfigurations`, `runExclusiveConfigurationOperation`. Занятость сообщается
+  `notifyConfigurationOperationBusy` (`ui/commands/ext/configurationOperationBusy.ts`) **без `await`**
+  (запрет №18 в `CLAUDE.md`): раньше нотификация await'илась внутри критической секции, и любой
+  параллельный вызывающий (`DbCommands`, MCP-мост) висел до закрытия сообщения пользователем, хотя
+  фактически в этот момент ничего не выполнялось.
+- `ui/commands/repository/RepositoryDatabaseSync.ts` — `runPostRepositorySync` (фоновый, `void`-путь после
+  `repository.connect`/`create`: apply → decompile → `markConfigurationsClean` → `reloadEntries` →
+  обновление UI, guard держится на всю цепочку целиком; при занятости ничего не запускает, пишет
+  `[repository][post-sync][busy]` с именем мешающей операции в outputChannel и уведомляет без `await`) и
+  `ensureTargetUpdatedBeforeCommit` (занятость проверяется дважды — до открытия QuickPick подтверждения
+  обновления и повторно через `runExclusive` после него, т.к. пока диалог был открыт, guard мог занять
+  другой путь). Внешние точки (runner'ы Конфигуратора, сам QuickPick) внедряются через
+  `RepositoryDatabaseSyncDeps` — логика захвата тестируется без реального процесса 1С.
+
+Известные ограничения:
+- Guard действует в пределах одного окна VS Code — второе окно и отдельный процесс CLI (`onec-tools`) им
+  не сериализуются.
+- `repository.commit`/`update`/`lock`/`unlock` сами по себе (без последующего полного
+  импорта/обновления/применения конфигурации к базе) под guard не попадают — заведено отдельно, issue #40
+  форка.
+- Ветка `feature/repository-lock-unlock-file-sync` (issue #1) при слиянии должна обернуть свой полный
+  импорт в `guard.runExclusive`, держа модальные диалоги подтверждения вне аренды.
+
 ### Режим поддержки поставщика (`ParentConfigurations.bin`)
 
 `infra/support/ParentConfigurationsParser.ts` разбирает `Ext/ParentConfigurations.bin` — список
@@ -345,6 +399,7 @@ extension.ts
 | Предки объекта в блоке «История» синтезируются из `META_TYPES`, а не берутся из живого дерева навигатора | Живое дерево отражает только текущую рабочую копию и врало бы для исторического состояния коммита (см. [git-history-graph.md](./git-history-graph.md)) |
 | Данные из базы (не из XML-выгрузки) передаются CLI → UI через `-ResultFile`, гейт разбора — `exitCode`, а не текст лога | Построчный перекодировщик вывода процесса (`LineBufferedDecoder`) не гарантирует целостность произвольных данных внутри marker-блока; `/Out`-файл — уже устоявшийся канал `*Configuration`-команд (см. «Паттерн: чтение данных из базы через пакетный Конфигуратор» выше) |
 | `ConfigurationCleanWindow`: окно тишины по корню конфигурации после импорта/обновления БД, единственный авторитетный пересчёт по его истечении | События watcher по файлам, записанным импортом, приходят уже после операции; полный `ConfigurationChangeDetector.detect` слишком дорог (~7 с на 59 503 файлах), чтобы гонять его на каждое из тысяч запоздавших событий (см. «Два механизма подавления собственных файловых событий» выше) |
+| `ConfigurationOperationGuard`: единый guard вместо модульного флага под каждым путём импорта/обновления/применения конфигурации к базе, аренда по токену, событие только на переходах | Прежний флаг `isUpdatingConfigurations` жил только в `ExtensionCommands` и не видел синхронизацию с хранилищем — параллельный post-sync и ручной импорт могли одновременно писать в одну базу (см. «Сериализация операций Конфигуратора с базой» выше) |
 
 ## Подробная документация
 

@@ -56,6 +56,7 @@ import { RoleRightsService } from '../../infra/role';
 import { MetadataNode } from '../../ui/tree/TreeNode';
 import type { MetadataTreeProvider } from '../../ui/tree/MetadataTreeProvider';
 import type { CommandServices } from '../../ui/commands/_shared';
+import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOperationGuard';
 
 // ─── Инфраструктура мока McpServer (образец mcpAddTools.test.ts / mcpServerAfterMutationGate.test.ts) ───
 
@@ -158,6 +159,10 @@ function createBaselineServices(overrides: Partial<CommandServices> = {}): Comma
     setTreeMessage: () => undefined,
     setTreeProcessingState: () => undefined,
     refreshActionsView: () => undefined,
+    // Issue #10: MCP-мост v8vscedit_execute_command идёт через общий guard —
+    // поле обязательно в CommandServices, гейт мутаций сюда не заглядывает,
+    // поэтому реальный (а не notImplemented) экземпляр.
+    configurationOperationGuard: new ConfigurationOperationGuard(),
   };
   return { ...base, ...overrides };
 }

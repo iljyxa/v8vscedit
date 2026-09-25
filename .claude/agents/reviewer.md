@@ -44,7 +44,7 @@ Grep остаётся для текста, строковых литералов
    - Команды контекстного меню — через `MODULE_SLOT_ACTIONS`/`META_TYPES.modules`, не хардкод.
    - MCP-инструменты принимают только канон путей (`docs/mcp-paths.md`).
    - Нет God-объектов (~800 строк порог).
-   - В критической секции `isUpdatingConfigurations` уведомления без `await`.
+   - В аренде `ConfigurationOperationGuard` уведомления без `await`.
 4. **Границы слоёв:** domain←никто, infra←domain, ui←domain+infra, cli←domain+infra. LSP без встроенного сервера.
 5. **SOLID и best-practices** (`docs/vscode-extension-best-practices.md`): активация, производительность, архитектура, webview CSP/nonce, тестирование, безопасность.
 6. **Тесты:** на реальных фикстурах, детерминированные, без `.only`, без заглушек ради покрытия; 100% покрытия изменённого кода (`coverage:changed`).

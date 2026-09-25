@@ -9,6 +9,7 @@ import type { RoleRightsService } from '../../infra/role';
 import type { AiSkillsInstaller } from '../../infra/skills/AiSkillsInstaller';
 import type { StandaloneServerService } from '../../infra/standalone';
 import type { SupportInfoService } from '../../infra/support/SupportInfoService';
+import type { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOperationGuard';
 import type {
   ConfigurationInfoService,
   ConfigurationScaffoldService,
@@ -84,4 +85,5 @@ export interface CommandServices {
   setTreeMessage: (message: string | undefined) => void;
   setTreeProcessingState: (state: UniversalPanelProcessingState) => void;
   refreshActionsView: () => void;
+  configurationOperationGuard: ConfigurationOperationGuard;
 }
