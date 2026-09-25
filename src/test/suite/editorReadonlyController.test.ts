@@ -359,6 +359,38 @@ suite('EditorReadonlyController — issue #1: readonly-переходы уже �
     }
   });
 
+  test('исключение внутри обработчика — НЕ-Error значение логируется через String(error) (ветка else тернарника)', async function () {
+    this.timeout(10_000);
+    const uri = vscode.Uri.file(filePathA);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(doc, { preview: false });
+
+    let listener: ChangeLocksListener | undefined;
+    const repositoryService = fakeRepositoryService({
+      // Тест намеренно бросает НЕ-Error значение — проверяет ветку String(error) в logError().
+      // eslint-disable-next-line @typescript-eslint/only-throw-error
+      isEditRestricted: () => { throw { code: 'сбой-не-error' }; },
+      onDidChangeLocks: (l: ChangeLocksListener) => { listener = l; return { dispose: () => { listener = undefined; } }; },
+    });
+    const supportService = fakeSupportService(() => false);
+    const guard = new BslReadonlyGuard(supportService, repositoryService, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
+    const logLines: string[] = [];
+    const controller = new EditorReadonlyController(repositoryService, supportService, guard, { appendLine: (line: string) => logLines.push(line) } as unknown as vscode.OutputChannel);
+    const disposable = controller.register();
+
+    try {
+      assert.ok(listener);
+      listener({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: ['Справочник.А'] });
+      await waitUntil(() => logLines.some((line) => line.includes('[readonly][error]')), 3000);
+      assert.ok(
+        logLines.some((line) => line.includes('[readonly][error]') && line.includes('[object Object]')),
+        'НЕ-Error причина должна логироваться через String(error), а не через .message.'
+      );
+    } finally {
+      disposable.dispose();
+    }
+  });
+
   test('dispose() прекращает реакцию на дальнейшие события', async function () {
     this.timeout(10_000);
     const uri = vscode.Uri.file(filePathA);
