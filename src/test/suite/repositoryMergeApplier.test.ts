@@ -366,4 +366,78 @@ suite('RepositoryMergeApplier — applyRepositoryMerge: choice="keep-local"', ()
       cleanup(fixture);
     }
   });
+
+  test('conflict-delete (сирота, отсутствует в хранилище) при keep-local: файл остаётся, из хеш-кэша убирается (repositoryHash===null)', () => {
+    const fixture = createFixture('keep-local-conflict-delete');
+    try {
+      fs.mkdirSync(path.join(fixture.projectDir, 'Catalogs'), { recursive: true });
+      const orphanPath = path.join(fixture.projectDir, 'Catalogs', 'Сирота.xml');
+      fs.writeFileSync(orphanPath, 'локальная правка сироты', 'utf-8');
+
+      // Сирота есть только в проекте (removedScopes) — версии хранилища для неё нет.
+      const orphanScope = resolveObjectScope(fixture.projectDir, 'Справочник.Сирота', fixture.target) as Extract<ObjectScope, { kind: 'object' }>;
+      const states = collectMergeFileStates({
+        configRoot: fixture.projectDir,
+        dumpDir: fixture.dumpDir,
+        scopes: [],
+        removedScopes: [orphanScope],
+        baseHashes: { 'Catalogs/Сирота.xml': 'другой-хеш-базы' },
+        dirtyRelativePaths: [],
+      });
+      const plan = planRepositoryMerge(states);
+      assert.strictEqual(plan.conflicts[0]?.action, 'conflict-delete');
+
+      const result = applyRepositoryMerge({
+        projectRoot: fixture.projectDir,
+        target: fixture.target,
+        dumpDir: fixture.dumpDir,
+        plan,
+        choice: 'keep-local',
+        backupDir: buildMergeBackupDir(fixture.projectDir, 'scope', 'lock', new Date()),
+        beforeWrite: () => undefined,
+      });
+
+      assert.strictEqual(fs.readFileSync(orphanPath, 'utf-8'), 'локальная правка сироты', 'Файл при keep-local не трогается.');
+      assert.deepStrictEqual(result.keptLocalFiles.map((f: string) => path.resolve(f)), [path.resolve(orphanPath)]);
+      assert.strictEqual(result.repositoryCopies.length, 0, 'Версии хранилища нет — копировать нечего.');
+
+      const scopeKey = buildScopeKey('cf', fixture.projectDir, '');
+      const cache = loadHashCache(fixture.projectDir, scopeKey);
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(cache.files, 'Catalogs/Сирота.xml'), false, 'Запись без версии хранилища должна быть убрана из хеш-кэша.');
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  test('delete-запись без scope (fallback ?? ALL_SCOPE в removeEmptyParentDirs) — файл удаляется без ошибки', () => {
+    const fixture = createFixture('delete-no-scope');
+    try {
+      fs.mkdirSync(path.join(fixture.projectDir, 'Catalogs'), { recursive: true });
+      const filePath = path.join(fixture.projectDir, 'Catalogs', 'БезОбласти.xml');
+      fs.writeFileSync(filePath, 'удаляемое содержимое', 'utf-8');
+
+      const plan = {
+        entries: [{ rel: 'Catalogs/БезОбласти.xml', repositoryHash: null, localHash: computeFileHash(filePath), baseHash: computeFileHash(filePath), action: 'delete' as const }],
+        conflicts: [],
+        silent: [],
+        skipped: [],
+        hasConflicts: false,
+      };
+
+      const result = applyRepositoryMerge({
+        projectRoot: fixture.projectDir,
+        target: fixture.target,
+        dumpDir: fixture.dumpDir,
+        plan,
+        choice: 'replace',
+        backupDir: buildMergeBackupDir(fixture.projectDir, 'scope', 'lock', new Date()),
+        beforeWrite: () => undefined,
+      });
+
+      assert.strictEqual(fs.existsSync(filePath), false);
+      assert.deepStrictEqual(result.deletedFiles.map((f: string) => path.resolve(f)), [path.resolve(filePath)]);
+    } finally {
+      cleanup(fixture);
+    }
+  });
 });

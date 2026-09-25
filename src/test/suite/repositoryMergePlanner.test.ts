@@ -425,6 +425,94 @@ suite('RepositoryMergePlanner — collectMergeFileStates (реальная ФС)
     }
   });
 
+  test('одна и та же область дважды в scopes — состояние берётся только один раз (дедупликация по states.has)', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-dedup-dump-'));
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-dedup-project-'));
+    try {
+      writeConfigurationXml(tempDir, fixtureUuid('merge-dedup-dump'));
+      writeConfigurationXml(projectDir, fixtureUuid('merge-dedup-project'));
+      writeObjectXml(tempDir, 'Catalogs', 'Дубль', 'Catalog', fixtureUuid('merge-dedup-object-dump'), 'flat');
+      writeObjectXml(projectDir, 'Catalogs', 'Дубль', 'Catalog', fixtureUuid('merge-dedup-object-project'), 'flat');
+
+      const target: RepositoryTarget = { configRoot: projectDir, configKind: 'cf', displayName: 'Тест' };
+      const scope = resolveObjectScope(projectDir, 'Справочник.Дубль', target) as Extract<ObjectScope, { kind: 'object' }>;
+
+      const states = collectMergeFileStates({
+        configRoot: projectDir,
+        dumpDir: tempDir,
+        scopes: [scope, scope],
+        baseHashes: {},
+        dirtyRelativePaths: [],
+      });
+
+      const matching = states.filter((s: MergeFileState) => s.rel.replace(/\\/g, '/') === 'Catalogs/Дубль.xml');
+      assert.strictEqual(matching.length, 1, 'Повторная область не должна порождать дублирующее состояние для того же файла.');
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test('removedScopes: файл, уже покрытый обычной scopes, НЕ переопределяется удалённой областью (дедупликация states.has)', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-removed-dedup-dump-'));
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-removed-dedup-project-'));
+    try {
+      writeConfigurationXml(tempDir, fixtureUuid('merge-removed-dedup-dump'));
+      writeConfigurationXml(projectDir, fixtureUuid('merge-removed-dedup-project'));
+      writeObjectXml(tempDir, 'Catalogs', 'Общий', 'Catalog', fixtureUuid('merge-removed-dedup-object-dump'), 'flat');
+      writeObjectXml(projectDir, 'Catalogs', 'Общий', 'Catalog', fixtureUuid('merge-removed-dedup-object-project'), 'flat');
+
+      const target: RepositoryTarget = { configRoot: projectDir, configKind: 'cf', displayName: 'Тест' };
+      const scope = resolveObjectScope(projectDir, 'Справочник.Общий', target) as Extract<ObjectScope, { kind: 'object' }>;
+
+      const states = collectMergeFileStates({
+        configRoot: projectDir,
+        dumpDir: tempDir,
+        scopes: [scope],
+        removedScopes: [scope],
+        baseHashes: {},
+        dirtyRelativePaths: [],
+      });
+
+      const matching = states.filter((s: MergeFileState) => s.rel.replace(/\\/g, '/') === 'Catalogs/Общий.xml');
+      assert.strictEqual(matching.length, 1, 'Файл из scopes не должен дублироваться/переопределяться removedScopes.');
+      assert.notStrictEqual(matching[0].repositoryHash, null, 'Состояние взято из scopes (файл реально есть в выгрузке), а не из removedScopes (там был бы repositoryHash:null).');
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test('removedScopes: dirtyRelativePaths помечает состояние удалённого объекта forceConflict=true', () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-removed-dirty-project-'));
+    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-removed-dirty-dump-'));
+    try {
+      writeConfigurationXml(projectDir, fixtureUuid('merge-removed-dirty-project'));
+      writeConfigurationXml(dumpDir, fixtureUuid('merge-removed-dirty-dump'));
+      writeObjectXml(projectDir, 'Catalogs', 'УдалённыйИзХранилища', 'Catalog', fixtureUuid('merge-removed-dirty-object'), 'flat');
+
+      const target: RepositoryTarget = { configRoot: projectDir, configKind: 'cf', displayName: 'Тест' };
+      const scope = resolveObjectScope(projectDir, 'Справочник.УдалённыйИзХранилища', target) as Extract<ObjectScope, { kind: 'object' }>;
+
+      const states = collectMergeFileStates({
+        configRoot: projectDir,
+        dumpDir,
+        scopes: [],
+        removedScopes: [scope],
+        baseHashes: {},
+        dirtyRelativePaths: ['Catalogs/УдалённыйИзХранилища.xml'],
+      });
+
+      const xmlState = states.find((s: MergeFileState) => s.rel.replace(/\\/g, '/') === 'Catalogs/УдалённыйИзХранилища.xml');
+      assert.ok(xmlState);
+      assert.strictEqual(xmlState.repositoryHash, null);
+      assert.strictEqual(xmlState.forceConflict, true);
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+      fs.rmSync(dumpDir, { recursive: true, force: true });
+    }
+  });
+
   test('реальный объект из example/ (Валюты, Ext/Help) — область собирается без ошибок, ConfigDumpInfo.xml не участвует', () => {
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-merge-states-real-'));
     try {
