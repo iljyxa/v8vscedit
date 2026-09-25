@@ -150,6 +150,11 @@ suite('RepositoryService', () => {
     assert.strictEqual(service.isMetadataEditRestricted(target), false);
   });
 
+  test('resolveFullName для корневого узла (configuration) — null, а не построение fullName по несуществующей XML-записи', () => {
+    const configXmlPath = path.join(EXAMPLE_CF, 'Configuration.xml');
+    assert.strictEqual(service.resolveFullName({ nodeKind: 'configuration', label: 'Конфигурация', xmlPath: configXmlPath }), null);
+  });
+
   test('findConfigRoot — повторный resolveTargetByXmlPath возвращает кэшированный target', () => {
     const target_ = findFirstCatalogWithModule();
     if (!target_) {

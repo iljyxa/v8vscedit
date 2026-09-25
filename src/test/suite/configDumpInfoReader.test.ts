@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   parseConfigDumpInfo,
+  parseConfigDumpInfoEntries,
   readConfigDumpInfoFile,
 } from '../../infra/xml/ConfigDumpInfoReader';
 
@@ -60,6 +61,16 @@ suite('ConfigDumpInfoReader — parseConfigDumpInfo/readConfigDumpInfoFile', () 
 </ConfigDumpInfo>`;
     const map = parseConfigDumpInfo(xml);
     assert.strictEqual(map.get('Catalog.Тест'), 'abc123');
+  });
+
+  test('parseConfigDumpInfoEntries: запись без атрибута id получает id="" (fallback ??)', () => {
+    const xml = `<ConfigDumpInfo xmlns="http://v8.1c.ru/8.3/xcf/dumpinfo">
+  <ConfigVersions>
+    <Metadata name="Catalog.БезId" configVersion="abc123"/>
+  </ConfigVersions>
+</ConfigDumpInfo>`;
+    const entries = parseConfigDumpInfoEntries(xml);
+    assert.deepStrictEqual(entries, [{ name: 'Catalog.БезId', id: '', configVersion: 'abc123' }]);
   });
 
   test('parseConfigDumpInfo на пустой строке отдаёт пустую карту (не бросает)', () => {
