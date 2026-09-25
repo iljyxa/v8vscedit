@@ -158,7 +158,8 @@ src/
 │   │   └── AtomicFileWrite.ts        # writeFileAtomicSync — общая атомарная запись
 │   │                                  # служебных кэшей (tmp+rename), см. cache/ ниже
 │   ├── cfe/                          # расширения: CfeBorrowService, CfeDiffService, CfePatchMethodService
-│   ├── support/                      # SupportInfoReader/Service (ParentConfigurations.bin), Logger
+│   ├── support/                      # SupportInfoReader/Service (ParentConfigurations.bin), Logger,
+│   │                                  # PerfLog — формат строк замера `[perf]` (docs/architecture.md)
 │   ├── cache/                        # MetadataCache, hashCache (CLI), FileStatIndex — stat-индекс
 │   │                                  # рабочего дерева (ускоритель ConfigurationChangeDetector, не
 │   │                                  # источник правды), см. docs/architecture.md
