@@ -11,6 +11,7 @@ import {
   type AgentCommandResult,
 } from '../../infra/agent';
 import { buildHashSnapshot, buildScopeKey, saveHashCache } from '../../infra/cache/HashCache';
+import type { ConfigurationDumpRequest } from '../../infra/agent';
 
 class FakeTransport implements DesignerAgentTransport {
   readonly commands: string[] = [];
@@ -256,4 +257,153 @@ suite('AgentOperationService', () => {
     }
   });
 
+});
+
+/**
+ * `dumpToDirectory` — issue #1, замена `importPartialFromDatabase` (переименован
+ * и обобщён на три режима: `partial`/`update-info`/`full`, план архитектора,
+ * раздел «infra/agent»). В отличие от старого метода, НЕ синхронизирует temp с
+ * проектом сам — только возвращает `{dir, relativeFiles, dispose()}`, оставляя
+ * слияние вызывающей стороне (`RepositoryLockSync`/`RepositoryUnlockSync` через
+ * `RepositoryMergePlanner`/`RepositoryMergeApplier`). Одноразовый воркспейс —
+ * как и у старого `importPartialFromDatabase`, отдельный от персистентного
+ * `ensureWorkspace(buildSessionKey(target), …)`, чтобы не смешивать снимок для
+ * частичных ЗАГРУЗОК (файлы→БД) с временной ВЫГРУЗКОЙ (БД→файлы).
+ */
+suite('AgentOperationService — dumpToDirectory (issue #1)', () => {
+  function makeTarget(rootPath: string): { kind: 'cf'; name: string; rootPath: string } {
+    return { kind: 'cf', name: 'Основная', rootPath };
+  }
+
+  test('mode "full": команда без --list-file/--config-dump-info-only, проект не изменён, dispose удаляет temp-каталог', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-agent-dump-full-'));
+    try {
+      const configRoot = path.join(tempRoot, 'src', 'cf');
+      fs.mkdirSync(configRoot, { recursive: true });
+      fs.writeFileSync(path.join(configRoot, 'Configuration.xml'), '<MetaDataObject/>', 'utf-8');
+      const projectListingBefore = fs.readdirSync(configRoot).sort();
+
+      const transport = new FakeTransport();
+      const service = new AgentOperationService(tempRoot, new FakeTransportFactory(transport));
+      const request: ConfigurationDumpRequest = { mode: 'full' };
+
+      const result = await service.dumpToDirectory(makeTarget(configRoot), request);
+
+      const dumpCommand = transport.commands.find((command) => command.startsWith('config dump-config-to-files'));
+      assert.ok(dumpCommand);
+      assert.doesNotMatch(dumpCommand, /--list-file/);
+      assert.doesNotMatch(dumpCommand, /--config-dump-info-only/);
+
+      assert.deepStrictEqual(fs.readdirSync(configRoot).sort(), projectListingBefore, 'Проект не должен быть изменён — dumpToDirectory только выгружает во temp.');
+      assert.ok(fs.existsSync(result.dir));
+      assert.deepStrictEqual(result.relativeFiles, []);
+
+      result.dispose();
+      assert.strictEqual(fs.existsSync(result.dir), false, 'dispose() должен удалить временный каталог.');
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('mode "update-info": команда содержит --config-dump-info-only, без --list-file', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-agent-dump-info-'));
+    try {
+      const configRoot = path.join(tempRoot, 'src', 'cf');
+      fs.mkdirSync(configRoot, { recursive: true });
+      fs.writeFileSync(path.join(configRoot, 'Configuration.xml'), '<MetaDataObject/>', 'utf-8');
+
+      const transport = new FakeTransport();
+      const service = new AgentOperationService(tempRoot, new FakeTransportFactory(transport));
+      const request: ConfigurationDumpRequest = { mode: 'update-info' };
+
+      const result = await service.dumpToDirectory(makeTarget(configRoot), request);
+
+      const dumpCommand = transport.commands.find((command) => command.startsWith('config dump-config-to-files'));
+      assert.ok(dumpCommand);
+      assert.match(dumpCommand, /--config-dump-info-only/);
+      assert.doesNotMatch(dumpCommand, /--list-file/);
+
+      result.dispose();
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('mode "partial": команда содержит --list-file, указывающий на файл со списком fullNames', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-agent-dump-partial-'));
+    try {
+      const configRoot = path.join(tempRoot, 'src', 'cf');
+      fs.mkdirSync(configRoot, { recursive: true });
+      fs.writeFileSync(path.join(configRoot, 'Configuration.xml'), '<MetaDataObject/>', 'utf-8');
+
+      const transport = new FakeTransport();
+      const service = new AgentOperationService(tempRoot, new FakeTransportFactory(transport));
+      const fullNames = ['Справочник.Товары', 'Документ.Заказ'];
+      const request: ConfigurationDumpRequest = { mode: 'partial', fullNames };
+
+      const result = await service.dumpToDirectory(makeTarget(configRoot), request);
+
+      const dumpCommand = transport.commands.find((command) => command.startsWith('config dump-config-to-files'));
+      assert.ok(dumpCommand);
+      assert.match(dumpCommand, /--list-file/);
+      assert.doesNotMatch(dumpCommand, /--config-dump-info-only/);
+
+      const listFileMatch = /--list-file=("[^"]*"|\S+)/.exec(dumpCommand);
+      assert.ok(listFileMatch, 'Аргумент --list-file должен присутствовать в команде.');
+      const listFilePath = listFileMatch[1].replace(/^"|"$/g, '');
+      assert.ok(fs.existsSync(listFilePath), `Файл списка объектов должен существовать: ${listFilePath}`);
+      const listContent = fs.readFileSync(listFilePath, 'utf-8');
+      fullNames.forEach((fullName) => assert.ok(listContent.includes(fullName), `Список должен содержать "${fullName}".`));
+
+      result.dispose();
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('одноразовый воркспейс: два последовательных вызова используют разные временные каталоги', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-agent-dump-oneoff-'));
+    try {
+      const configRoot = path.join(tempRoot, 'src', 'cf');
+      fs.mkdirSync(configRoot, { recursive: true });
+      fs.writeFileSync(path.join(configRoot, 'Configuration.xml'), '<MetaDataObject/>', 'utf-8');
+
+      const transport = new FakeTransport();
+      const service = new AgentOperationService(tempRoot, new FakeTransportFactory(transport));
+      const target = makeTarget(configRoot);
+
+      const first = await service.dumpToDirectory(target, { mode: 'full' });
+      const second = await service.dumpToDirectory(target, { mode: 'full' });
+
+      assert.notStrictEqual(path.resolve(first.dir), path.resolve(second.dir));
+      first.dispose();
+      second.dispose();
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('ошибка агента при dump-config-to-files приводит к отключению ИБ и отклонению промиса', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-agent-dump-error-'));
+    try {
+      const configRoot = path.join(tempRoot, 'src', 'cf');
+      fs.mkdirSync(configRoot, { recursive: true });
+      fs.writeFileSync(path.join(configRoot, 'Configuration.xml'), '<MetaDataObject/>', 'utf-8');
+
+      const transport = new FakeTransport(undefined, (command) =>
+        command.startsWith('config dump-config-to-files') ? new Error('Конфигуратор недоступен') : undefined
+      );
+      const service = new AgentOperationService(tempRoot, new FakeTransportFactory(transport));
+
+      await assert.rejects(
+        service.dumpToDirectory(makeTarget(configRoot), { mode: 'full' }),
+        /Конфигуратор недоступен/
+      );
+
+      assert.strictEqual(service.isInfoBaseConnected(), false);
+      assert.ok(transport.commands.includes('common disconnect-ib'), 'После ошибки операция должна отключить ИБ.');
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
 });

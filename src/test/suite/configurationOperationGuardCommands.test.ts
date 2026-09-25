@@ -629,6 +629,61 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
     lease?.release();
   });
 
+  /**
+   * Issue #1 — `RepositoryCommands.lock/unlock/update` теперь начинают с
+   * `ensureRepositoryGuardFree` (план архитектора, критерий приёмки №2):
+   * занятость guard'а проверяется ДО `askRecursiveMode`/`pickBoolean`
+   * (`vscode.window.showQuickPick`), поэтому при занятом guard'е диалог выбора
+   * режима не должен появляться вовсе, а чужая аренда — оставаться нетронутой.
+   */
+  suite('RepositoryCommands: repository.lock/unlock/update — guard занят до диалогов (issue #1)', () => {
+    let originalShowQuickPick: typeof vscode.window.showQuickPick;
+    let quickPickCalls: number;
+
+    setup(() => {
+      quickPickCalls = 0;
+      originalShowQuickPick = vscode.window.showQuickPick;
+      (vscode.window as Pick<typeof vscode.window, 'showQuickPick'>).showQuickPick = ((...args: unknown[]) => {
+        quickPickCalls += 1;
+        return (originalShowQuickPick as (...a: unknown[]) => Thenable<unknown>)(...args);
+      }) as typeof vscode.window.showQuickPick;
+    });
+
+    teardown(() => {
+      (vscode.window as Pick<typeof vscode.window, 'showQuickPick'>).showQuickPick = originalShowQuickPick;
+    });
+
+    function repositoryServiceStub(target: RepositoryTarget): RepositoryService {
+      return {
+        resolveTargetByXmlPath: () => target,
+        hasBinding: () => true,
+        isConnected: () => true,
+        resolveFullName: () => 'Справочник.Тест',
+        isLocked: () => false,
+      } as unknown as RepositoryService;
+    }
+
+    ['v8vscedit.repository.lock', 'v8vscedit.repository.unlock', 'v8vscedit.repository.update'].forEach((command) => {
+      test(`${command}: guard занят «Хранилище: синхронизация» — showQuickPick не вызывается, чужая аренда цела`, async () => {
+        const guard = new ConfigurationOperationGuard();
+        const lease = guard.tryAcquire('Хранилище: синхронизация');
+        const target: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'Основная конфигурация' };
+
+        servicesBox.current = createServices({
+          configurationOperationGuard: guard,
+          repositoryService: repositoryServiceStub(target),
+        });
+
+        await vscode.commands.executeCommand(command, CF_NODE);
+
+        assert.strictEqual(quickPickCalls, 0, `${command}: showQuickPick не должен вызываться при занятом guard'е.`);
+        assert.strictEqual(guard.isBusy, true);
+        assert.strictEqual(guard.heldBy, 'Хранилище: синхронизация');
+        lease?.release();
+      });
+    });
+  });
+
   test('RepositoryCommands: guard свободен и изменений для конфигурации нет — repository.commit доходит до show, событий guard нет', async () => {
     const guard = new ConfigurationOperationGuard();
     const events: boolean[] = [];

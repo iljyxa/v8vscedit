@@ -3,15 +3,31 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
+import { RepositoryLockState } from '../../infra/repository/RepositoryLockState';
+import { RepositoryLockSnapshotStore } from '../../infra/repository/RepositoryLockSnapshotStore';
+import { getRootLockName } from '../../infra/repository/RepositoryObjectNames';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import {
   fixtureUuid,
   writeConfigurationXml,
   writeObjectXml,
-  writeBslFile,
   type ObjectXmlLayout,
 } from './support/flatMetadataFixtures';
+
+/**
+ * Issue #1 — `RepositoryService` становится тонким фасадом: снапшоты захвата
+ * (issue #2) переехали в `RepositoryLockSnapshotStore` (см.
+ * `repositoryLockSnapshotStore.test.ts`), состояние `state.json`/матрица
+ * переходов — в `RepositoryLockState` (см. `repositoryLockState.test.ts`),
+ * `buildPartialDumpPlan`/`resolveSubsystemMemberFullNames`/`resolveXmlPathByFullName`
+ * — в `RepositoryDumpPlan` (см. `repositoryDumpPlan.test.ts`). Здесь остаётся то,
+ * что явно перечислено в плане архитектора как ФАСАД: резолвинг цели/привязки,
+ * `isLocked`/`isRootLocked`/`setLocked` (совместимость), `isEditRestricted`/
+ * `isMetadataEditRestricted` (делегируют в `RepositoryLockState`, но с новой
+ * обогащённой семантикой — рекурсивный корень/подсистема/releasedUnderRoot),
+ * `onDidChangeLocks` (делегирует), `createObjectsFileForNode`/`resolveFullName`.
+ */
 
 /** Фейковый SecretStore на Map — структурный контракт vscode.SecretStorage. */
 function createFakeSecretStore(): SecretStore {
@@ -105,6 +121,7 @@ suite('RepositoryService', () => {
     service.setLocked(target, [`Справочник.${objectName}`], true);
     assert.strictEqual(service.isEditRestricted(formModulePath), false);
   });
+
   test('Для создания корневых объектов требуется захват корня конфигурации', async () => {
     const configXmlPath = path.join(EXAMPLE_CF, 'Configuration.xml');
     const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
@@ -143,8 +160,6 @@ suite('RepositoryService', () => {
     const first = service.resolveTargetByXmlPath(xmlPath);
     assert.ok(first, 'Первый вызов должен найти конфигурацию.');
 
-    // После прогрева внутренний кэш findConfigRoot должен содержать запись
-    // ровно для директории файла. Это и есть наблюдаемое свидетельство мемоизации.
     const size = service.getConfigRootCacheSize();
     assert.ok(size > 0, 'Кэш findConfigRoot должен заполниться при первом проходе.');
 
@@ -161,7 +176,6 @@ suite('RepositoryService', () => {
 
   test('Пустой env.json не роняет чтение привязки', async () => {
     fs.writeFileSync(envPath, '   \n', 'utf-8');
-    // Свежий сервис, чтобы исключить попадание в кэш предыдущего чтения.
     const fresh = new RepositoryService(EXAMPLE_ROOT, new ProjectSecretStorage(createFakeSecretStore(), EXAMPLE_ROOT));
     assert.doesNotThrow(() => fresh.hasBinding(sampleTarget));
     assert.strictEqual(await fresh.loadBinding(sampleTarget), null);
@@ -192,393 +206,107 @@ suite('RepositoryService', () => {
     service.invalidateConfigRootCache();
     assert.strictEqual(service.getConfigRootCacheSize(), 0);
 
-    // После сброса кэша повторный вызов снова прогревает кэш.
     service.resolveTargetByXmlPath(xmlPath);
     assert.ok(service.getConfigRootCacheSize() > 0);
   });
 
-  suite('Снапшот захвата (issue #2 — откат при unlock)', () => {
-    test('Без изменений после захвата diff пуст, а после discard снапшота нет', () => {
-      const target_ = findFirstCatalogWithModule();
-      if (!target_) {
-        return;
-      }
-      const { xmlPath, objectName } = target_;
-      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
-      assert.ok(target);
-
-      const node = { nodeKind: 'Catalog', label: objectName, xmlPath };
-      service.captureLockSnapshot(target, node);
-
-      const diff = service.getLockSnapshotDiff(target, node);
-      assert.strictEqual(diff.hasSnapshot, true);
-      assert.deepStrictEqual(diff.changedFiles, []);
-
-      service.discardLockSnapshot(target, node);
-      const afterDiscard = service.getLockSnapshotDiff(target, node);
-      assert.strictEqual(afterDiscard.hasSnapshot, false);
+  suite('Фасад: lockState/snapshots — стабильные экземпляры, созданные в конструкторе', () => {
+    test('lockState/snapshots — один и тот же экземпляр при повторном обращении', () => {
+      assert.strictEqual(service.lockState, service.lockState);
+      assert.strictEqual(service.snapshots, service.snapshots);
+      assert.ok(service.lockState instanceof RepositoryLockState);
+      assert.ok(service.snapshots instanceof RepositoryLockSnapshotStore);
     });
 
-    test('Изменение модуля объекта после захвата попадает в diff и откатывается restoreLockSnapshot', () => {
+    test('lockState — тот же workspaceRoot, что у RepositoryService (состояние видно напрямую через lockState)', () => {
+      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
+      assert.ok(target);
+      service.lockState.applyLock(target, { anchor: 'Справочник.Прямой', members: ['Справочник.Прямой'] });
+      assert.strictEqual(service.isLocked(target, 'Справочник.Прямой'), true);
+    });
+  });
+
+  suite('Фасад: isEditRestricted/isMetadataEditRestricted учитывают обогащённую семантику RepositoryLockState', () => {
+    test('рекурсивный захват корня снимает ограничение с ЛЮБОГО объекта, включая ранее не захватывавшийся', async function () {
       const target_ = findFirstCatalogWithModule();
       if (!target_) {
-        return;
+        this.skip();
+      }
+      const { xmlPath, modulePath } = target_;
+      const target = service.resolveTargetByXmlPath(xmlPath);
+      assert.ok(target);
+      await service.saveBinding(target, { repoPath: '\\\\repo\\storage', repoUser: 'tester', repoPassword: 'secret' });
+      service.setConnected(target, true);
+      assert.strictEqual(service.isEditRestricted(modulePath), true);
+
+      const rootName = getRootLockName(target);
+      service.lockState.applyLock(target, { anchor: rootName, members: [rootName], recursiveRoot: true });
+
+      assert.strictEqual(service.isEditRestricted(modulePath), false);
+    });
+
+    test('точечное освобождение объекта при рекурсивном корне (releasedUnderRoot) снова ограничивает именно этот объект', async function () {
+      const target_ = findFirstCatalogWithModule();
+      if (!target_) {
+        this.skip();
       }
       const { xmlPath, modulePath, objectName } = target_;
-      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
+      const target = service.resolveTargetByXmlPath(xmlPath);
       assert.ok(target);
+      await service.saveBinding(target, { repoPath: '\\\\repo\\storage', repoUser: 'tester', repoPassword: 'secret' });
+      service.setConnected(target, true);
 
-      const node = { nodeKind: 'Catalog', label: objectName, xmlPath };
-      const originalModuleContent = fs.readFileSync(modulePath);
-      try {
-        service.captureLockSnapshot(target, node);
-
-        fs.writeFileSync(modulePath, `${originalModuleContent.toString('utf-8')}\n// локальная правка теста\n`, 'utf-8');
-        const relativeModulePath = path.relative(EXAMPLE_CF, modulePath).split(path.sep).join('/');
-
-        const diff = service.getLockSnapshotDiff(target, node);
-        assert.strictEqual(diff.hasSnapshot, true);
-        assert.deepStrictEqual(diff.changedFiles, [relativeModulePath]);
-
-        const restored = service.restoreLockSnapshot(target, node);
-        assert.ok(restored.some((p) => path.resolve(p) === path.resolve(modulePath)));
-        assert.ok(fs.readFileSync(modulePath).equals(originalModuleContent), 'Файл должен вернуться к исходному содержимому.');
-
-        const diffAfterRestore = service.getLockSnapshotDiff(target, node);
-        assert.deepStrictEqual(diffAfterRestore.changedFiles, []);
-
-        service.discardLockSnapshot(target, node);
-      } finally {
-        fs.writeFileSync(modulePath, originalModuleContent);
-      }
-    });
-
-    test('Удаление файла объекта после захвата попадает в diff и восстанавливается', () => {
-      const target_ = findFirstCatalogWithForm();
-      if (!target_) {
-        return;
-      }
-      const { xmlPath, formModulePath, objectName } = target_;
-      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
-      assert.ok(target);
-
-      const node = { nodeKind: 'Catalog', label: objectName, xmlPath };
-      const originalContent = fs.readFileSync(formModulePath);
-      try {
-        service.captureLockSnapshot(target, node);
-        fs.unlinkSync(formModulePath);
-
-        const diff = service.getLockSnapshotDiff(target, node);
-        assert.strictEqual(diff.hasSnapshot, true);
-        assert.ok(diff.changedFiles.length > 0);
-
-        service.restoreLockSnapshot(target, node);
-        assert.ok(fs.existsSync(formModulePath), 'Удалённый файл должен быть восстановлен из снапшота.');
-        assert.ok(fs.readFileSync(formModulePath).equals(originalContent));
-
-        service.discardLockSnapshot(target, node);
-      } finally {
-        fs.mkdirSync(path.dirname(formModulePath), { recursive: true });
-        fs.writeFileSync(formModulePath, originalContent);
-      }
-    });
-
-    test('Для дочернего узла снапшот снимается по файлам владельца', () => {
-      const target_ = findFirstCatalogWithModule();
-      if (!target_) {
-        return;
-      }
-      const { xmlPath, modulePath, objectName } = target_;
-      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
-      assert.ok(target);
-
-      const childNode = {
-        nodeKind: 'Attribute',
-        label: 'Реквизит',
-        metaContext: { rootMetaKind: 'Catalog', ownerObjectXmlPath: xmlPath },
-      };
-      service.captureLockSnapshot(target, childNode);
-
-      const ownerNode = { nodeKind: 'Catalog', label: objectName, xmlPath };
-      const diffByOwner = service.getLockSnapshotDiff(target, ownerNode);
-      assert.strictEqual(diffByOwner.hasSnapshot, true);
-      assert.deepStrictEqual(diffByOwner.changedFiles, []);
-
-      const relativeModulePath = path.relative(EXAMPLE_CF, modulePath).split(path.sep).join('/');
-      const originalModuleContent = fs.readFileSync(modulePath);
-      try {
-        fs.writeFileSync(modulePath, `${originalModuleContent.toString('utf-8')}\n// правка через дочерний узел\n`, 'utf-8');
-        const diffAfterEdit = service.getLockSnapshotDiff(target, childNode);
-        assert.deepStrictEqual(diffAfterEdit.changedFiles, [relativeModulePath]);
-      } finally {
-        fs.writeFileSync(modulePath, originalModuleContent);
-        service.discardLockSnapshot(target, childNode);
-      }
-    });
-
-    test('Для корня конфигурации снапшот не снимается', () => {
-      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
-      assert.ok(target);
-
-      const node = { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(EXAMPLE_CF, 'Configuration.xml') };
-      service.captureLockSnapshot(target, node);
-
-      const diff = service.getLockSnapshotDiff(target, node);
-      assert.strictEqual(diff.hasSnapshot, false);
-      assert.deepStrictEqual(diff.changedFiles, []);
-
-      assert.doesNotThrow(() => {
-        service.restoreLockSnapshot(target, node);
-        service.discardLockSnapshot(target, node);
-      });
-    });
-
-    test('Узел без nodeKind не создаёт снапшот и не роняет операции', () => {
-      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
-      assert.ok(target);
-
-      const node = { label: 'Без типа' };
-      assert.doesNotThrow(() => {
-        service.captureLockSnapshot(target, node);
-      });
-      const diff = service.getLockSnapshotDiff(target, node);
-      assert.strictEqual(diff.hasSnapshot, false);
-      assert.deepStrictEqual(service.restoreLockSnapshot(target, node), []);
-    });
-
-    test('Дочерний узел без ownerObjectXmlPath в metaContext не создаёт снапшот', () => {
-      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
-      assert.ok(target);
-
-      const node = { nodeKind: 'Attribute', label: 'Реквизит без владельца' };
-      assert.doesNotThrow(() => {
-        service.captureLockSnapshot(target, node);
-      });
-      assert.strictEqual(service.getLockSnapshotDiff(target, node).hasSnapshot, false);
-    });
-
-    test('Узел без xmlPath (fullName не резолвится) не создаёт снапшот', () => {
-      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
-      assert.ok(target);
-
-      const node = { nodeKind: 'Catalog' };
-      assert.doesNotThrow(() => {
-        service.captureLockSnapshot(target, node);
-      });
-      assert.strictEqual(service.getLockSnapshotDiff(target, node).hasSnapshot, false);
-      assert.deepStrictEqual(service.restoreLockSnapshot(target, node), []);
-      assert.doesNotThrow(() => service.discardLockSnapshot(target, node));
-    });
-
-    test('xmlPath указывает на несуществующий файл — снапшот не снимается', () => {
-      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
-      assert.ok(target);
-
-      const node = {
-        nodeKind: 'Catalog',
-        label: 'НесуществующийСправочник',
-        xmlPath: path.join(EXAMPLE_CF, 'Catalogs', 'НесуществующийСправочник.xml'),
-      };
-      assert.doesNotThrow(() => {
-        service.captureLockSnapshot(target, node);
-      });
-      assert.strictEqual(service.getLockSnapshotDiff(target, node).hasSnapshot, false);
-    });
-
-    test('diff/restore без предварительного captureLockSnapshot отдают "снапшота нет"', () => {
-      const target_ = findFirstCatalogWithModule();
-      if (!target_) {
-        return;
-      }
-      const { xmlPath, objectName } = target_;
-      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
-      assert.ok(target);
-
-      const node = { nodeKind: 'Catalog', label: objectName, xmlPath };
-      const diff = service.getLockSnapshotDiff(target, node);
-      assert.strictEqual(diff.hasSnapshot, false);
-      assert.deepStrictEqual(service.restoreLockSnapshot(target, node), []);
-    });
-
-    test('Повторный захват объекта затирает старый снапшот', () => {
-      const target_ = findFirstCatalogWithModule();
-      if (!target_) {
-        return;
-      }
-      const { xmlPath, modulePath, objectName } = target_;
-      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
-      assert.ok(target);
-
-      const node = { nodeKind: 'Catalog', label: objectName, xmlPath };
-      const originalModuleContent = fs.readFileSync(modulePath);
-      try {
-        service.captureLockSnapshot(target, node);
-        // Правка "просачивается" в новый снапшот, снятый повторным захватом.
-        fs.writeFileSync(modulePath, `${originalModuleContent.toString('utf-8')}\n// A\n`, 'utf-8');
-        service.captureLockSnapshot(target, node);
-
-        const diff = service.getLockSnapshotDiff(target, node);
-        assert.deepStrictEqual(diff.changedFiles, [], 'Второй захват должен переснять снапшот с текущим содержимым.');
-
-        service.discardLockSnapshot(target, node);
-      } finally {
-        fs.writeFileSync(modulePath, originalModuleContent);
-      }
-    });
-
-    test('*ForFullName-варианты работают эквивалентно узловым и совместимы с ними (снапшот участника рекурсивного захвата Подсистемы)', () => {
-      const target_ = findFirstCatalogWithModule();
-      if (!target_) {
-        return;
-      }
-      const { xmlPath, modulePath, objectName } = target_;
-      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
-      assert.ok(target);
+      const rootName = getRootLockName(target);
+      service.lockState.applyLock(target, { anchor: rootName, members: [rootName], recursiveRoot: true });
+      assert.strictEqual(service.isEditRestricted(modulePath), false);
 
       const fullName = `Справочник.${objectName}`;
-      const originalModuleContent = fs.readFileSync(modulePath);
-      try {
-        // Снимаем снапшот "безузловым" вариантом — именно так его снимает
-        // runFileSyncAfterLockOrUpdate для каждого участника рекурсивного захвата
-        // Подсистемы (fullName + xmlPath из buildPartialDumpPlan/resolveXmlPathByFullName,
-        // без узла дерева).
-        service.captureLockSnapshotForFullName(target, fullName, xmlPath);
+      service.lockState.applyUnlock(target, { anchor: fullName, members: [fullName], recursive: false, isRoot: false });
 
-        const nodeDiff = service.getLockSnapshotDiff(target, { nodeKind: 'Catalog', label: objectName, xmlPath });
-        assert.strictEqual(nodeDiff.hasSnapshot, true, 'Снапшот, снятый по fullName, должен быть виден и узловому API — хранилище общее.');
-        assert.deepStrictEqual(nodeDiff.changedFiles, []);
-
-        fs.writeFileSync(modulePath, `${originalModuleContent.toString('utf-8')}\n// правка участника подсистемы\n`, 'utf-8');
-        const relativeModulePath = path.relative(EXAMPLE_CF, modulePath).split(path.sep).join('/');
-        const changedDiff = service.getLockSnapshotDiffForFullName(target, fullName);
-        assert.deepStrictEqual(changedDiff.changedFiles, [relativeModulePath]);
-
-        const restored = service.restoreLockSnapshotForFullName(target, fullName);
-        assert.ok(restored.some((p) => path.resolve(p) === path.resolve(modulePath)));
-        assert.ok(fs.readFileSync(modulePath).equals(originalModuleContent));
-
-        service.discardLockSnapshotForFullName(target, fullName);
-        assert.strictEqual(service.getLockSnapshotDiffForFullName(target, fullName).hasSnapshot, false);
-      } finally {
-        fs.writeFileSync(modulePath, originalModuleContent);
-      }
+      assert.strictEqual(service.isEditRestricted(modulePath), true, 'Точечно освобождённый объект должен снова требовать явного захвата.');
     });
 
-    test('captureLockSnapshotForFullName по несуществующему пути не создаёт снапшот', () => {
+    test('участник рекурсивно захваченной подсистемы редактируем без отдельного захвата', async function () {
+      const target_ = findFirstCatalogWithModule();
+      if (!target_) {
+        this.skip();
+      }
+      const { xmlPath, modulePath, objectName } = target_;
+      const target = service.resolveTargetByXmlPath(xmlPath);
+      assert.ok(target);
+      await service.saveBinding(target, { repoPath: '\\\\repo\\storage', repoUser: 'tester', repoPassword: 'secret' });
+      service.setConnected(target, true);
+      assert.strictEqual(service.isEditRestricted(modulePath), true);
+
+      const fullName = `Справочник.${objectName}`;
+      service.lockState.applyLock(target, { anchor: 'Подсистема.Продажи', members: ['Подсистема.Продажи', fullName] });
+
+      assert.strictEqual(service.isEditRestricted(modulePath), false);
+    });
+
+    test('isRootLocked остаётся true только при явном захвате корня, а не из-за rootRecursive произвольного объекта', () => {
       const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
       assert.ok(target);
-
-      const fullName = 'Справочник.НесуществующийУчастникПодсистемы';
-      const xmlPath = path.join(EXAMPLE_CF, 'Catalogs', 'НесуществующийУчастникПодсистемы.xml');
-      assert.doesNotThrow(() => {
-        service.captureLockSnapshotForFullName(target, fullName, xmlPath);
-      });
-      assert.strictEqual(service.getLockSnapshotDiffForFullName(target, fullName).hasSnapshot, false);
+      service.lockState.applyLock(target, { anchor: 'Справочник.А', members: ['Справочник.А'] });
+      assert.strictEqual(service.isRootLocked(target), false);
     });
   });
 
-  test('resolveXmlPathByFullName — находит файл объекта в hierarchical- и flat-структуре, null для неизвестного', () => {
-    const configRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-resolve-fullname-'));
+  suite('Фасад: onDidChangeLocks делегирует в RepositoryLockState', () => {
+    test('событие приходит и через RepositoryService, и напрямую через lockState — это один и тот же источник', () => {
+      const target = service.resolveTargetByConfigRoot(EXAMPLE_CF);
+      assert.ok(target);
+      const events: unknown[] = [];
+      const subscription = service.onDidChangeLocks((event: unknown) => events.push(event));
 
-    // Плоский вариант: <Папка>/<Имя>.xml (как в реальной выгрузке справочников).
-    fs.mkdirSync(path.join(configRoot, 'Catalogs'), { recursive: true });
-    fs.writeFileSync(path.join(configRoot, 'Catalogs', 'Номенклатура.xml'), '<MetaDataObject/>', 'utf-8');
+      service.setLocked(target, ['Справочник.Событие'], true);
 
-    // Вложенный вариант: <Папка>/<Имя>/<Имя>.xml.
-    fs.mkdirSync(path.join(configRoot, 'Documents', 'ЗаказПокупателя'), { recursive: true });
-    fs.writeFileSync(
-      path.join(configRoot, 'Documents', 'ЗаказПокупателя', 'ЗаказПокупателя.xml'),
-      '<MetaDataObject/>',
-      'utf-8'
-    );
+      assert.strictEqual(events.length, 1);
+      subscription.dispose();
 
-    assert.strictEqual(
-      service.resolveXmlPathByFullName(configRoot, 'Справочник.Номенклатура'),
-      path.join(configRoot, 'Catalogs', 'Номенклатура.xml')
-    );
-    assert.strictEqual(
-      service.resolveXmlPathByFullName(configRoot, 'Документ.ЗаказПокупателя'),
-      path.join(configRoot, 'Documents', 'ЗаказПокупателя', 'ЗаказПокупателя.xml')
-    );
-    assert.strictEqual(service.resolveXmlPathByFullName(configRoot, 'Справочник.НеСуществует'), null);
-    assert.strictEqual(service.resolveXmlPathByFullName(configRoot, 'НеизвестныйТип.Что-то'), null);
-    assert.strictEqual(service.resolveXmlPathByFullName(configRoot, 'БезТочки'), null);
-
-    fs.rmSync(configRoot, { recursive: true, force: true });
-  });
-
-  test('resolveSubsystemMemberFullNames — раскрывает Content с переводом типа в русский fullName, рекурсивно по дочерним подсистемам', () => {
-    const configRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-subsystem-members-'));
-    fs.mkdirSync(path.join(configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница'), { recursive: true });
-
-    // Content хранит английский префикс (Catalog/Document — MetaKind), а не русский
-    // технический fullName хранилища — это и должен переводить resolveSubsystemMemberFullNames.
-    fs.writeFileSync(
-      path.join(configRoot, 'Subsystems', 'Продажи.xml'),
-      buildSubsystemXml('Продажи', ['Catalog.Товары'], ['Розница']),
-      'utf-8'
-    );
-    fs.writeFileSync(
-      path.join(configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница', 'Розница.xml'),
-      buildSubsystemXml('Розница', ['Document.ЗаказПокупателя'], []),
-      'utf-8'
-    );
-
-    const subsystemXmlPath = path.join(configRoot, 'Subsystems', 'Продажи.xml');
-
-    const nonRecursive = service.resolveSubsystemMemberFullNames(subsystemXmlPath, false);
-    assert.deepStrictEqual(
-      [...nonRecursive].sort(),
-      ['Подсистема.Продажи', 'Справочник.Товары'].sort()
-    );
-
-    const recursive = service.resolveSubsystemMemberFullNames(subsystemXmlPath, true);
-    assert.deepStrictEqual(
-      [...recursive].sort(),
-      ['Подсистема.Продажи', 'Справочник.Товары', 'Подсистема.Розница', 'Документ.ЗаказПокупателя'].sort()
-    );
-
-    fs.rmSync(configRoot, { recursive: true, force: true });
-  });
-
-  test('buildPartialDumpPlan — три ветки: корень целиком, рекурсивная Подсистема, обычный объект', () => {
-    const configRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-partial-plan-'));
-    fs.mkdirSync(path.join(configRoot, 'Subsystems'), { recursive: true });
-    fs.writeFileSync(
-      path.join(configRoot, 'Subsystems', 'Продажи.xml'),
-      buildSubsystemXml('Продажи', ['Catalog.Товары'], []),
-      'utf-8'
-    );
-
-    // Захват корня конфигурации/расширения целиком — частичная выгрузка не имеет смысла.
-    const rootPlan = service.buildPartialDumpPlan(
-      { nodeKind: 'configuration' },
-      { fullNames: ['__configuration_root__'] },
-      true
-    );
-    assert.strictEqual(rootPlan.rootCaptureFull, true);
-    assert.deepStrictEqual(rootPlan.fullNames, []);
-
-    // Рекурсивный захват Подсистемы — состав раскрывается через resolveSubsystemMemberFullNames.
-    const subsystemXmlPath = path.join(configRoot, 'Subsystems', 'Продажи.xml');
-    const subsystemPlan = service.buildPartialDumpPlan(
-      { nodeKind: 'Subsystem', xmlPath: subsystemXmlPath },
-      { fullNames: ['Подсистема.Продажи'] },
-      true
-    );
-    assert.strictEqual(subsystemPlan.rootCaptureFull, false);
-    assert.deepStrictEqual([...subsystemPlan.fullNames].sort(), ['Подсистема.Продажи', 'Справочник.Товары'].sort());
-
-    // Обычный объект (в т.ч. с recursive=true) — fullName узла достаточно как есть.
-    const objectPlan = service.buildPartialDumpPlan(
-      { nodeKind: 'Catalog', xmlPath: path.join(configRoot, 'Catalogs', 'Товары.xml') },
-      { fullNames: ['Справочник.Товары'] },
-      true
-    );
-    assert.strictEqual(objectPlan.rootCaptureFull, false);
-    assert.deepStrictEqual(objectPlan.fullNames, ['Справочник.Товары']);
-
-    fs.rmSync(configRoot, { recursive: true, force: true });
+      service.setLocked(target, ['Справочник.Событие2'], true);
+      assert.strictEqual(events.length, 1, 'После dispose новые события через RepositoryService приходить не должны.');
+    });
   });
 });
 
@@ -632,13 +360,11 @@ function findFirstCatalogWithForm(): { xmlPath: string; formModulePath: string; 
 }
 
 /**
- * `RepositoryService.resolveOwnerObjectXmlPath` уже умел
- * находить и глубокую, и плоскую раскладку XML владельца (в отличие от
- * `SupportInfoService`, который эту раскладку не понимал) — тесты ниже
- * фиксируют это поведение как регрессионную защиту при переводе метода на
- * общую `findObjectXmlInFolder` (`infra/fs/ObjectLocation.ts`), а не как
- * красный сценарий: на временном проекте без `example/` захват/снятие
- * захвата объекта в обеих раскладках должно работать одинаково.
+ * `RepositoryService.resolveOwnerObjectXmlPath` уже умел находить и глубокую, и
+ * плоскую раскладку XML владельца — тесты ниже фиксируют это поведение как
+ * регрессионную защиту, не как красный сценарий: на временном проекте без
+ * `example/` захват/снятие захвата объекта в обеих раскладках должно работать
+ * одинаково.
  */
 suite('RepositoryService — плоская и вложенная раскладка владельца', () => {
   const layouts: ObjectXmlLayout[] = ['flat', 'deep'];
@@ -652,7 +378,9 @@ suite('RepositoryService — плоская и вложенная расклад
         const objectUuid = fixtureUuid(`repo-object-${layout}`);
         writeConfigurationXml(configRoot, configUuid);
         const objectXmlPath = writeObjectXml(configRoot, 'Catalogs', 'Каталог1', 'Catalog', objectUuid, layout);
-        const modulePath = writeBslFile(path.join(configRoot, 'Catalogs', 'Каталог1', 'Ext', 'ObjectModule.bsl'));
+        const modulePath = path.join(configRoot, 'Catalogs', 'Каталог1', 'Ext', 'ObjectModule.bsl');
+        fs.mkdirSync(path.dirname(modulePath), { recursive: true });
+        fs.writeFileSync(modulePath, '', 'utf-8');
 
         const service = new RepositoryService(tempDir, new ProjectSecretStorage(createFakeSecretStore(), tempDir));
         const target = service.resolveTargetByXmlPath(modulePath);
@@ -682,25 +410,6 @@ suite('RepositoryService — плоская и вложенная расклад
     });
   }
 });
-
-// Минимальный валидный XML подсистемы — тот же формат, что в subsystemXmlService.test.ts.
-function buildSubsystemXml(name: string, refs: string[], childSubsystems: string[]): string {
-  return `<?xml version="1.0" encoding="utf-8"?>
-<MetaDataObject>
-  <Subsystem>
-    <Properties>
-      <Name>${name}</Name>
-      <Synonym/>
-      ${refs.length > 0
-        ? `<Content>${refs.map((ref) => `<xr:Item xsi:type="xr:MDObjectRef">${ref}</xr:Item>`).join('')}</Content>`
-        : '<Content/>'}
-    </Properties>
-    ${childSubsystems.length > 0
-      ? `<ChildObjects>${childSubsystems.map((child) => `<Subsystem>${child}</Subsystem>`).join('')}</ChildObjects>`
-      : '<ChildObjects/>'}
-  </Subsystem>
-</MetaDataObject>`;
-}
 
 function restoreFile(filePath: string, backup: string | undefined): void {
   if (backup === undefined) {
