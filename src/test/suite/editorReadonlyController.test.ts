@@ -1049,6 +1049,46 @@ suite('EditorReadonlyController — несохранённые правки пр
     assert.deepStrictEqual(spy.calls, [{ command: SET_COMMAND, activeUri: uriA.toString() }]);
   });
 
+  test('сохранение без прямого вызова: реальное событие изменения документа применяет readonly', async function () {
+    this.timeout(15_000);
+    const started = start();
+    const docA = await openDirty(uriA);
+
+    started.fire();
+    await started.settle();
+    assert.strictEqual(await docA.save(), true);
+
+    await waitFor(() => commandsOn(uriA, SET_COMMAND) === 1);
+  });
+
+  test('скрытый файл сохранён и сразу захвачен снова: при активации — reset, не set', async function () {
+    this.timeout(15_000);
+    const started = start();
+    const docA = await openDirty(uriA);
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uriB), { preview: false });
+
+    started.fire();
+    await started.settle();
+    // Очередь занята предыдущим переходом: обработка сохранения не успевает до нового
+    // события захвата. Шлюз вместо таймера делает этот порядок детерминированным.
+    let release: () => void = () => undefined;
+    const busy = new Promise<void>((resolve) => { release = resolve; });
+    (started.controller as unknown as { queue: Promise<void> }).queue = busy;
+    assert.strictEqual(await docA.save(), true);
+    started.controller.onDocumentChanged(docA);
+    started.state.restricted = false;
+    started.fire();
+    release();
+    await started.settle();
+
+    const editorA = await vscode.window.showTextDocument(docA, { preview: false });
+    started.controller.onActiveEditorChanged(editorA);
+    await started.settle();
+
+    assert.strictEqual(commandsOn(uriA, SET_COMMAND), 0);
+    assert.strictEqual(commandsOn(uriA, RESET_COMMAND), 1);
+  });
+
   test('откат правок вместо сохранения → readonly применяется', async function () {
     this.timeout(15_000);
     const started = start();

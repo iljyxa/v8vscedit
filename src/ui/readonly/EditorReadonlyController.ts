@@ -83,21 +83,21 @@ export class EditorReadonlyController {
 
   /**
    * Документ без несохранённых правок, ждавший readonly, переводится в него: видимая
-   * вкладка — сейчас через очередь, скрытая — при своей активации.
+   * вкладка — через очередь, скрытая — при своей активации. Отложенный переход
+   * фиксируется сразу, как в `onLocksChanged`: иначе задача очереди перезаписала бы
+   * решение более нового события захватов.
    */
   onDocumentChanged(document: vscode.TextDocument): void {
     if (document.isDirty || !this.awaitingClean.delete(document.uri.toString())) {
       return;
     }
-    this.enqueue(() => {
-      const tabs = collectOpenTabs();
-      const route = selectReadonlyApplyRoute(tabs, document.uri.fsPath);
-      if (route?.kind === 'defer') {
-        this.pending.set(route.tab.uri.toString(), true);
-        return Promise.resolve();
-      }
-      return this.applyToVisibleTabs(tabs, [{ path: document.uri.fsPath, readonly: true }]);
-    });
+    const tabs = collectOpenTabs();
+    const route = selectReadonlyApplyRoute(tabs, document.uri.fsPath);
+    if (route?.kind === 'defer') {
+      this.pending.set(route.tab.uri.toString(), true);
+      return;
+    }
+    this.enqueue(() => this.applyToVisibleTabs(tabs, [{ path: document.uri.fsPath, readonly: true }]));
   }
 
   /** Переходы выполняются последовательно: каждый временно меняет активный редактор. */
