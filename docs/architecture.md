@@ -361,12 +361,14 @@ outputChannel) и в `bootstrap()` подписывается на `onDidChangeB
   (все раунды); слияние с проектом, модальные диалоги конфликтов/отката и диффы — строго после аренды.
   Процесс 1С, выгрузка и диалоги внедряются через `RepositoryFileSyncDeps`. Подробно —
   [repository-file-sync.md](./repository-file-sync.md).
+- `ui/commands/repository/RepositoryCommands.ts`/`RepositoryCommandRunner.ts` (issue #40) — `repository.connect`/
+  `create`/`disconnect`/`addUser`/`copyUsers`/`dump`/`report`/`setLabel`: занятость проверяется
+  `requireFreeRootTarget` до форм и диалогов, `runRepositoryCliCommand` держит аренду только на процесс
+  Конфигуратора, модальные сообщения об исходе — после неё.
 
 Известные ограничения:
 - Guard действует в пределах одного окна VS Code — второе окно и отдельный процесс CLI (`onec-tools`) им
   не сериализуются.
-- `repository.bind`/`create`/`unbind`/`report`/`dump`/`users`/`label` под guard не попадают — issue #40
-  форка (`lock`/`unlock`/`update`/`commit` сериализуются с issue #1, см. ниже).
 
 ### Режим поддержки поставщика (`ParentConfigurations.bin`)
 

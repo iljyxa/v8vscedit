@@ -11,8 +11,9 @@ import {
   buildRepositoryUpdateRequest,
   executeRepositoryCli,
   runRepositoryCliCommand,
-  type RepositoryCliServices,
+  type RepositoryCliCommandServices,
 } from '../../ui/commands/repository/RepositoryCommandRunner';
+import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOperationGuard';
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
@@ -22,8 +23,8 @@ import type { SecretStore } from '../../infra/ai/AiSecretStorage';
  * (заменены `RepositoryLockSync`/`RepositoryUnlockSync` поверх
  * `RepositoryLockSnapshotStore`, см. `repositoryLockSync.test.ts`/
  * `repositoryUnlockSync.test.ts`), `runRepositoryCliCommand` остаётся обёрткой
- * для операций мимо guard'а (bind/create/unbind/dump/report/users/label —
- * известное ограничение, план архитектора п.2.1), а `executeRepositoryCli` —
+ * с UI-реакцией для bind/create/unbind/dump/report/users/label (с issue #40 —
+ * тоже под guard'ом, см. suite «аренда guard'а» ниже), а `executeRepositoryCli` —
  * новая функция БЕЗ модальных окон, вызываемая ТОЛЬКО внутри
  * `configurationOperationGuard.runExclusive` из `RepositoryLockSync`/
  * `RepositoryUnlockSync`. Критерий приёмки №3: lock всегда получает `-Revised`
@@ -180,7 +181,7 @@ suite('RepositoryCommandRunner — executeRepositoryCli: гарантирова�
   let workspaceRoot: string;
   let repositoryService: RepositoryService;
   let target: RepositoryTarget;
-  let services: RepositoryCliServices;
+  let services: RepositoryCliCommandServices;
   let errorMessageCalls: unknown[][];
   let originalShowErrorMessage: typeof vscode.window.showErrorMessage;
 
@@ -195,6 +196,7 @@ suite('RepositoryCommandRunner — executeRepositoryCli: гарантирова�
       // Реальный ProjectSecretStorage (не пустая заглушка): часть тестов в этом файле
       // доходит до resolveDbPassword(), которому нужен настоящий метод getDbPassword().
       projectSecretStorage: new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot),
+      configurationOperationGuard: new ConfigurationOperationGuard(),
     };
     errorMessageCalls = [];
     originalShowErrorMessage = vscode.window.showErrorMessage;
@@ -334,7 +336,7 @@ suite('RepositoryCommandRunner — runRepositoryCliCommand: обёртка с UI
   let workspaceRoot: string;
   let repositoryService: RepositoryService;
   let target: RepositoryTarget;
-  let services: RepositoryCliServices;
+  let services: RepositoryCliCommandServices;
   let errorMessageCalls: unknown[][];
   let originalShowErrorMessage: typeof vscode.window.showErrorMessage;
 
@@ -349,6 +351,7 @@ suite('RepositoryCommandRunner — runRepositoryCliCommand: обёртка с UI
       // Реальный ProjectSecretStorage (не пустая заглушка): часть тестов в этом файле
       // доходит до resolveDbPassword(), которому нужен настоящий метод getDbPassword().
       projectSecretStorage: new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot),
+      configurationOperationGuard: new ConfigurationOperationGuard(),
     };
     errorMessageCalls = [];
     originalShowErrorMessage = vscode.window.showErrorMessage;
@@ -364,8 +367,8 @@ suite('RepositoryCommandRunner — runRepositoryCliCommand: обёртка с UI
   });
 
   /**
-   * `runRepositoryCliCommand` — единственная точка входа для команд ВНЕ guard'а
-   * (bind/create/unbind/dump/report/users/label). Ветки `status:"interrupted"` и
+   * `runRepositoryCliCommand` — единственная точка входа для команд
+   * bind/create/unbind/dump/report/users/label. Ветки `status:"interrupted"` и
    * успешный путь (`afterSuccess`/`showSuccessMessage`) зависят от того, что
    * `executeRepositoryCli` вернёт статус "done" либо "interrupted" — а это способен
    * дать только реальный запуск Конфигуратора внутри runRepositoryDesigner
@@ -410,7 +413,7 @@ suite('RepositoryCommandRunner — runRepositoryCliCommand: внедрение e
   let workspaceRoot: string;
   let repositoryService: RepositoryService;
   let target: RepositoryTarget;
-  let services: RepositoryCliServices;
+  let services: RepositoryCliCommandServices;
   let infoMessageCalls: unknown[][];
   let errorMessageCalls: unknown[][];
   let originalShowInformationMessage: typeof vscode.window.showInformationMessage;
@@ -425,6 +428,7 @@ suite('RepositoryCommandRunner — runRepositoryCliCommand: внедрение e
       outputChannel: { appendLine: () => undefined } as unknown as vscode.OutputChannel,
       repositoryService,
       projectSecretStorage: new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot),
+      configurationOperationGuard: new ConfigurationOperationGuard(),
     };
     infoMessageCalls = [];
     errorMessageCalls = [];
@@ -545,5 +549,158 @@ suite('RepositoryCommandRunner — runRepositoryCliCommand: внедрение e
     const result = await runRepositoryCliCommand(baseOptions(), services);
     assert.strictEqual(result, false);
     assert.strictEqual(errorMessageCalls.length, 1);
+  });
+});
+
+/**
+ * Issue #40: bind/create/unbind/dump/report/users/label запускают Конфигуратор на
+ * той же базе, что импорт и обновление, поэтому процесс идёт только внутри аренды
+ * общего guard'а. Guard настоящий, внедрены лишь процесс 1С и уведомление.
+ */
+suite('RepositoryCommandRunner — runRepositoryCliCommand: аренда guard\'а (issue #40)', () => {
+  let workspaceRoot: string;
+  let guard: ConfigurationOperationGuard;
+  let services: RepositoryCliCommandServices;
+  let target: RepositoryTarget;
+  let logLines: string[];
+  let infoMessageCalls: unknown[][];
+  let errorMessageCalls: unknown[][];
+  let originalShowInformationMessage: typeof vscode.window.showInformationMessage;
+  let originalShowErrorMessage: typeof vscode.window.showErrorMessage;
+
+  setup(() => {
+    workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-runclicmd-guard-'));
+    guard = new ConfigurationOperationGuard();
+    logLines = [];
+    target = { configRoot: path.join(workspaceRoot, 'src', 'cf'), configKind: 'cf', displayName: 'Тест' };
+    services = {
+      workspaceFolder: { uri: vscode.Uri.file(workspaceRoot), name: 'test', index: 0 },
+      outputChannel: { appendLine: (line: string) => { logLines.push(line); } } as unknown as vscode.OutputChannel,
+      repositoryService: new RepositoryService(workspaceRoot, new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot)),
+      projectSecretStorage: new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot),
+      configurationOperationGuard: guard,
+    };
+    infoMessageCalls = [];
+    errorMessageCalls = [];
+    originalShowInformationMessage = vscode.window.showInformationMessage;
+    originalShowErrorMessage = vscode.window.showErrorMessage;
+    (vscode.window as { showInformationMessage: (...args: unknown[]) => Thenable<undefined> }).showInformationMessage = (...args: unknown[]) => {
+      infoMessageCalls.push(args);
+      return Promise.resolve(undefined);
+    };
+    (vscode.window as { showErrorMessage: (...args: unknown[]) => Thenable<undefined> }).showErrorMessage = (...args: unknown[]) => {
+      // Модальная ошибка до release() держала бы guard до закрытия окна (запрет №18).
+      errorMessageCalls.push([...args, guard.isBusy]);
+      return Promise.resolve(undefined);
+    };
+  });
+
+  teardown(() => {
+    (vscode.window as { showInformationMessage: typeof vscode.window.showInformationMessage }).showInformationMessage = originalShowInformationMessage;
+    (vscode.window as { showErrorMessage: typeof vscode.window.showErrorMessage }).showErrorMessage = originalShowErrorMessage;
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  });
+
+  function options(): Parameters<typeof runRepositoryCliCommand>[0] {
+    return {
+      command: 'repository-report',
+      target,
+      extraArgs: ['-File', '/tmp/report.txt'],
+      progressTitle: 'Отчёт по хранилищу: Тест',
+      progressStartMessage: 'Строю отчёт...',
+      successMessage: 'Отчёт сформирован',
+      errorTitle: 'Ошибка отчёта',
+    };
+  }
+
+  test('guard занят импортом — Конфигуратор не запускается, уведомление о занятости с держателем, false, чужая аренда цела', async () => {
+    const lease = guard.tryAcquire('Импорт конфигураций');
+    const busyMessages: string[] = [];
+    let afterSuccessCalls = 0;
+
+    const ok = await runRepositoryCliCommand(
+      { ...options(), afterSuccess: () => { afterSuccessCalls += 1; } },
+      services,
+      () => { throw new Error('Конфигуратор не должен запускаться при занятом guard\'е'); },
+      (message) => { busyMessages.push(message); }
+    );
+
+    assert.strictEqual(ok, false);
+    assert.strictEqual(afterSuccessCalls, 0);
+    assert.deepStrictEqual(busyMessages, [
+      'Отчёт по хранилищу: Тест: уже выполняется операция "Импорт конфигураций". Дождитесь её завершения.',
+    ]);
+    assert.ok(logLines.some((line) => line.startsWith('[repository][busy]') && line.includes('Импорт конфигураций')), logLines.join('\n'));
+    assert.strictEqual(infoMessageCalls.length, 0);
+    assert.strictEqual(errorMessageCalls.length, 0);
+    assert.strictEqual(guard.heldBy, 'Импорт конфигураций');
+    lease?.release();
+  });
+
+  test('guard свободен — Конфигуратор работает под арендой с заголовком операции, после завершения guard свободен', async () => {
+    const heldDuringCli: (string | undefined)[] = [];
+    const heldDuringAfterSuccess: boolean[] = [];
+
+    const ok = await runRepositoryCliCommand(
+      { ...options(), afterSuccess: () => { heldDuringAfterSuccess.push(guard.isBusy); } },
+      services,
+      () => {
+        heldDuringCli.push(guard.heldBy);
+        return Promise.resolve({ status: 'done' });
+      },
+      () => { throw new Error('уведомление о занятости не ожидается'); }
+    );
+
+    assert.strictEqual(ok, true);
+    assert.deepStrictEqual(heldDuringCli, ['Отчёт по хранилищу: Тест']);
+    assert.deepStrictEqual(heldDuringAfterSuccess, [false]);
+    assert.strictEqual(guard.isBusy, false);
+    assert.strictEqual(infoMessageCalls.length, 1);
+  });
+
+  test('Конфигуратор вернул ошибку — модальная ошибка показывается уже после освобождения guard\'а', async () => {
+    const ok = await runRepositoryCliCommand(
+      options(),
+      services,
+      () => Promise.resolve({ status: 'failed', message: 'хранилище недоступно' }),
+      () => { throw new Error('уведомление о занятости не ожидается'); }
+    );
+
+    assert.strictEqual(ok, false);
+    assert.strictEqual(errorMessageCalls.length, 1);
+    assert.ok(String(errorMessageCalls[0][0]).includes('хранилище недоступно'));
+    assert.strictEqual(errorMessageCalls[0].at(-1), false);
+    assert.strictEqual(guard.isBusy, false);
+  });
+
+  test('запуск Конфигуратора бросил исключение — guard освобождается, исключение уходит вызывающему', async () => {
+    await assert.rejects(
+      runRepositoryCliCommand(
+        options(),
+        services,
+        () => Promise.reject(new Error('сбой запуска')),
+        () => { throw new Error('уведомление о занятости не ожидается'); }
+      ),
+      /сбой запуска/
+    );
+    assert.strictEqual(guard.isBusy, false);
+  });
+
+  test('уведомление о занятости по умолчанию — информационное сообщение без ожидания закрытия', async () => {
+    const lease = guard.tryAcquire('Обновление конфигураций');
+    let resolveInfo: (() => void) | undefined;
+    (vscode.window as { showInformationMessage: (...args: unknown[]) => Thenable<undefined> }).showInformationMessage = (...args: unknown[]) => {
+      infoMessageCalls.push(args);
+      // Нотификация «не закрывается»: команда не должна её ждать.
+      return new Promise<undefined>((resolve) => { resolveInfo = () => { resolve(undefined); }; });
+    };
+
+    const ok = await runRepositoryCliCommand(options(), services, () => Promise.resolve({ status: 'done' }));
+
+    assert.strictEqual(ok, false);
+    assert.strictEqual(infoMessageCalls.length, 1);
+    assert.ok(String(infoMessageCalls[0][0]).includes('"Обновление конфигураций"'));
+    resolveInfo?.();
+    lease?.release();
   });
 });

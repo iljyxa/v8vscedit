@@ -7,7 +7,7 @@ import {
   refreshRepositoryUi,
   runPostRepositorySync,
 } from './RepositoryDatabaseSync';
-import { type RepositoryCliServices, runRepositoryCliCommand } from './RepositoryCommandRunner';
+import { type RepositoryCliCommandServices, runRepositoryCliCommand } from './RepositoryCommandRunner';
 import {
   DEFAULT_REPOSITORY_FILE_SYNC_DEPS,
   ensureRepositoryGuardFree,
@@ -45,10 +45,11 @@ export function registerRepositoryCommands(
 ): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('v8vscedit.repository.connect', async (node: NodeArg) => {
-      const target = requireRootTarget(services, node);
-      if (!target) {
+      const resolved = requireFreeRootTarget(services, deps, node, 'Подключение к хранилищу', false);
+      if (!resolved) {
         return;
       }
+      const { target, title } = resolved;
 
       const initialBinding = await services.repositoryService.loadBinding(target);
       const repoPasswordSet = await services.repositoryService.hasStoredRepoPassword(target);
@@ -75,7 +76,7 @@ export function registerRepositoryCommands(
           ...(formData.forceBindAlreadyBindedUser ? ['-ForceBindAlreadyBindedUser'] : []),
           ...(formData.forceReplaceCfg ? ['-ForceReplaceCfg'] : []),
         ],
-        progressTitle: `Подключение к хранилищу: ${target.displayName}`,
+        progressTitle: title,
         progressStartMessage: 'Подключаю конфигурацию к хранилищу...',
         successMessage: `Конфигурация "${target.displayName}" подключена к хранилищу.`,
         errorTitle: `Ошибка подключения "${target.displayName}" к хранилищу.`,
@@ -85,7 +86,7 @@ export function registerRepositoryCommands(
           services.repositoryService.setConnected(target, true);
           refreshRepositoryUi(services);
         },
-      }, toCliServices(services));
+      }, toCliServices(services), deps.runRepositoryCli, deps.notifyBusy);
 
       if (ok) {
         void runPostRepositorySync(target, services);
@@ -93,10 +94,11 @@ export function registerRepositoryCommands(
     }),
 
     vscode.commands.registerCommand('v8vscedit.repository.create', async (node: NodeArg) => {
-      const target = requireRootTarget(services, node);
-      if (!target) {
+      const resolved = requireFreeRootTarget(services, deps, node, 'Создание хранилища', false);
+      if (!resolved) {
         return;
       }
+      const { target, title } = resolved;
 
       const initialBinding = await services.repositoryService.loadBinding(target);
       const repoPasswordSet = await services.repositoryService.hasStoredRepoPassword(target);
@@ -125,7 +127,7 @@ export function registerRepositoryCommands(
           ...(formData.changesNotRecommendedRule ? ['-ChangesNotRecommendedRule', formData.changesNotRecommendedRule] : []),
           ...(formData.noBind ? ['-NoBind'] : []),
         ],
-        progressTitle: `Создание хранилища: ${target.displayName}`,
+        progressTitle: title,
         progressStartMessage: 'Создаю хранилище конфигурации...',
         successMessage: `Хранилище для "${target.displayName}" создано.`,
         errorTitle: `Ошибка создания хранилища для "${target.displayName}".`,
@@ -135,7 +137,7 @@ export function registerRepositoryCommands(
           services.repositoryService.setConnected(target, !formData.noBind);
           refreshRepositoryUi(services);
         },
-      }, toCliServices(services));
+      }, toCliServices(services), deps.runRepositoryCli, deps.notifyBusy);
 
       if (ok && !formData.noBind) {
         void runPostRepositorySync(target, services);
@@ -143,10 +145,11 @@ export function registerRepositoryCommands(
     }),
 
     vscode.commands.registerCommand('v8vscedit.repository.disconnect', async (node: NodeArg) => {
-      const target = requireRootTarget(services, node);
-      if (!target || !ensureConnected(services.repositoryService, target)) {
+      const resolved = requireFreeRootTarget(services, deps, node, 'Отключение от хранилища', true);
+      if (!resolved) {
         return;
       }
+      const { target, title } = resolved;
 
       const force = await pickBoolean(
         'Отключение от хранилища',
@@ -162,7 +165,7 @@ export function registerRepositoryCommands(
         command: 'repository-unbind',
         target,
         extraArgs: force ? ['-Force'] : [],
-        progressTitle: `Отключение от хранилища: ${target.displayName}`,
+        progressTitle: title,
         progressStartMessage: 'Отключаю конфигурацию от хранилища...',
         successMessage: `Конфигурация "${target.displayName}" отключена от хранилища.`,
         errorTitle: `Ошибка отключения "${target.displayName}" от хранилища.`,
@@ -171,7 +174,7 @@ export function registerRepositoryCommands(
           await services.repositoryService.clearBinding(target);
           refreshRepositoryUi(services);
         },
-      }, toCliServices(services));
+      }, toCliServices(services), deps.runRepositoryCli, deps.notifyBusy);
     }),
 
     vscode.commands.registerCommand('v8vscedit.repository.lock', async (node: NodeArg) => {
@@ -308,10 +311,11 @@ export function registerRepositoryCommands(
     }),
 
     vscode.commands.registerCommand('v8vscedit.repository.addUser', async (node: NodeArg) => {
-      const target = requireConnectedRootTarget(services, node);
-      if (!target) {
+      const resolved = requireFreeRootTarget(services, deps, node, 'Пользователь хранилища', true);
+      if (!resolved) {
         return;
       }
+      const { target, title } = resolved;
 
       const userName = await promptRequiredText('Добавление пользователя', 'Имя пользователя хранилища');
       if (!userName) {
@@ -344,19 +348,20 @@ export function registerRepositoryCommands(
           '-Rights', rights,
           ...(restoreDeletedUser ? ['-RestoreDeletedUser'] : []),
         ],
-        progressTitle: `Пользователь хранилища: ${target.displayName}`,
+        progressTitle: title,
         progressStartMessage: 'Добавляю пользователя в хранилище...',
         successMessage: `Пользователь "${userName}" добавлен в хранилище.`,
         errorTitle: `Ошибка добавления пользователя в хранилище "${target.displayName}".`,
         failureOperation: 'добавлении пользователя в хранилище',
-      }, toCliServices(services));
+      }, toCliServices(services), deps.runRepositoryCli, deps.notifyBusy);
     }),
 
     vscode.commands.registerCommand('v8vscedit.repository.copyUsers', async (node: NodeArg) => {
-      const target = requireConnectedRootTarget(services, node);
-      if (!target) {
+      const resolved = requireFreeRootTarget(services, deps, node, 'Копирование пользователей', true);
+      if (!resolved) {
         return;
       }
+      const { target, title } = resolved;
 
       const sourcePath = await promptRequiredText('Копирование пользователей', 'Путь к исходному хранилищу или его каталогу');
       if (!sourcePath) {
@@ -389,19 +394,20 @@ export function registerRepositoryCommands(
           '-Pwd', password,
           ...(restoreDeletedUser ? ['-RestoreDeletedUser'] : []),
         ],
-        progressTitle: `Копирование пользователей: ${target.displayName}`,
+        progressTitle: title,
         progressStartMessage: 'Копирую пользователей из другого хранилища...',
         successMessage: `Пользователи для "${target.displayName}" скопированы.`,
         errorTitle: `Ошибка копирования пользователей в хранилище "${target.displayName}".`,
         failureOperation: 'копировании пользователей хранилища',
-      }, toCliServices(services));
+      }, toCliServices(services), deps.runRepositoryCli, deps.notifyBusy);
     }),
 
     vscode.commands.registerCommand('v8vscedit.repository.dump', async (node: NodeArg) => {
-      const target = requireConnectedRootTarget(services, node);
-      if (!target) {
+      const resolved = requireFreeRootTarget(services, deps, node, 'Выгрузка версии', true);
+      if (!resolved) {
         return;
       }
+      const { target, title } = resolved;
 
       const fileUri = await vscode.window.showSaveDialog({
         title: 'Выгрузка версии из хранилища',
@@ -436,19 +442,20 @@ export function registerRepositoryCommands(
           '-File', fileUri.fsPath,
           ...(version.trim() ? ['-Version', version.trim()] : []),
         ],
-        progressTitle: `Выгрузка версии: ${target.displayName}`,
+        progressTitle: title,
         progressStartMessage: 'Выгружаю конфигурацию из хранилища...',
         successMessage: `Версия хранилища "${target.displayName}" выгружена в "${fileUri.fsPath}".`,
         errorTitle: `Ошибка выгрузки версии хранилища "${target.displayName}".`,
         failureOperation: 'выгрузке версии из хранилища',
-      }, toCliServices(services));
+      }, toCliServices(services), deps.runRepositoryCli, deps.notifyBusy);
     }),
 
     vscode.commands.registerCommand('v8vscedit.repository.report', async (node: NodeArg) => {
-      const target = requireConnectedRootTarget(services, node);
-      if (!target) {
+      const resolved = requireFreeRootTarget(services, deps, node, 'Отчёт по хранилищу', true);
+      if (!resolved) {
         return;
       }
+      const { target, title } = resolved;
 
       const format = await pickReportFormat();
       if (!format) {
@@ -513,19 +520,20 @@ export function registerRepositoryCommands(
           '-ReportFormat', format,
           ...flags.flatMap((flag) => [`-${flag}`]),
         ],
-        progressTitle: `Отчёт по хранилищу: ${target.displayName}`,
+        progressTitle: title,
         progressStartMessage: 'Строю отчёт по истории хранилища...',
         successMessage: `Отчёт по хранилищу "${target.displayName}" сформирован.`,
         errorTitle: `Ошибка построения отчёта по хранилищу "${target.displayName}".`,
         failureOperation: 'построении отчёта по хранилищу',
-      }, toCliServices(services));
+      }, toCliServices(services), deps.runRepositoryCli, deps.notifyBusy);
     }),
 
     vscode.commands.registerCommand('v8vscedit.repository.setLabel', async (node: NodeArg) => {
-      const target = requireConnectedRootTarget(services, node);
-      if (!target) {
+      const resolved = requireFreeRootTarget(services, deps, node, 'Установка метки', true);
+      if (!resolved) {
         return;
       }
+      const { target, title } = resolved;
 
       const labelName = await promptRequiredText('Установка метки', 'Имя метки');
       if (!labelName) {
@@ -548,22 +556,23 @@ export function registerRepositoryCommands(
           ...(version.trim() ? ['-Version', version.trim()] : []),
           ...(comment.trim() ? ['-Comment', comment.trim()] : []),
         ],
-        progressTitle: `Установка метки: ${target.displayName}`,
+        progressTitle: title,
         progressStartMessage: 'Устанавливаю метку версии в хранилище...',
         successMessage: `Метка "${labelName}" установлена для "${target.displayName}".`,
         errorTitle: `Ошибка установки метки для "${target.displayName}".`,
         failureOperation: 'установке метки хранилища',
-      }, toCliServices(services));
+      }, toCliServices(services), deps.runRepositoryCli, deps.notifyBusy);
     })
   );
 }
 
-function toCliServices(services: CommandServices): RepositoryCliServices {
+function toCliServices(services: CommandServices): RepositoryCliCommandServices {
   return {
     workspaceFolder: services.workspaceFolder,
     outputChannel: services.outputChannel,
     repositoryService: services.repositoryService,
     projectSecretStorage: services.projectSecretStorage,
+    configurationOperationGuard: services.configurationOperationGuard,
   };
 }
 
@@ -577,12 +586,24 @@ function requireRootTarget(services: CommandServices, node: NodeArg): Repository
   return requireTarget(services.repositoryService, repositoryNode);
 }
 
-function requireConnectedRootTarget(services: CommandServices, node: NodeArg): RepositoryTarget | null {
+/**
+ * Корень конфигурации для команды Конфигуратора и заголовок её аренды guard'а.
+ * Занятость проверяется до форм и диалогов: иначе пользователь заполнял бы их ради
+ * процесса, который всё равно не стартует.
+ */
+function requireFreeRootTarget(
+  services: CommandServices,
+  deps: RepositoryFileSyncDeps,
+  node: NodeArg,
+  operation: string,
+  requireConnection: boolean
+): { target: RepositoryTarget; title: string } | null {
   const target = requireRootTarget(services, node);
-  if (!target || !ensureConnected(services.repositoryService, target)) {
+  if (!target || (requireConnection && !ensureConnected(services.repositoryService, target))) {
     return null;
   }
-  return target;
+  const title = `${operation}: ${target.displayName}`;
+  return ensureRepositoryGuardFree(services, deps, title) ? { target, title } : null;
 }
 
 function requireRepositoryNode(services: CommandServices, node: NodeArg): RepositoryCommandNode | null {
