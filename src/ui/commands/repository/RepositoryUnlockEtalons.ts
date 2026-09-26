@@ -43,7 +43,9 @@ function log(services: RepositoryFileSyncServices, message: string): void {
 /**
  * Эталоны в аренде: Конфигуратор нужен только единицам без снимка. Рекурсивный корень
  * сравнивается с хеш-манифестом (или хеш-кэшем, если манифеста нет) — выгружаются
- * только изменённые единицы.
+ * только изменённые единицы. `currentRootHashes` — хеши файлов проекта, посчитанные
+ * до аренды: отмена захвата файлы не меняет, а хеширование всей конфигурации внутри
+ * аренды держало бы guard занятым без нужды.
  */
 export async function acquireUnlockEtalons(
   subject: RepositorySubject,
@@ -51,10 +53,12 @@ export async function acquireUnlockEtalons(
   recursive: boolean,
   baseHashes: Readonly<Record<string, string>>,
   services: RepositoryFileSyncServices,
-  deps: RepositoryFileSyncDeps
+  deps: RepositoryFileSyncDeps,
+  currentRootHashes?: Readonly<Record<string, string>>
 ): Promise<UnlockEtalons> {
   if (subject.isRoot && recursive) {
-    const units = collectRootUnitsToRestore(services, subject.target, baseHashes);
+    const current = currentRootHashes ?? hashRootFiles(subject.target);
+    const units = collectRootUnitsToRestore(services, subject.target, baseHashes, current);
     if (!units) {
       return { status: 'ready', objects: [], dispose: NOTHING_TO_DISPOSE };
     }
@@ -169,15 +173,21 @@ function isAbsentInDumpedParent(fullName: string, found: ReadonlyMap<string, Dum
   return parentXml !== null && !expandSubordinateUnits(parent.fullName, parentXml).includes(fullName);
 }
 
+/** Хеши всех файлов проекта цели — текущее состояние рекурсивного корня. */
+export function hashRootFiles(target: RepositoryTarget): Record<string, string> {
+  return hashScopeFiles(target.configRoot, { kind: 'all' });
+}
+
 /** Единицы рекурсивного корня, разошедшиеся с эталоном хешей; `null` — эталона нет. */
 function collectRootUnitsToRestore(
   services: RepositoryFileSyncServices,
   target: RepositoryTarget,
-  baseHashes: Readonly<Record<string, string>>
+  baseHashes: Readonly<Record<string, string>>,
+  rootHashes: Readonly<Record<string, string>>
 ): { changed: string[]; added: string[] } | null {
   const manifest = services.repositoryService.snapshots.readRootManifestHashes(target);
   let baseline = manifest;
-  let current = hashScopeFiles(target.configRoot, { kind: 'all' });
+  let current = rootHashes;
   if (!baseline) {
     if (Object.keys(baseHashes).length === 0) {
       log(services, `«${target.displayName}»: нет хеш-манифеста захвата и хеш-кэша — откат файлов пропущен.`);

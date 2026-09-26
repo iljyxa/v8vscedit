@@ -29,7 +29,7 @@ import {
   type RepositoryFlowOutcome,
   type RepositorySubject,
 } from './RepositoryFileSyncShared';
-import { acquireUnlockEtalons, type UnlockEtalonRequest, type UnlockEtalons } from './RepositoryUnlockEtalons';
+import { acquireUnlockEtalons, hashRootFiles, type UnlockEtalonRequest, type UnlockEtalons } from './RepositoryUnlockEtalons';
 
 interface UnlockLeaseResult {
   cli: Awaited<ReturnType<RepositoryFileSyncDeps['runRepositoryCli']>>;
@@ -56,8 +56,12 @@ export async function runRepositoryUnlockFlow(
   const objectLabel = node.label ?? target.displayName;
   const label = `Освобождение «${objectLabel}»`;
   const syncEnabled = deps.isFileSyncEnabled();
-  // Хеш-кэш нужен только рекурсивному корню без манифеста; читается до аренды guard'а.
-  const baseHashes = syncEnabled && options.recursive && isRootNode(node) ? loadBaseHashes(services, target) : {};
+  // Хеш-кэш и хеши файлов проекта нужны только рекурсивному корню; отмена захвата файлы
+  // не меняет, поэтому оба считаются до аренды guard'а — хеширование всей конфигурации
+  // внутри неё держало бы занятыми остальные операции с базой.
+  const rootSync = syncEnabled && options.recursive && isRootNode(node);
+  const baseHashes = rootSync ? loadBaseHashes(services, target) : {};
+  const currentRootHashes = rootSync ? hashRootFiles(target) : undefined;
   let leased: Awaited<ReturnType<typeof runRepositoryExclusive<UnlockLeaseResult>>>;
   try {
     leased = await runRepositoryExclusive<UnlockLeaseResult>(services, deps, label, async () => {
@@ -73,7 +77,7 @@ export async function runRepositoryUnlockFlow(
       if (!syncEnabled) {
         return { cli, subject, released };
       }
-      const etalons = await acquireUnlockEtalons(subject, released, options.recursive, baseHashes, services, deps);
+      const etalons = await acquireUnlockEtalons(subject, released, options.recursive, baseHashes, services, deps, currentRootHashes);
       return { cli, subject, released, etalons };
     });
   } catch (error) {

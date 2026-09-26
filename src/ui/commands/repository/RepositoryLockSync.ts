@@ -485,12 +485,19 @@ function captureFetchSnapshots(
     if (shouldCaptureRootManifest(operation, services, target)) {
       const keptLocal = new Set(applied.merge.keptLocalFiles.map((filePath) => path.resolve(filePath)));
       const overrides: Record<string, string> = {};
+      const excludeRels: string[] = [];
       planned.flatMap((source) => source.plan.conflicts).forEach((entry) => {
-        if (entry.repositoryHash !== null && keptLocal.has(path.resolve(target.configRoot, entry.rel))) {
+        if (!keptLocal.has(path.resolve(target.configRoot, entry.rel))) {
+          return;
+        }
+        // Файла нет в версии хранилища — в манифесте его быть не должно.
+        if (entry.repositoryHash === null) {
+          excludeRels.push(entry.rel);
+        } else {
           overrides[entry.rel] = entry.repositoryHash;
         }
       });
-      snapshots.captureRootManifest(target, overrides);
+      snapshots.captureRootManifest(target, overrides, excludeRels);
     }
     return;
   }

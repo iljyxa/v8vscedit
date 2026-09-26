@@ -49,6 +49,17 @@ function listFiles(files: readonly string[]): string {
   return files.length > MAX_LISTED_FILES ? `${listed}\n… и ещё ${String(files.length - MAX_LISTED_FILES)}` : listed;
 }
 
+/** Немодальное уведомление без ожидания закрытия (запрет №18) с необязательными кнопками. */
+export function showNotification(
+  show: (message: string, ...items: string[]) => Thenable<string | undefined>,
+  message: string,
+  actions: readonly NotificationAction[] = []
+): void {
+  void show(message, ...actions.map((action) => action.label)).then((picked) => {
+    actions.find((action) => action.label === picked)?.run();
+  });
+}
+
 /* c8 ignore start -- модальные диалоги и открытие вкладок сравнения vscode не автоматизируются
    в тестовом хосте (правило CLAUDE.md №4); решения потоков проверяются через внедрённые deps. */
 
@@ -105,17 +116,6 @@ export async function openMergeDiffs(pairs: MergeDiffPair[]): Promise<void> {
       await vscode.commands.executeCommand('workbench.action.files.resetActiveEditorReadonlyInSession');
     }
   }
-}
-
-/** Немодальное уведомление без ожидания закрытия (запрет №18) с необязательными кнопками. */
-export function showNotification(
-  show: (message: string, ...items: string[]) => Thenable<string | undefined>,
-  message: string,
-  actions: readonly NotificationAction[] = []
-): void {
-  void show(message, ...actions.map((action) => action.label)).then((picked) => {
-    actions.find((action) => action.label === picked)?.run();
-  });
 }
 
 export function isFileSyncOnLockUnlockEnabled(): boolean {
