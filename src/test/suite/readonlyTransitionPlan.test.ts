@@ -160,7 +160,7 @@ suite('readonlyTransitionPlan — planReadonlyTransitions', () => {
       ownerChainOf: ownerChainOfCatalog,
       isRestricted: () => false,
     });
-    assert.deepStrictEqual(result, { applyNow: [], defer: [] });
+    assert.deepStrictEqual(result, { applyNow: [], defer: [], afterSave: [] });
   });
 
   test('один и тот же файл открыт в нескольких вкладках (видимая + скрытая) — одна запись, видимая побеждает', () => {
@@ -242,5 +242,50 @@ suite('readonlyTransitionPlan — ownerChainOf: многоуровневая ц�
       isRestricted: () => false,
     });
     assert.deepStrictEqual(result.applyNow.map((t) => t.path), [formFile]);
+  });
+});
+
+/**
+ * Issue #62: readonly сессии запрещает сохранение, поэтому несохранённый документ
+ * после отмены захвата переводится в readonly только после сохранения/отката
+ * (`afterSave`), а снятие readonly (захват) применяется к нему как обычно.
+ */
+suite('readonlyTransitionPlan — несохранённые документы (issue #62)', () => {
+  const modulePath = filePath('Catalogs', 'А', 'Ext', 'ObjectModule.bsl');
+
+  function plan(openFiles: { path: string; visible: boolean; dirty?: boolean }[], restricted: boolean) {
+    return planReadonlyTransitions({
+      openFiles,
+      changedOwnerFullNames: ['Справочник.А'],
+      allObjects: [],
+      configRoot: CONFIG_ROOT,
+      ownerChainOf: ownerChainOfCatalog,
+      isRestricted: () => restricted,
+    });
+  }
+
+  for (const visible of [true, false]) {
+    test(`отмена захвата, dirty, visible=${String(visible)} → только afterSave, не applyNow/defer`, () => {
+      const result = plan([{ path: modulePath, visible, dirty: true }], true);
+      assert.deepStrictEqual(result, { applyNow: [], defer: [], afterSave: [{ path: modulePath, readonly: true }] });
+    });
+  }
+
+  test('захват, dirty → readonly:false применяется сразу (applyNow), afterSave пуст', () => {
+    const result = plan([{ path: modulePath, visible: true, dirty: true }], false);
+    assert.deepStrictEqual(result, { applyNow: [{ path: modulePath, readonly: false }], defer: [], afterSave: [] });
+  });
+
+  test('отмена захвата, dirty:false → обычный applyNow', () => {
+    const result = plan([{ path: modulePath, visible: true, dirty: false }], true);
+    assert.deepStrictEqual(result, { applyNow: [{ path: modulePath, readonly: true }], defer: [], afterSave: [] });
+  });
+
+  test('файл в двух вкладках, dirty отмечена только одна → одна запись afterSave', () => {
+    const result = plan([
+      { path: modulePath, visible: true, dirty: true },
+      { path: modulePath, visible: false },
+    ], true);
+    assert.deepStrictEqual(result, { applyNow: [], defer: [], afterSave: [{ path: modulePath, readonly: true }] });
   });
 });

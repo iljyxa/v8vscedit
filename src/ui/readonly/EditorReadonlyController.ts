@@ -30,9 +30,13 @@ const TARGET_WIDE_OWNER = '\u0000target';
  * (фокус затем возвращается исходному редактору), а скрытые — ждут собственной активации.
  * Файл, открытый только левой стороной сравнения, переключается сразу через временную
  * обычную вкладку: событие активации сравнения приходит по правой стороне.
+ * Несохранённый документ переводится в readonly только после сохранения или отката
+ * правок: readonly сессии запрещает сохранение, и правки можно было бы только потерять.
  */
 export class EditorReadonlyController {
   private readonly pending = new Map<string, boolean>();
+  /** Документы, ждущие перехода в readonly до исчезновения несохранённых правок. */
+  private readonly awaitingClean = new Set<string>();
   private queue: Promise<void> = Promise.resolve();
 
   constructor(
@@ -46,7 +50,9 @@ export class EditorReadonlyController {
     const locks = this.repositoryService.onDidChangeLocks((event) => { this.onLocksChanged(event); });
     const active = vscode.window.onDidChangeActiveTextEditor((editor) => { this.onActiveEditorChanged(editor); });
     const close = vscode.workspace.onDidCloseTextDocument((document) => { this.onDocumentClosed(document); });
-    return vscode.Disposable.from({ dispose: () => locks.dispose() }, active, close);
+    // Событие изменения приходит и при смене признака isDirty — сохранении и откате.
+    const change = vscode.workspace.onDidChangeTextDocument((event) => { this.onDocumentChanged(event.document); });
+    return vscode.Disposable.from({ dispose: () => locks.dispose() }, active, close, change);
   }
 
   /**
@@ -72,6 +78,26 @@ export class EditorReadonlyController {
   /** Закрытая вкладка больше не ждёт перехода. */
   onDocumentClosed(document: vscode.TextDocument): void {
     this.pending.delete(document.uri.toString());
+    this.awaitingClean.delete(document.uri.toString());
+  }
+
+  /**
+   * Документ без несохранённых правок, ждавший readonly, переводится в него: видимая
+   * вкладка — через очередь, скрытая — при своей активации. Отложенный переход
+   * фиксируется сразу, как в `onLocksChanged`: иначе задача очереди перезаписала бы
+   * решение более нового события захватов.
+   */
+  onDocumentChanged(document: vscode.TextDocument): void {
+    if (document.isDirty || !this.awaitingClean.delete(document.uri.toString())) {
+      return;
+    }
+    const tabs = collectOpenTabs();
+    const route = selectReadonlyApplyRoute(tabs, document.uri.fsPath);
+    if (route?.kind === 'defer') {
+      this.pending.set(route.tab.uri.toString(), true);
+      return;
+    }
+    this.enqueue(() => this.applyToVisibleTabs(tabs, [{ path: document.uri.fsPath, readonly: true }]));
   }
 
   /** Переходы выполняются последовательно: каждый временно меняет активный редактор. */
@@ -107,12 +133,19 @@ export class EditorReadonlyController {
 
   private planTransitions(event: RepositoryLocksChangedNotice): { tabs: OpenTab[]; applyNow: ReadonlyTransition[] } {
     const tabs = collectOpenTabs();
+    const dirtyUris = new Set(
+      vscode.workspace.textDocuments.filter((document) => document.isDirty).map((document) => document.uri.toString())
+    );
     const touchesRoot = event.fullNames.some(isRootLockName);
     // Цель события известна только по корню; вид цели нужен лишь для имени корня,
     // а корень здесь всё равно сводится к TARGET_WIDE_OWNER.
     const target: RepositoryTarget = { configRoot: event.target.configRoot, configKind: 'cf', displayName: '' };
     const plan = planReadonlyTransitions({
-      openFiles: tabs.map((tab) => ({ path: tab.path, visible: isImmediatelyApplicable(tab) })),
+      openFiles: tabs.map((tab) => ({
+        path: tab.path,
+        visible: isImmediatelyApplicable(tab),
+        dirty: dirtyUris.has(tab.uri.toString()),
+      })),
       changedOwnerFullNames: [...event.fullNames, TARGET_WIDE_OWNER],
       allObjects: event.allObjects,
       configRoot: event.target.configRoot,
@@ -125,6 +158,16 @@ export class EditorReadonlyController {
       },
       isRestricted: (filePath) => this.supportService.isLocked(filePath) || this.repositoryService.isEditRestricted(filePath),
     });
+    // Новое событие отменяет прежнее ожидание сохранения: например, после повторного
+    // захвата файл должен стать редактируемым сразу, а не readonly после сохранения.
+    for (const transition of [...plan.applyNow, ...plan.defer]) {
+      this.awaitingClean.delete(vscode.Uri.file(transition.path).toString());
+    }
+    for (const transition of plan.afterSave) {
+      const key = vscode.Uri.file(transition.path).toString();
+      this.pending.delete(key);
+      this.awaitingClean.add(key);
+    }
     for (const transition of plan.defer) {
       const route = selectReadonlyApplyRoute(tabs, transition.path);
       if (route?.kind === 'defer') {

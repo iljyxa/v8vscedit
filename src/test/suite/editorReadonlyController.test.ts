@@ -954,3 +954,205 @@ suite('EditorReadonlyController — файл проекта слева в сра
     assert.strictEqual(textTabsOf(copyUri).length, 0);
   });
 });
+
+/**
+ * Issue #62: отмена захвата при несохранённых правках не делает вкладку readonly —
+ * иначе сохранить правки нельзя, а при закрытии остаётся только «Не сохранять».
+ * Readonly применяется после сохранения или отката. Обработчик изменения документа
+ * вызывается и напрямую: событие хоста приходит асинхронно, а повторный вызов
+ * идемпотентен, поэтому ожидание очереди после него детерминировано.
+ */
+suite('EditorReadonlyController — несохранённые правки при отмене захвата (issue #62)', () => {
+  let configRoot: string;
+  let uriA: vscode.Uri;
+  let uriB: vscode.Uri;
+  let spy: ReadonlyCommandSpy | undefined;
+  let disposable: vscode.Disposable | undefined;
+
+  setup(() => {
+    configRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-readonly-dirty-'));
+    uriA = vscode.Uri.file(path.join(configRoot, 'А.bsl'));
+    uriB = vscode.Uri.file(path.join(configRoot, 'Б.bsl'));
+    fs.writeFileSync(uriA.fsPath, 'Процедура А()\nКонецПроцедуры\n', 'utf-8');
+    fs.writeFileSync(uriB.fsPath, 'Процедура Б()\nКонецПроцедуры\n', 'utf-8');
+  });
+
+  teardown(async () => {
+    spy?.restore();
+    spy = undefined;
+    disposable?.dispose();
+    disposable = undefined;
+    await revertDirtyAndCloseAll();
+    fs.rmSync(configRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  interface Started {
+    controller: EditorReadonlyController;
+    state: { restricted: boolean };
+    fire: () => void;
+    settle: () => Promise<void>;
+  }
+
+  function start(): Started {
+    const state = { restricted: true };
+    let listener: ChangeLocksListener | undefined;
+    const repositoryService = fakeRepositoryService({
+      isEditRestricted: () => state.restricted,
+      onDidChangeLocks: (l: ChangeLocksListener) => { listener = l; return { dispose: () => { listener = undefined; } }; },
+    });
+    const supportService = fakeSupportService(() => false);
+    const log = { appendLine: () => undefined } as unknown as vscode.OutputChannel;
+    const guard = new BslReadonlyGuard(supportService, repositoryService, log);
+    const controller = new EditorReadonlyController(repositoryService, supportService, guard, log);
+    disposable = controller.register();
+    spy = spyReadonlyCommands();
+    return {
+      controller,
+      state,
+      fire: () => { listener?.({ target: { configRoot }, fullNames: ['Справочник.А'], allObjects: [] }); },
+      settle: () => {
+        const queue = (controller as unknown as { queue: unknown }).queue;
+        assert.ok(queue instanceof Promise, 'У EditorReadonlyController нет внутренней очереди queue.');
+        return queue as Promise<void>;
+      },
+    };
+  }
+
+  async function openDirty(uri: vscode.Uri): Promise<vscode.TextDocument> {
+    const document = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(document, { preview: false });
+    const edit = new vscode.WorkspaceEdit();
+    edit.insert(uri, new vscode.Position(0, 0), '// правка\n');
+    assert.ok(await vscode.workspace.applyEdit(edit));
+    assert.ok(document.isDirty);
+    return document;
+  }
+
+  function commandsOn(uri: vscode.Uri, command: string): number {
+    return (spy?.calls ?? []).filter((call) => call.command === command && call.activeUri === uri.toString()).length;
+  }
+
+  test('видимая несохранённая вкладка: readonly не ставится, document.save() → true, после сохранения — readonly', async function () {
+    this.timeout(15_000);
+    const started = start();
+    const docA = await openDirty(uriA);
+
+    started.fire();
+    await started.settle();
+    assert.deepStrictEqual(spy?.calls, [], 'несохранённый документ не должен становиться readonly');
+
+    assert.strictEqual(await docA.save(), true);
+    assert.strictEqual(fs.readFileSync(uriA.fsPath, 'utf-8').startsWith('// правка\n'), true);
+    started.controller.onDocumentChanged(docA);
+    await started.settle();
+
+    assert.deepStrictEqual(spy.calls, [{ command: SET_COMMAND, activeUri: uriA.toString() }]);
+  });
+
+  test('сохранение без прямого вызова: реальное событие изменения документа применяет readonly', async function () {
+    this.timeout(15_000);
+    const started = start();
+    const docA = await openDirty(uriA);
+
+    started.fire();
+    await started.settle();
+    assert.strictEqual(await docA.save(), true);
+
+    await waitFor(() => commandsOn(uriA, SET_COMMAND) === 1);
+  });
+
+  test('скрытый файл сохранён и сразу захвачен снова: при активации — reset, не set', async function () {
+    this.timeout(15_000);
+    const started = start();
+    const docA = await openDirty(uriA);
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uriB), { preview: false });
+
+    started.fire();
+    await started.settle();
+    // Очередь занята предыдущим переходом: обработка сохранения не успевает до нового
+    // события захвата. Шлюз вместо таймера делает этот порядок детерминированным.
+    let release: () => void = () => undefined;
+    const busy = new Promise<void>((resolve) => { release = resolve; });
+    (started.controller as unknown as { queue: Promise<void> }).queue = busy;
+    assert.strictEqual(await docA.save(), true);
+    started.controller.onDocumentChanged(docA);
+    started.state.restricted = false;
+    started.fire();
+    release();
+    await started.settle();
+
+    const editorA = await vscode.window.showTextDocument(docA, { preview: false });
+    started.controller.onActiveEditorChanged(editorA);
+    await started.settle();
+
+    assert.strictEqual(commandsOn(uriA, SET_COMMAND), 0);
+    assert.strictEqual(commandsOn(uriA, RESET_COMMAND), 1);
+  });
+
+  test('откат правок вместо сохранения → readonly применяется', async function () {
+    this.timeout(15_000);
+    const started = start();
+    const docA = await openDirty(uriA);
+
+    started.fire();
+    await started.settle();
+    await vscode.commands.executeCommand('workbench.action.files.revert');
+    assert.ok(!docA.isDirty);
+    started.controller.onDocumentChanged(docA);
+    await started.settle();
+
+    assert.strictEqual(commandsOn(uriA, SET_COMMAND), 1);
+  });
+
+  test('скрытая несохранённая вкладка: после сохранения readonly ждёт её активации', async function () {
+    this.timeout(15_000);
+    const started = start();
+    const docA = await openDirty(uriA);
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uriB), { preview: false });
+
+    started.fire();
+    await started.settle();
+    assert.strictEqual(await docA.save(), true);
+    started.controller.onDocumentChanged(docA);
+    await started.settle();
+    assert.strictEqual(commandsOn(uriA, SET_COMMAND), 0, 'скрытая вкладка не активируется ради перехода');
+
+    const editorA = await vscode.window.showTextDocument(docA, { preview: false });
+    started.controller.onActiveEditorChanged(editorA);
+    await started.settle();
+
+    assert.strictEqual(commandsOn(uriA, SET_COMMAND), 1);
+  });
+
+  test('повторный захват до сохранения: readonly снимается сразу, после сохранения не ставится', async function () {
+    this.timeout(15_000);
+    const started = start();
+    const docA = await openDirty(uriA);
+
+    started.fire();
+    await started.settle();
+    started.state.restricted = false;
+    started.fire();
+    await started.settle();
+    assert.strictEqual(await docA.save(), true);
+    started.controller.onDocumentChanged(docA);
+    await started.settle();
+
+    assert.deepStrictEqual(spy?.calls, [{ command: RESET_COMMAND, activeUri: uriA.toString() }]);
+  });
+
+  test('документ закрыт до сохранения → ожидание забыто', async function () {
+    this.timeout(15_000);
+    const started = start();
+    const docA = await openDirty(uriA);
+
+    started.fire();
+    await started.settle();
+    started.controller.onDocumentClosed(docA);
+    assert.strictEqual(await docA.save(), true);
+    started.controller.onDocumentChanged(docA);
+    await started.settle();
+
+    assert.deepStrictEqual(spy?.calls, []);
+  });
+});
