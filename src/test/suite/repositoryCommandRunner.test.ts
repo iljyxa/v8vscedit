@@ -276,6 +276,58 @@ suite('RepositoryCommandRunner — executeRepositoryCli: гарантирова�
       assert.ok('message' in result && result.message.includes('Не найден исполняемый файл 1С'));
     });
   });
+  [
+    { label: 'cf', configKind: 'cf' as const, extensionName: undefined },
+    { label: 'cfe EVOLC', configKind: 'cfe' as const, extensionName: 'EVOLC' },
+  ].forEach(({ label, configKind, extensionName }) => {
+    test(`подготовка успешна (${label}) → запуск получает DESIGNER, базу, хранилище, аргументы команды и -Extension только для cfe`, async () => {
+      // Исполняемый файл с именем платформы: resolveV8ExecutablePath проверяет имя,
+      // запуск подменён — настоящий Конфигуратор не нужен.
+      const fakeV8 = path.join(workspaceRoot, 'bin', '1cv8');
+      fs.mkdirSync(path.dirname(fakeV8), { recursive: true });
+      fs.writeFileSync(fakeV8, '', 'utf-8');
+      const defaults: Record<string, unknown> = { '--ibconnection': '/F/tmp/база', '--path': fakeV8 };
+      if (extensionName) {
+        defaults.extension = { [extensionName]: { 'repo-path': '/tmp/хранилище', 'repo-user': 'Admin' } };
+      } else {
+        defaults['--repo-path'] = '/tmp/хранилище';
+        defaults['--repo-user'] = 'Admin';
+      }
+      fs.writeFileSync(path.join(workspaceRoot, 'env.json'), JSON.stringify({ default: defaults }), 'utf-8');
+      const launched: { title: string; v8Path: string; designerArgs: string[] }[] = [];
+
+      const result = await executeRepositoryCli(
+        {
+          command: 'repository-lock',
+          target: { configRoot: target.configRoot, configKind, extensionName, displayName: 'Тест' },
+          extraArgs: buildLockExtraArgs('/tmp/objects.xml'),
+          progressTitle: 'Захват «Тест»',
+        },
+        services,
+        (_request, title, v8Path, designerArgs) => {
+          launched.push({ title, v8Path, designerArgs });
+          return Promise.resolve({ status: 'done' });
+        }
+      );
+
+      assert.deepStrictEqual(result, { status: 'done' });
+      assert.strictEqual(launched.length, 1);
+      const [call] = launched;
+      assert.strictEqual(call.title, 'Захват «Тест»');
+      assert.strictEqual(call.v8Path, fakeV8);
+      assert.strictEqual(call.designerArgs[0], 'DESIGNER');
+      const args = call.designerArgs.join(' ');
+      assert.ok(args.includes('/ConfigurationRepositoryF /tmp/хранилище'), args);
+      assert.ok(args.includes('/ConfigurationRepositoryN Admin'), args);
+      assert.ok(args.includes('/ConfigurationRepositoryLock'), args);
+      assert.ok(call.designerArgs.includes('-revised'), args);
+      assert.strictEqual(call.designerArgs.includes('-Extension'), Boolean(extensionName), args);
+      if (extensionName) {
+        assert.deepStrictEqual(call.designerArgs.slice(-2), ['-Extension', extensionName]);
+      }
+      assert.deepStrictEqual(errorMessageCalls, []);
+    });
+  });
 });
 
 suite('RepositoryCommandRunner — runRepositoryCliCommand: обёртка с UI-реакцией', () => {
@@ -405,6 +457,19 @@ suite('RepositoryCommandRunner — runRepositoryCliCommand: внедрение e
       errorTitle: 'Ошибка привязки',
     };
   }
+
+  test('extraArgs не передан — в execute уходит пустой список аргументов команды', async () => {
+    const options = { ...baseOptions(), extraArgs: undefined };
+    const requests: unknown[][] = [];
+
+    const ok = await runRepositoryCliCommand(options, services, (request) => {
+      requests.push([...request.extraArgs]);
+      return Promise.resolve({ status: 'done' });
+    });
+
+    assert.strictEqual(ok, true);
+    assert.deepStrictEqual(requests, [[]]);
+  });
 
   test('execute → {status:"done"}, showSuccessMessage не указан (по умолчанию true) — successMessage показан, afterSuccess вызван, результат true', async () => {
     let afterSuccessCalls = 0;
