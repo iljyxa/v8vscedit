@@ -6,7 +6,8 @@ import * as path from 'path';
  * (видимые вкладки), а какие — при следующей активации (скрытые вкладки).
  */
 export interface ReadonlyTransitionInput {
-  openFiles: readonly { path: string; visible: boolean }[];
+  /** `dirty` — у документа есть несохранённые правки. */
+  openFiles: readonly { path: string; visible: boolean; dirty?: boolean }[];
   /** Объекты, чьё состояние захвата изменило событие. */
   changedOwnerFullNames: readonly string[];
   /** Все объекты с известным состоянием захвата после события. */
@@ -26,6 +27,11 @@ export interface ReadonlyTransition {
 export interface ReadonlyTransitionPlan {
   applyNow: ReadonlyTransition[];
   defer: ReadonlyTransition[];
+  /**
+   * Перевод в readonly несохранённого документа — после его сохранения или отката:
+   * readonly сессии запрещает сохранение, и правки можно было бы только потерять.
+   */
+  afterSave: ReadonlyTransition[];
 }
 
 function normalizeKey(filePath: string): string {
@@ -46,7 +52,7 @@ function isInsideRoot(filePath: string, configRoot: string): boolean {
  */
 export function planReadonlyTransitions(input: ReadonlyTransitionInput): ReadonlyTransitionPlan {
   const affectedOwners = new Set([...input.changedOwnerFullNames, ...input.allObjects]);
-  const byKey = new Map<string, { path: string; visible: boolean }>();
+  const byKey = new Map<string, { path: string; visible: boolean; dirty: boolean }>();
   for (const file of input.openFiles) {
     if (!isInsideRoot(file.path, input.configRoot)) {
       continue;
@@ -56,12 +62,20 @@ export function planReadonlyTransitions(input: ReadonlyTransitionInput): Readonl
     }
     const key = normalizeKey(file.path);
     const known = byKey.get(key);
-    byKey.set(key, { path: known?.path ?? file.path, visible: (known?.visible ?? false) || file.visible });
+    byKey.set(key, {
+      path: known?.path ?? file.path,
+      visible: (known?.visible ?? false) || file.visible,
+      dirty: (known?.dirty ?? false) || file.dirty === true,
+    });
   }
-  const plan: ReadonlyTransitionPlan = { applyNow: [], defer: [] };
+  const plan: ReadonlyTransitionPlan = { applyNow: [], defer: [], afterSave: [] };
   for (const file of byKey.values()) {
     const transition = { path: file.path, readonly: input.isRestricted(file.path) };
-    (file.visible ? plan.applyNow : plan.defer).push(transition);
+    if (transition.readonly && file.dirty) {
+      plan.afterSave.push(transition);
+    } else {
+      (file.visible ? plan.applyNow : plan.defer).push(transition);
+    }
   }
   return plan;
 }
