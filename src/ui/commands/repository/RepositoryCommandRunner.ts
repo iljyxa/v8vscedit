@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { decode } from 'iconv-lite';
+import type { ConfigurationOperationGuard } from '../../../infra/process/ConfigurationOperationGuard';
 import type { RepositoryBinding, RepositoryNodeRef, RepositoryService, RepositoryTarget } from '../../../infra/repository/RepositoryService';
 import { resolveDbPassword, type ProjectSecretStorage } from '../../../infra/environment';
 import {
@@ -13,6 +14,7 @@ import {
   resolveV8PathHintFromVersion,
   runProcess,
 } from '../../../infra/process';
+import { notifyConfigurationOperationBusy } from '../ext/configurationOperationBusy';
 
 interface ConnectionParams {
   infoBasePath?: string;
@@ -67,6 +69,10 @@ export interface RepositoryCliServices {
   outputChannel: vscode.OutputChannel;
   repositoryService: RepositoryService;
   projectSecretStorage: ProjectSecretStorage;
+}
+
+export interface RepositoryCliCommandServices extends RepositoryCliServices {
+  configurationOperationGuard: ConfigurationOperationGuard;
 }
 
 /**
@@ -211,16 +217,20 @@ async function runRepositoryDesigner(
 /* c8 ignore stop */
 
 /**
- * Обёртка с UI-реакцией для команд вне guard'а (подключение, создание, отключение,
- * пользователи, выгрузка версии, отчёт, метка): ошибку здесь можно показать модально.
- * `execute` внедряется, чтобы реакции на исходы проверялись без процесса 1С.
+ * Обёртка с UI-реакцией для подключения, создания, отключения, пользователей,
+ * выгрузки версии, отчёта и метки. Конфигуратор здесь работает с той же базой, что
+ * импорт и обновление, поэтому процесс запускается только под арендой общего
+ * guard'а. Модальные сообщения об исходе и `afterSuccess` — уже после `release()`
+ * (запрет №18). `execute` и `notifyBusy` внедряются, чтобы реакции на исходы
+ * проверялись без процесса 1С.
  */
 export async function runRepositoryCliCommand(
   options: RepositoryCliRunOptions,
-  services: RepositoryCliServices,
-  execute: (request: RepositoryCliRequest, services: RepositoryCliServices) => Promise<RepositoryCliResult> = executeRepositoryCli
+  services: RepositoryCliCommandServices,
+  execute: (request: RepositoryCliRequest, services: RepositoryCliServices) => Promise<RepositoryCliResult> = executeRepositoryCli,
+  notifyBusy: (message: string) => void = notifyConfigurationOperationBusy
 ): Promise<boolean> {
-  const result = await execute({
+  const exclusive = await services.configurationOperationGuard.runExclusive(options.progressTitle, () => execute({
     command: options.command,
     target: options.target,
     extraArgs: options.extraArgs ?? [],
@@ -228,7 +238,13 @@ export async function runRepositoryCliCommand(
     progressTitle: options.progressTitle,
     progressStartMessage: options.progressStartMessage,
     failureOperation: options.failureOperation,
-  }, services);
+  }, services));
+  if (!exclusive.acquired) {
+    services.outputChannel.appendLine(`[repository][busy] ${options.progressTitle}: пропущено, выполняется "${exclusive.heldBy}"`);
+    notifyBusy(`${options.progressTitle}: уже выполняется операция "${exclusive.heldBy}". Дождитесь её завершения.`);
+    return false;
+  }
+  const result = exclusive.value;
   if (result.status === 'interrupted') {
     void vscode.window.showInformationMessage(`${options.progressTitle}: ${result.message}`);
     return false;

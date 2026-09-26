@@ -1465,4 +1465,169 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
       });
     });
   });
+
+  /**
+   * Issue #40: подключение, создание, отключение, пользователи, выгрузка версии,
+   * отчёт и метка запускают Конфигуратор на той же базе, что импорт и обновление.
+   * Занятость проверяется до форм и диалогов, а сам процесс идёт под арендой guard'а.
+   * Процесс 1С внедрён через `runRepositoryCli`; исход «ошибка» выбран, чтобы
+   * успешное подключение не запускало настоящую синхронизацию с базой.
+   */
+  suite('RepositoryCommands: подключение, пользователи, отчёты — под guard\'ом (issue #40)', () => {
+    type Stubs = Pick<typeof vscode.window, 'showQuickPick' | 'showInputBox' | 'showSaveDialog'>;
+    const stubsRef = vscode.window as Stubs;
+    let originals: Stubs;
+    let dialogCalls: string[];
+    let connectionFormCalls: number;
+    let cliCalls: { command: string; heldBy: string | undefined }[];
+    let busyMessages: string[];
+
+    const target: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'Основная конфигурация' };
+
+    const cases: { command: string; cli: string; title: string }[] = [
+      { command: 'v8vscedit.repository.connect', cli: 'repository-bind', title: 'Подключение к хранилищу: Основная конфигурация' },
+      { command: 'v8vscedit.repository.create', cli: 'repository-create', title: 'Создание хранилища: Основная конфигурация' },
+      { command: 'v8vscedit.repository.disconnect', cli: 'repository-unbind', title: 'Отключение от хранилища: Основная конфигурация' },
+      { command: 'v8vscedit.repository.addUser', cli: 'repository-add-user', title: 'Пользователь хранилища: Основная конфигурация' },
+      { command: 'v8vscedit.repository.copyUsers', cli: 'repository-copy-users', title: 'Копирование пользователей: Основная конфигурация' },
+      { command: 'v8vscedit.repository.dump', cli: 'repository-dump', title: 'Выгрузка версии: Основная конфигурация' },
+      { command: 'v8vscedit.repository.report', cli: 'repository-report', title: 'Отчёт по хранилищу: Основная конфигурация' },
+      { command: 'v8vscedit.repository.setLabel', cli: 'repository-set-label', title: 'Установка метки: Основная конфигурация' },
+    ];
+
+    setup(() => {
+      dialogCalls = [];
+      connectionFormCalls = 0;
+      cliCalls = [];
+      busyMessages = [];
+      originals = {
+        showQuickPick: vscode.window.showQuickPick,
+        showInputBox: vscode.window.showInputBox,
+        showSaveDialog: vscode.window.showSaveDialog,
+      };
+      // Первый пункт одиночного выбора и пустой множественный — достаточно, чтобы
+      // каждая команда дошла до запуска Конфигуратора.
+      stubsRef.showQuickPick = ((items: readonly unknown[], options?: vscode.QuickPickOptions) => {
+        dialogCalls.push('showQuickPick');
+        return Promise.resolve(options?.canPickMany ? [] : items[0]);
+      }) as unknown as typeof vscode.window.showQuickPick;
+      stubsRef.showInputBox = () => {
+        dialogCalls.push('showInputBox');
+        return Promise.resolve('значение');
+      };
+      stubsRef.showSaveDialog = () => {
+        dialogCalls.push('showSaveDialog');
+        return Promise.resolve(vscode.Uri.file(path.join(os.tmpdir(), 'v8vscedit-repo-dump.cf')));
+      };
+
+      const guard = new ConfigurationOperationGuard();
+      repositoryDepsBox.current = {
+        ...DEFAULT_REPOSITORY_FILE_SYNC_DEPS,
+        runRepositoryCli: (request) => {
+          cliCalls.push({ command: request.command, heldBy: guard.heldBy });
+          return Promise.resolve({ status: 'failed', message: 'хранилище недоступно' });
+        },
+        notifyBusy: (message) => { busyMessages.push(message); },
+      };
+      servicesBox.current = createServices({
+        configurationOperationGuard: guard,
+        repositoryService: {
+          resolveTargetByXmlPath: () => target,
+          hasBinding: () => true,
+          isConnected: () => true,
+          loadBinding: () => Promise.resolve(undefined),
+          hasStoredRepoPassword: () => Promise.resolve(false),
+        } as unknown as RepositoryService,
+        repositoryConnectionViewProvider: {
+          show: () => {
+            connectionFormCalls += 1;
+            return Promise.resolve({
+              repoPath: '/tmp/хранилище',
+              repoUser: 'Admin',
+              repoPassword: '',
+              forceBindAlreadyBindedUser: false,
+              forceReplaceCfg: false,
+              allowConfigurationChanges: false,
+              changesAllowedRule: '',
+              changesNotRecommendedRule: '',
+              noBind: false,
+            });
+          },
+        } as unknown as CommandServices['repositoryConnectionViewProvider'],
+      });
+    });
+
+    teardown(() => {
+      stubsRef.showQuickPick = originals.showQuickPick;
+      stubsRef.showInputBox = originals.showInputBox;
+      stubsRef.showSaveDialog = originals.showSaveDialog;
+      repositoryDepsBox.current = DEFAULT_REPOSITORY_FILE_SYNC_DEPS;
+    });
+
+    cases.forEach(({ command, cli, title }) => {
+      test(`${command}: guard занят импортом — ни форм, ни диалогов, ни Конфигуратора; одно уведомление, чужая аренда цела`, async () => {
+        const guard = servicesBox.current.configurationOperationGuard;
+        const lease = guard.tryAcquire('Импорт конфигураций');
+
+        await vscode.commands.executeCommand(command, CF_NODE);
+
+        assert.deepStrictEqual(dialogCalls, []);
+        assert.strictEqual(connectionFormCalls, 0);
+        assert.deepStrictEqual(cliCalls, []);
+        assert.deepStrictEqual(busyMessages, [
+          `${title}: уже выполняется операция "Импорт конфигураций". Дождитесь её завершения.`,
+        ]);
+        assert.strictEqual(guard.heldBy, 'Импорт конфигураций');
+        lease?.release();
+      });
+
+      test(`${command}: guard свободен — «${cli}» выполняется под арендой «${title}», после ошибки guard свободен`, async () => {
+        const guard = servicesBox.current.configurationOperationGuard;
+
+        await vscode.commands.executeCommand(command, CF_NODE);
+
+        assert.deepStrictEqual(cliCalls, [{ command: cli, heldBy: title }]);
+        assert.deepStrictEqual(busyMessages, []);
+        assert.strictEqual(bridgeErrorMessages.length, 1);
+        assert.ok(bridgeErrorMessages[0].includes('хранилище недоступно'), bridgeErrorMessages[0]);
+        assert.strictEqual(guard.isBusy, false);
+      });
+    });
+
+    test('узел не корень конфигурации — предупреждение, guard не проверяется, Конфигуратор не запускается', async () => {
+      const lease = servicesBox.current.configurationOperationGuard.tryAcquire('Импорт конфигураций');
+
+      await vscode.commands.executeCommand('v8vscedit.repository.report', {
+        xmlPath: path.join(EXAMPLE_CF, 'Catalogs', 'Контрагенты.xml'),
+        nodeKind: 'Catalog',
+      });
+
+      assert.strictEqual(bridgeWarningMessages.length, 1);
+      assert.deepStrictEqual(busyMessages, []);
+      assert.deepStrictEqual(dialogCalls, []);
+      assert.deepStrictEqual(cliCalls, []);
+      lease?.release();
+    });
+
+    [
+      { command: 'v8vscedit.repository.report', cli: 'repository-report', ran: false },
+      { command: 'v8vscedit.repository.connect', cli: 'repository-bind', ran: true },
+    ].forEach(({ command, cli, ran }) => {
+      test(`${command}: подключения к хранилищу нет — ${ran ? 'подключение его и не требует, «' + cli + '» выполняется' : 'предупреждение, Конфигуратор не запускается'}`, async () => {
+        servicesBox.current = {
+          ...servicesBox.current,
+          repositoryService: {
+            ...(servicesBox.current.repositoryService as unknown as Record<string, unknown>),
+            hasBinding: () => false,
+            isConnected: () => false,
+          } as unknown as RepositoryService,
+        };
+
+        await vscode.commands.executeCommand(command, CF_NODE);
+
+        assert.deepStrictEqual(cliCalls.map((call) => call.command), ran ? [cli] : []);
+        assert.strictEqual(bridgeWarningMessages.length, ran ? 0 : 1);
+      });
+    });
+  });
 });
