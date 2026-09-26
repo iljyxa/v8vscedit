@@ -290,7 +290,7 @@ suite('RepositoryLockSync — реальная фикстура: нерекур�
 suite('RepositoryLockSync — реальная фикстура: раздельная довыгрузка подчинённых при пустом составе в хеш-кэше (issue #1, раздел 10, критерий 10.1.5)', () => {
   teardown(cleanupRealFixtureHarnesses);
 
-  test('ВнешнийИсточникДанных.ИнтернетМагазин рекурсивно, хеш-кэш непуст, но БЕЗ подчинённых источника — 3 вызова dumpToTemp (владелец; таблица+куб; таблицы измерения)', async () => {
+  test('ВнешнийИсточникДанных.ИнтернетМагазин рекурсивно, хеш-кэш непуст, но БЕЗ подчинённых источника — 3 вызова dumpToTemp (владелец; таблица+куб; таблицы измерения и форма таблицы)', async () => {
     const harness = createRealFixtureHarness();
     // Хеш-кэш НЕПУСТ (иначе фильтр по кэшу не применяется вовсе — ветка "хеш-кэш
     // пуст" уже покрыта соседним сценарием), но НЕ содержит ни одной единицы
@@ -321,7 +321,11 @@ suite('RepositoryLockSync — реальная фикстура: раздель�
     );
     assert.deepStrictEqual(
       [...fixture.calls[2].names].sort(),
-      [KNOWN_FIXTURE_UNITS.internetMagazinRegiony, KNOWN_FIXTURE_UNITS.internetMagazinTovary].sort()
+      [
+        KNOWN_FIXTURE_UNITS.internetMagazinRegiony,
+        KNOWN_FIXTURE_UNITS.internetMagazinTovary,
+        KNOWN_FIXTURE_UNITS.internetMagazinZakazyFormaSpiska,
+      ].sort()
     );
     for (const unit of [
       KNOWN_FIXTURE_UNITS.internetMagazin,
@@ -329,6 +333,7 @@ suite('RepositoryLockSync — реальная фикстура: раздель�
       KNOWN_FIXTURE_UNITS.internetMagazinProdazhi,
       KNOWN_FIXTURE_UNITS.internetMagazinTovary,
       KNOWN_FIXTURE_UNITS.internetMagazinRegiony,
+      KNOWN_FIXTURE_UNITS.internetMagazinZakazyFormaSpiska,
     ]) {
       assert.strictEqual(harness.repositoryService.isLocked(harness.target, unit), true, `"${unit}" должна быть захвачена.`);
     }
