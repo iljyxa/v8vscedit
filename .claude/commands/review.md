@@ -1,13 +1,18 @@
 ---
-description: Ручной запуск агента reviewer на текущих изменениях. Проверка соответствия ТЗ, конвенциям, SOLID, best-practices, sanity-чеки. Вердикт APPROVE / RETURN.
+description: Ручной запуск агента reviewer на текущих изменениях. Проверка соответствия ТЗ, конвенциям, SOLID, best-practices, качества тестов. Вердикт APPROVE / RETURN.
 allowed-tools: Task, Read, Bash
 ---
 
 Запусти субагента `reviewer` (`.claude/agents/reviewer.md`) на текущих изменениях.
 
 Порядок:
-1. Собери, что изменено (`git status --short`, `git diff`).
-2. Делегируй в субагента `reviewer` через Task: read-only проверка соответствия ТЗ, «Инварианту изменений» и «Запретам и анти-паттернам» из `CLAUDE.md`, SOLID, `docs/vscode-extension-best-practices.md`. Ревьюер сам запускает sanity-чеки (`npm run compile`, `npm run lint`, rg-проверки).
-3. Верни вердикт: **APPROVE** / **RETURN → developer** (дефекты реализации/стиля/SOLID/покрытия, с замечаниями `файл:строка — что — чем чревато`) / **RETURN → architect** (расхождение с ТЗ или архитектурный дефект).
+1. Собери, что изменено (`git status --short`, `git diff --stat`).
+2. Возьми сводку QA-гейта из этой сессии. Если её нет — сначала `bash .claude/scripts/qa-gate.sh`:
+   ревьюер механические проверки не повторяет и без зелёного гейта вердикт не выносит.
+3. Делегируй в `reviewer`: ТЗ, сводку гейта, список изменённых файлов. Он проверяет рецепт сценария
+   (`docs/change-recipes.md`), «Запреты и анти-паттерны» из `CLAUDE.md`, SOLID,
+   `docs/vscode-extension-best-practices.md`, качество и независимость тестов.
+4. Верни вердикт: **APPROVE** / **RETURN → implementer** (замечания `файл:строка — что — чем чревато`) /
+   **RETURN → architect** (расхождение с ТЗ или архитектурный дефект).
 
 Ревьюер выполняется всегда, в том числе после мелких правок.
