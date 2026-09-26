@@ -360,10 +360,12 @@ export class RepositoryService {
       return this.buildSubordinateUnitFullName(ownerFullName, kind, node.label);
     }
 
-    const nestedSubsystemFullName = kind === 'Subsystem' && node.xmlPath
-      ? this.resolveNestedSubsystemFullName(node.xmlPath)
+    // label вложенной подсистемы — только её собственное имя, поэтому имя единицы
+    // берётся по XML (с цепочкой родителей); label — запасной путь, если XML нет.
+    const subsystemFullName = kind === 'Subsystem' && node.xmlPath
+      ? this.resolveRootObjectFullName(node.xmlPath)
       : null;
-    return nestedSubsystemFullName ?? this.buildRootObjectFullName(kind, node.xmlPath, node.label);
+    return subsystemFullName ?? this.buildRootObjectFullName(kind, node.xmlPath, node.label);
   }
 
   createObjectsFileForNode(node: RepositoryNodeRef, recursive: boolean): { filePath: string; fullNames: string[] } {
@@ -426,12 +428,13 @@ export class RepositoryService {
   }
 
   /**
-   * Вложенная подсистема — подчинённая единица `Подсистема.A.Подсистема.B`: label узла
-   * содержит только собственное имя, а короткое `Подсистема.B` платформа отклоняет.
-   * Цепочка родителей читается из пути XML (`Subsystems/A/Subsystems/B.xml`) тем же
-   * правилом, что и единица файла для readonly. Подсистема верхнего уровня — `null`.
+   * Имя единицы, XML которой лежит в каталоге владельца (`Subsystems/A/Subsystems/B.xml`
+   * → `Подсистема.A.Подсистема.B`): `<Name>` такого XML — лишь собственное имя, а
+   * короткое `Подсистема.B` платформа отклоняет. Цепочка читается из пути тем же
+   * правилом, что и единица файла для readonly. XML верхнего уровня и XML вне корня
+   * выгрузки — `null`.
    */
-  private resolveNestedSubsystemFullName(xmlPath: string): string | null {
+  private resolveSubordinateUnitFullNameByXmlPath(xmlPath: string): string | null {
     const target = this.resolveTargetByXmlPath(xmlPath);
     if (!target) {
       return null;
@@ -473,8 +476,9 @@ export class RepositoryService {
     const fullName = objectInfo
       ? this.buildRootObjectFullName(objectInfo.tag as MetaKind, undefined, objectInfo.name || path.basename(xmlPath, '.xml'))
       : null;
-    this.rootFullNameCache.set(cacheKey, { mtimeMs, value: fullName });
-    return fullName;
+    const value = this.resolveSubordinateUnitFullNameByXmlPath(xmlPath) ?? fullName;
+    this.rootFullNameCache.set(cacheKey, { mtimeMs, value });
+    return value;
   }
 
   private resolveOwnerObjectXmlPath(filePath: string): string | null {

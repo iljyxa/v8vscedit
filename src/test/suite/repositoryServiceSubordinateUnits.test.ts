@@ -418,8 +418,35 @@ suite('RepositoryService.resolveFullName — вложенная подсисте
     const harness = createHarness();
     try {
       assert.strictEqual(harness.service.resolveFullName({ nodeKind: 'Subsystem', label: 'Розница' }), 'Подсистема.Розница');
-      const outside = path.join(harness.workspaceRoot, 'нет-выгрузки', 'Subsystems', 'Продажи', 'Subsystems', 'Розница.xml');
-      assert.strictEqual(harness.service.resolveFullName(subsystemNode(outside, 'Розница')), 'Подсистема.Розница');
+      const missing = path.join(harness.workspaceRoot, 'нет-выгрузки', 'Subsystems', 'Продажи', 'Subsystems', 'Розница.xml');
+      assert.strictEqual(harness.service.resolveFullName(subsystemNode(missing, 'Розница')), 'Подсистема.Розница');
+      // Реальный XML вложенной подсистемы, скопированный вне корня выгрузки: цепочку
+      // не от чего отсчитывать — имя по <Name> самого XML.
+      fs.mkdirSync(path.dirname(missing), { recursive: true });
+      fs.copyFileSync(nestedXmlPath(harness), missing);
+      assert.strictEqual(harness.service.resolveFullName(subsystemNode(missing, 'Розница')), 'Подсистема.Розница');
+    } finally {
+      harness.dispose();
+    }
+  });
+
+  test('isMetadataEditRestricted для вложенной подсистемы — по захвату полного имени, а не короткого', async () => {
+    const harness = createHarness();
+    try {
+      const target = harness.service.resolveTargetByXmlPath(nestedXmlPath(harness));
+      assert.ok(target, 'цель хранилища для реальной фикстуры должна резолвиться');
+      await harness.service.saveBinding(target, { repoPath: '\\\\repo\\storage', repoUser: 'tester', repoPassword: 'secret' });
+      harness.service.setConnected(target, true);
+
+      harness.service.lockState.applyLock(target, { anchor: 'Подсистема.Розница', members: ['Подсистема.Розница'], mode: 'object' });
+      assert.strictEqual(harness.service.isMetadataEditRestricted(target, nestedXmlPath(harness)), true, 'короткое имя — несуществующая единица');
+
+      harness.service.lockState.applyLock(target, {
+        anchor: 'Подсистема.Продажи.Подсистема.Розница',
+        members: ['Подсистема.Продажи.Подсистема.Розница'],
+        mode: 'object',
+      });
+      assert.strictEqual(harness.service.isMetadataEditRestricted(target, nestedXmlPath(harness)), false);
     } finally {
       harness.dispose();
     }

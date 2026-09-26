@@ -488,6 +488,7 @@ suite('MetadataTreeProvider — -repoLocked/-repoUnlocked для вложенн�
       harness.treeProvider.getTreeItem(nested);
 
       assert.strictEqual(contextSuffix(nested.contextValue), 'locked', `ожидался -repoLocked на Розница: ${String(nested.contextValue)}`);
+      assert.strictEqual(editSuffix(nested.contextValue), 'allowed', `захваченная Розница должна быть редактируемой: ${String(nested.contextValue)}`);
       assert.strictEqual(contextSuffix(parent.contextValue), 'unlocked', `родитель не захвачен: ${String(parent.contextValue)}`);
     } finally {
       harness.dispose();
@@ -506,6 +507,7 @@ suite('MetadataTreeProvider — -repoLocked/-repoUnlocked для вложенн�
       harness.treeProvider.getTreeItem(nested);
 
       assert.strictEqual(contextSuffix(nested.contextValue), 'unlocked', `короткое имя — несуществующая единица: ${String(nested.contextValue)}`);
+      assert.strictEqual(editSuffix(nested.contextValue), 'restricted', `короткое имя не даёт права правки: ${String(nested.contextValue)}`);
     } finally {
       harness.dispose();
     }
