@@ -658,21 +658,30 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
    * (`vscode.window.showQuickPick`), поэтому при занятом guard'е диалог выбора
    * режима не должен появляться вовсе, а чужая аренда — оставаться нетронутой.
    */
-  suite('RepositoryCommands: repository.lock/unlock/update — guard занят до диалогов (issue #1)', () => {
+  suite('RepositoryCommands: repository.lock/unlock/update/updateToVersion — guard занят до диалогов (issue #1, #61)', () => {
     let originalShowQuickPick: typeof vscode.window.showQuickPick;
+    let originalShowInputBox: typeof vscode.window.showInputBox;
     let quickPickCalls: number;
+    let inputBoxCalls: number;
 
     setup(() => {
       quickPickCalls = 0;
+      inputBoxCalls = 0;
       originalShowQuickPick = vscode.window.showQuickPick;
+      originalShowInputBox = vscode.window.showInputBox;
       (vscode.window as Pick<typeof vscode.window, 'showQuickPick'>).showQuickPick = ((...args: unknown[]) => {
         quickPickCalls += 1;
         return (originalShowQuickPick as (...a: unknown[]) => Thenable<unknown>)(...args);
       }) as typeof vscode.window.showQuickPick;
+      (vscode.window as Pick<typeof vscode.window, 'showInputBox'>).showInputBox = (() => {
+        inputBoxCalls += 1;
+        return Promise.resolve(undefined);
+      });
     });
 
     teardown(() => {
       (vscode.window as Pick<typeof vscode.window, 'showQuickPick'>).showQuickPick = originalShowQuickPick;
+      (vscode.window as Pick<typeof vscode.window, 'showInputBox'>).showInputBox = originalShowInputBox;
     });
 
     function repositoryServiceStub(target: RepositoryTarget): RepositoryService {
@@ -685,8 +694,13 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
       } as unknown as RepositoryService;
     }
 
-    ['v8vscedit.repository.lock', 'v8vscedit.repository.unlock', 'v8vscedit.repository.update'].forEach((command) => {
-      test(`${command}: guard занят «Хранилище: синхронизация» — showQuickPick не вызывается, чужая аренда цела`, async () => {
+    [
+      'v8vscedit.repository.lock',
+      'v8vscedit.repository.unlock',
+      'v8vscedit.repository.update',
+      'v8vscedit.repository.updateToVersion',
+    ].forEach((command) => {
+      test(`${command}: guard занят «Хранилище: синхронизация» — ни showQuickPick, ни showInputBox, чужая аренда цела`, async () => {
         const guard = new ConfigurationOperationGuard();
         const lease = guard.tryAcquire('Хранилище: синхронизация');
         const target: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'Основная конфигурация' };
@@ -699,9 +713,24 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
         await vscode.commands.executeCommand(command, CF_NODE);
 
         assert.strictEqual(quickPickCalls, 0, `${command}: showQuickPick не должен вызываться при занятом guard'е.`);
+        assert.strictEqual(inputBoxCalls, 0, `${command}: showInputBox не должен вызываться при занятом guard'е.`);
         assert.strictEqual(guard.isBusy, true);
         assert.strictEqual(guard.heldBy, 'Хранилище: синхронизация');
         lease?.release();
+      });
+    });
+
+    ['v8vscedit.repository.update', 'v8vscedit.repository.updateToVersion'].forEach((command) => {
+      test(`${command}: узел без XML — предупреждение, ни диалогов, ни аренды guard'а`, async () => {
+        const guard = new ConfigurationOperationGuard();
+        servicesBox.current = createServices({ configurationOperationGuard: guard });
+
+        await vscode.commands.executeCommand(command, { nodeKind: 'Catalog', label: 'БезXml' });
+
+        assert.deepStrictEqual(bridgeWarningMessages, ['Команда хранилища доступна только для узлов конфигурации с XML.']);
+        assert.strictEqual(quickPickCalls, 0);
+        assert.strictEqual(inputBoxCalls, 0);
+        assert.strictEqual(guard.isBusy, false);
       });
     });
   });
@@ -723,7 +752,11 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
     /** Ответы QuickPick «да/нет» по порядку; `undefined` — пользователь закрыл выбор. */
     let pickAnswers: (boolean | undefined)[];
     let inputAnswer: string | undefined;
+    let quickPickCalls: number;
+    let inputBoxCalls: number;
     let cliRequests: RepositoryCliRequest[];
+    /** Содержимое `-ObjectsFile` в момент запуска: после потока файл удаляется. */
+    let cliObjectsXml: string[];
     let cliResult: RepositoryCliResult;
     let treeRefreshes: number;
     let actionsRefreshes: number;
@@ -751,22 +784,33 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
       repositoryService = new RepositoryService(workspaceRoot, new ProjectSecretStorage(secretStore, workspaceRoot));
       pickAnswers = [];
       inputAnswer = '';
+      quickPickCalls = 0;
+      inputBoxCalls = 0;
       cliRequests = [];
+      cliObjectsXml = [];
       cliResult = { status: 'done' };
       treeRefreshes = 0;
       actionsRefreshes = 0;
 
       originals = { showQuickPick: vscode.window.showQuickPick, showInputBox: vscode.window.showInputBox };
       stubsRef.showQuickPick = ((items: readonly { value: boolean }[]) => {
+        quickPickCalls += 1;
         const answer = pickAnswers.shift();
         return Promise.resolve(answer === undefined ? undefined : items.find((item) => item.value === answer));
       }) as unknown as typeof vscode.window.showQuickPick;
-      stubsRef.showInputBox = (() => Promise.resolve(inputAnswer));
+      stubsRef.showInputBox = (() => {
+        inputBoxCalls += 1;
+        return Promise.resolve(inputAnswer);
+      });
 
       repositoryDepsBox.current = {
         ...DEFAULT_REPOSITORY_FILE_SYNC_DEPS,
         runRepositoryCli: (request) => {
           cliRequests.push(request);
+          const objectsFileIndex = request.extraArgs.indexOf('-ObjectsFile');
+          if (objectsFileIndex >= 0) {
+            cliObjectsXml.push(fs.readFileSync(request.extraArgs[objectsFileIndex + 1], 'utf-8'));
+          }
           return Promise.resolve(cliResult);
         },
         dumpToTemp: notCalled('dumpToTemp'),
@@ -806,7 +850,8 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
     const cases: { command: string; cli: string; answers: boolean[]; input?: string }[] = [
       { command: 'v8vscedit.repository.lock', cli: 'repository-lock', answers: [false] },
       { command: 'v8vscedit.repository.unlock', cli: 'repository-unlock', answers: [false, true] },
-      { command: 'v8vscedit.repository.update', cli: 'repository-update', answers: [true, false], input: ' 125 ' },
+      { command: 'v8vscedit.repository.update', cli: 'repository-update', answers: [true, false] },
+      { command: 'v8vscedit.repository.updateToVersion', cli: 'repository-update', answers: [true, false], input: ' 125 ' },
       { command: 'v8vscedit.repository.commit', cli: 'repository-commit', answers: [] },
     ];
 
@@ -847,24 +892,29 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
       assert.strictEqual(repositoryService.isLocked(target, 'Справочник.Контрагенты'), true);
     });
 
-    test('repository.update: версия из поля ввода передаётся без пробелов', async () => {
+    test('repository.update: номер версии не запрашивается и не передаётся (issue #61)', async () => {
+      pickAnswers = [false, false];
+      inputAnswer = '125';
+
+      await vscode.commands.executeCommand('v8vscedit.repository.update', catalogNode(true));
+
+      assert.strictEqual(inputBoxCalls, 0);
+      assert.strictEqual(cliRequests.length, 1);
+      assert.ok(!cliRequests[0].extraArgs.includes('-Version'), cliRequests[0].extraArgs.join(' '));
+    });
+
+    test('repository.updateToVersion: версия из поля ввода передаётся парой «-Version», «125» без пробелов (issue #61)', async () => {
       pickAnswers = [false, false];
       inputAnswer = ' 125 ';
 
-      await vscode.commands.executeCommand('v8vscedit.repository.update', catalogNode(true));
+      await vscode.commands.executeCommand('v8vscedit.repository.updateToVersion', catalogNode(true));
 
+      assert.strictEqual(inputBoxCalls, 1);
       assert.strictEqual(cliRequests.length, 1);
-      assert.ok(cliRequests[0].extraArgs.includes('125'), cliRequests[0].extraArgs.join(' '));
-    });
-
-    test('repository.update: пустая строка в поле версии (Enter без ввода) — не отмена, версия не передаётся', async () => {
-      pickAnswers = [false, false];
-      inputAnswer = '';
-
-      await vscode.commands.executeCommand('v8vscedit.repository.update', catalogNode(true));
-
-      assert.strictEqual(cliRequests.length, 1);
-      assert.ok(!cliRequests[0].extraArgs.includes('-Version'), cliRequests[0].extraArgs.join(' '));
+      const args = cliRequests[0].extraArgs;
+      const versionIndex = args.indexOf('-Version');
+      assert.ok(versionIndex >= 0, args.join(' '));
+      assert.strictEqual(args[versionIndex + 1], '125');
     });
 
     ([
@@ -873,7 +923,9 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
       { command: 'v8vscedit.repository.unlock', answers: [false, undefined], input: '' },
       { command: 'v8vscedit.repository.update', answers: [undefined], input: '' },
       { command: 'v8vscedit.repository.update', answers: [false, undefined], input: '' },
-      { command: 'v8vscedit.repository.update', answers: [false, false], input: undefined },
+      { command: 'v8vscedit.repository.updateToVersion', answers: [], input: undefined },
+      { command: 'v8vscedit.repository.updateToVersion', answers: [undefined], input: '5' },
+      { command: 'v8vscedit.repository.updateToVersion', answers: [false, undefined], input: '5' },
     ] as { command: string; answers: (boolean | undefined)[]; input: string | undefined }[]).forEach(({ command, answers, input }, index) => {
       test(`${command}: пользователь отменил диалог (вариант ${String(index + 1)}) → Конфигуратор не запускается`, async () => {
         pickAnswers = [...answers];
@@ -883,6 +935,95 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
 
         assert.deepStrictEqual(cliRequests, []);
         assert.strictEqual(treeRefreshes, 0);
+        // Диалоги после отменённого не показываются; для updateToVersion номер версии
+        // спрашивается раньше режимов, поэтому отмена ввода не доходит до QuickPick.
+        assert.strictEqual(quickPickCalls, answers.length);
+      });
+    });
+
+    /** Узлы фикстуры, у единиц которых нет подчинённых объектов хранилища (issue #61). */
+    function leafNodes(): { name: string; node: NodeArg }[] {
+      const cfRoot = path.join(workspaceRoot, 'src', 'cf');
+      const counterpartiesXml = path.join(cfRoot, 'Catalogs', 'Контрагенты.xml');
+      const banksXml = path.join(cfRoot, 'Catalogs', 'Банки.xml');
+      return [
+        { name: 'справочник Банки', node: { xmlPath: banksXml, nodeKind: 'Catalog', label: 'Банки' } },
+        {
+          name: 'общий модуль ОбщегоНазначения',
+          node: { xmlPath: path.join(cfRoot, 'CommonModules', 'ОбщегоНазначения.xml'), nodeKind: 'CommonModule', label: 'ОбщегоНазначения' },
+        },
+        {
+          name: 'форма Контрагенты.ФормаЭлемента',
+          node: {
+            xmlPath: counterpartiesXml,
+            nodeKind: 'Form',
+            label: 'ФормаЭлемента',
+            metaContext: { rootMetaKind: 'Catalog', ownerObjectXmlPath: counterpartiesXml },
+          },
+        },
+        {
+          name: 'реквизит справочника Банки',
+          node: {
+            xmlPath: banksXml,
+            nodeKind: 'Attribute',
+            label: 'КоррСчет',
+            metaContext: { rootMetaKind: 'Catalog', ownerObjectXmlPath: banksXml },
+          },
+        },
+      ];
+    }
+
+    /** Команда и ответы на её вопросы, кроме вопроса о рекурсии. */
+    const leafCommands: { command: string; answers: boolean[]; input?: string }[] = [
+      { command: 'v8vscedit.repository.lock', answers: [] },
+      { command: 'v8vscedit.repository.unlock', answers: [false] },
+      { command: 'v8vscedit.repository.update', answers: [false] },
+      { command: 'v8vscedit.repository.updateToVersion', answers: [false], input: '7' },
+    ];
+
+    leafCommands.forEach(({ command, answers, input }) => {
+      test(`${command}: у единицы нет подчинённых — о рекурсии не спрашивает, includeChildObjects="false" (issue #61)`, async () => {
+        for (const { name, node } of leafNodes()) {
+          pickAnswers = [...answers];
+          inputAnswer = input ?? '';
+          quickPickCalls = 0;
+          cliObjectsXml = [];
+
+          await vscode.commands.executeCommand(command, node);
+
+          assert.strictEqual(quickPickCalls, answers.length, `${name}: лишний QuickPick`);
+          assert.strictEqual(cliObjectsXml.length, 1, `${name}: Конфигуратор не запущен`);
+          assert.ok(cliObjectsXml[0].includes('includeChildObjects="false"'), `${name}: ${cliObjectsXml[0]}`);
+          assert.ok(!cliObjectsXml[0].includes('includeChildObjects="true"'), `${name}: ${cliObjectsXml[0]}`);
+        }
+      });
+
+      test(`${command}: у единицы есть подчинённые — вопрос о рекурсии задаётся, «рекурсивно» даёт includeChildObjects="true" (issue #61)`, async () => {
+        const counterpartiesXml = path.join(workspaceRoot, 'src', 'cf', 'Catalogs', 'Контрагенты.xml');
+        const nodes: { name: string; node: NodeArg }[] = [
+          { name: 'справочник Контрагенты', node: catalogNode(true) },
+          {
+            name: 'реквизит справочника Контрагенты',
+            node: {
+              xmlPath: counterpartiesXml,
+              nodeKind: 'Attribute',
+              label: 'ИНН',
+              metaContext: { rootMetaKind: 'Catalog', ownerObjectXmlPath: counterpartiesXml },
+            },
+          },
+        ];
+        for (const { name, node } of nodes) {
+          pickAnswers = [true, ...answers];
+          inputAnswer = input ?? '';
+          quickPickCalls = 0;
+          cliObjectsXml = [];
+
+          await vscode.commands.executeCommand(command, node);
+
+          assert.strictEqual(quickPickCalls, answers.length + 1, `${name}: вопрос о рекурсии не задан`);
+          assert.strictEqual(cliObjectsXml.length, 1, `${name}: Конфигуратор не запущен`);
+          assert.ok(cliObjectsXml[0].includes('includeChildObjects="true"'), `${name}: ${cliObjectsXml[0]}`);
+        }
       });
     });
   });
@@ -1627,6 +1768,29 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
 
         assert.deepStrictEqual(cliCalls.map((call) => call.command), ran ? [cli] : []);
         assert.strictEqual(bridgeWarningMessages.length, ran ? 0 : 1);
+      });
+    });
+
+    /** Issue #61: первым пунктом стоит штатное отключение, «-Force» — только явным выбором. */
+    [
+      { choice: 'первый пункт', pick: (items: readonly { value: boolean }[]) => items[0], extraArgs: [] as string[] },
+      { choice: 'пункт «принудительно»', pick: (items: readonly { value: boolean }[]) => items.find((item) => item.value), extraArgs: ['-Force'] },
+    ].forEach(({ choice, pick, extraArgs }) => {
+      test(`repository.disconnect: ${choice} → аргументы «${extraArgs.join(' ')}»`, async () => {
+        const requests: RepositoryCliRequest[] = [];
+        repositoryDepsBox.current = {
+          ...repositoryDepsBox.current,
+          runRepositoryCli: (request) => {
+            requests.push(request);
+            return Promise.resolve({ status: 'failed', message: 'хранилище недоступно' });
+          },
+        };
+        stubsRef.showQuickPick = ((items: readonly { value: boolean }[]) => Promise.resolve(pick(items))) as unknown as typeof vscode.window.showQuickPick;
+
+        await vscode.commands.executeCommand('v8vscedit.repository.disconnect', CF_NODE);
+
+        assert.strictEqual(requests.length, 1);
+        assert.deepStrictEqual(requests[0].extraArgs, extraArgs);
       });
     });
   });

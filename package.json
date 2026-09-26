@@ -449,6 +449,11 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "v8vscedit.repository.updateToVersion",
+        "title": "Получить версию из хранилища…",
+        "icon": "$(history)"
+      },
+      {
         "command": "v8vscedit.repository.addUser",
         "title": "Добавить пользователя хранилища",
         "icon": "$(person-add)"

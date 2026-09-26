@@ -147,6 +147,13 @@ export const REPOSITORY_SUBORDINATE_LAYOUT: Readonly<Record<RepositorySubordinat
   },
 };
 
+/**
+ * Теги `<ChildObjects>`, по которым видны подчинённые единицы хранилища. Производное
+ * от раскладки, а не отдельный реестр: и раскрытие выгрузки, и проверка «есть ли что
+ * захватывать рекурсивно» обязаны видеть один и тот же состав.
+ */
+export const REPOSITORY_SUBORDINATE_TAGS: ReadonlySet<string> = new Set(Object.keys(REPOSITORY_SUBORDINATE_LAYOUT));
+
 const SUBORDINATE_TAG_BY_ONE_C_NAME: ReadonlyMap<string, RepositorySubordinateTag> = new Map(
   (Object.entries(REPOSITORY_SUBORDINATE_LAYOUT) as [RepositorySubordinateTag, RepositorySubordinateLayout][]).map(
     ([tag, layout]): [string, RepositorySubordinateTag] => [layout.oneCName, tag]

@@ -4,6 +4,7 @@ import type { MetaKind } from '../../domain/MetaTypes';
 import type { ProjectSecretStorage } from '../environment/ProjectSecretStorage';
 import { findObjectXmlInFolder } from '../fs/ObjectLocation';
 import { escapeXmlAttribute as escapeXml, parseConfigXml, parseObjectXml } from '../xml';
+import { readChildObjectRefs } from '../xml/ChildObjectRefsReader';
 import { RepositoryBindingStore } from './RepositoryBindingStore';
 import { buildRepositoryScopeKey, RepositoryLockState } from './RepositoryLockState';
 import { RepositoryLockSnapshotStore } from './RepositoryLockSnapshotStore';
@@ -12,10 +13,11 @@ import {
   isRepositorySubordinateTag,
   ONE_C_TYPE_NAMES,
   parseRepositoryUnit,
+  REPOSITORY_SUBORDINATE_TAGS,
   subordinateUnitFullName,
 } from './RepositoryObjectNames';
 import type { RepositorySubordinateTag } from './RepositoryObjectNames';
-import { resolveLockUnitByRelativePath, resolveUnitSuffixByRelativePath } from './RepositoryObjectScope';
+import { resolveLockUnitByRelativePath, resolveUnitSuffixByRelativePath, resolveUnitXmlRel } from './RepositoryObjectScope';
 import { getRepositoryObjectsDir } from './RepositoryTempCleanup';
 
 export interface RepositoryBinding {
@@ -370,6 +372,45 @@ export class RepositoryService {
       ? this.resolveRootObjectFullName(node.xmlPath)
       : null;
     return subsystemFullName ?? this.buildRootObjectFullName(kind, node.xmlPath, node.label);
+  }
+
+  /**
+   * Имеет ли смысл спрашивать о рекурсивном режиме операции хранилища для узла:
+   * `false` — у единицы узла точно нет подчинённых объектов хранилища, и рекурсия
+   * ничем не отличается от операции над одним объектом.
+   *
+   * Читает XML синхронно — вызывать только по команде пользователя, не из hot path
+   * дерева (getters, tooltip, decoration).
+   */
+  canApplyRecursively(node: RepositoryNodeRef): boolean {
+    const kind = node.nodeKind;
+    // Состав корня и подсистемы (объекты конфигурации, участники `<Content>`) по
+    // `<ChildObjects>` не определить — для них рекурсия осмысленна всегда.
+    if (kind === 'configuration' || kind === 'extension' || kind === 'Subsystem') {
+      return true;
+    }
+    const ownerXmlPath = node.metaContext?.ownerObjectXmlPath;
+    const unitXmlPath = ownerXmlPath && isSubordinateUnitNode(node)
+      ? this.resolveSubordinateUnitXmlPath(node, ownerXmlPath)
+      : (ownerXmlPath ?? node.xmlPath ?? null);
+    // Когда состав единицы неизвестен, выбор оставляется пользователю: молча
+    // сузить операцию до одного объекта хуже, чем задать лишний вопрос.
+    if (!unitXmlPath) {
+      return true;
+    }
+    const refs = readChildObjectRefs(unitXmlPath, REPOSITORY_SUBORDINATE_TAGS);
+    return refs === null || refs.length > 0;
+  }
+
+  /**
+   * XML самой подчинённой единицы (`Forms/Имя.xml`), а не владельца: у узла формы
+   * в дереве `xmlPath` указывает на XML владельца, а подчинённые формы свои.
+   */
+  private resolveSubordinateUnitXmlPath(node: RepositoryNodeRef, ownerXmlPath: string): string | null {
+    const fullName = this.resolveFullName(node);
+    const target = this.resolveTargetByXmlPath(ownerXmlPath);
+    const rel = fullName && target ? resolveUnitXmlRel(target.configRoot, fullName) : null;
+    return rel && target ? path.join(target.configRoot, rel) : null;
   }
 
   createObjectsFileForNode(node: RepositoryNodeRef, recursive: boolean): { filePath: string; fullNames: string[] } {

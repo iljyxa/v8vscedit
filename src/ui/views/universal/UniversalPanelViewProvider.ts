@@ -843,6 +843,7 @@ export class UniversalPanelViewProvider implements vscode.WebviewViewProvider, v
     ) {
       add('v8vscedit.repository.commit', 'Поместить в хранилище', codicon('cloud-upload'));
       add('v8vscedit.repository.update', 'Получить из хранилища', codicon('cloud-download'));
+      add('v8vscedit.repository.updateToVersion', 'Получить версию из хранилища…', codicon('history'));
     }
     return actions;
   }
