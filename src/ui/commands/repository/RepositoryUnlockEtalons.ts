@@ -10,6 +10,7 @@ import { diffOwnersAgainstBaseline, hashScopeFiles } from '../../../infra/reposi
 import { getRepositoryUnitAncestors } from '../../../infra/repository/RepositoryObjectNames';
 import type { ScopeDepth } from '../../../infra/repository/RepositoryObjectScope';
 import type { RepositoryTarget } from '../../../infra/repository/RepositoryService';
+import { disposeOnError } from '../../../infra/repository/RepositoryTempCleanup';
 import {
   toDumpListName,
   type RepositoryFileSyncDeps,
@@ -148,19 +149,22 @@ async function dumpEtalons(
   if (rounds.status === 'failed') {
     return { status: 'failed', reason: rounds.reason };
   }
-  const found = new Map(rounds.found.map((unit): [string, DumpRoundsFoundUnit] => [unit.fullName, unit]));
-  const objects = [...ready];
-  for (const fullName of toDump) {
-    const unit = found.get(fullName);
-    if (unit) {
-      objects.push({ fullName, source: 'dump', depth: 'unit', dir: unit.dir });
-    } else if (isAbsentInDumpedParent(fullName, found)) {
-      objects.push({ fullName, source: 'empty', depth: 'unit' });
-    } else {
-      log(services, `«${fullName}»: версия хранилища не получена — сравнение пропущено.`);
+  // Каталоги раундов до передачи в эталоны принадлежат этой функции — освобождаются и при исключении.
+  return disposeOnError(rounds, (): UnlockEtalons => {
+    const found = new Map(rounds.found.map((unit): [string, DumpRoundsFoundUnit] => [unit.fullName, unit]));
+    const objects = [...ready];
+    for (const fullName of toDump) {
+      const unit = found.get(fullName);
+      if (unit) {
+        objects.push({ fullName, source: 'dump', depth: 'unit', dir: unit.dir });
+      } else if (isAbsentInDumpedParent(fullName, found)) {
+        objects.push({ fullName, source: 'empty', depth: 'unit' });
+      } else {
+        log(services, `«${fullName}»: версия хранилища не получена — сравнение пропущено.`);
+      }
     }
-  }
-  return { status: 'ready', objects, dispose: () => { rounds.dispose(); } };
+    return { status: 'ready', objects, dispose: () => { rounds.dispose(); } };
+  });
 }
 
 /** Невыгруженная единица не якорь, т.е. у неё есть родитель; его XML из выгрузки решает. */

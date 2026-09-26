@@ -6,6 +6,8 @@ import { RepositoryService, type RepositoryTarget } from '../../infra/repository
 import { RepositoryLockState } from '../../infra/repository/RepositoryLockState';
 import { RepositoryLockSnapshotStore } from '../../infra/repository/RepositoryLockSnapshotStore';
 import { getRootLockName } from '../../infra/repository/RepositoryObjectNames';
+import { resolveObjectScope, type ObjectScope } from '../../infra/repository/RepositoryObjectScope';
+import { getRepositoryObjectsDir } from '../../infra/repository/RepositoryTempCleanup';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import {
@@ -547,3 +549,97 @@ function restoreFile(filePath: string, backup: string | undefined): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, backup, 'utf-8');
 }
+
+/**
+ * Issue #64 — служебные файлы хранилища во временной рабочей области: две реальные
+ * цели (копии example/2.21/src/cf и example/2.21/src/cfe/EVOLC), чтобы проверить, что
+ * отвязка и новая привязка чистят снимки только своей цели.
+ */
+suite('RepositoryService — временные файлы и снимки (issue #64)', () => {
+  const createdRoots: string[] = [];
+  teardown(() => {
+    createdRoots.splice(0).forEach((dir) => fs.rmSync(dir, { recursive: true, force: true }));
+  });
+
+  interface TwoTargets {
+    workspaceRoot: string;
+    service: RepositoryService;
+    cf: RepositoryTarget;
+    cfe: RepositoryTarget;
+  }
+
+  function createTwoTargets(): TwoTargets {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-repo-service-temp-'));
+    createdRoots.push(workspaceRoot);
+    const cfRoot = path.join(workspaceRoot, 'src', 'cf');
+    const cfeRoot = path.join(workspaceRoot, 'src', 'cfe', 'EVOLC');
+    const example21 = path.resolve(__dirname, '../../../example/2.21/src');
+    fs.cpSync(path.join(example21, 'cf'), cfRoot, { recursive: true });
+    fs.cpSync(path.join(example21, 'cfe', 'EVOLC'), cfeRoot, { recursive: true });
+    const service = new RepositoryService(workspaceRoot, new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot));
+    const cf = service.resolveTargetByConfigRoot(cfRoot);
+    const cfe = service.resolveTargetByConfigRoot(cfeRoot);
+    assert.ok(cf && cfe);
+    return { workspaceRoot, service, cf, cfe };
+  }
+
+  function captureSnapshots(service: RepositoryService, target: RepositoryTarget, fullName: string): void {
+    const scope = resolveObjectScope(target.configRoot, fullName, target) as Extract<ObjectScope, { kind: 'object' }>;
+    service.snapshots.captureFromProject(target, fullName, scope);
+    service.snapshots.captureRootManifest(target);
+    assert.ok(service.snapshots.readSnapshotInfo(target, fullName));
+    assert.ok(service.snapshots.readRootManifestHashes(target));
+  }
+
+  test('removeObjectsFile удаляет файл createObjectsFileForNode, повтор не бросает', () => {
+    const { workspaceRoot, service, cf } = createTwoTargets();
+    const objects = service.createObjectsFileForNode(
+      { nodeKind: 'Catalog', label: 'Валюты', xmlPath: path.join(cf.configRoot, 'Catalogs', 'Валюты.xml') },
+      false
+    );
+    assert.ok(fs.existsSync(objects.filePath));
+
+    service.removeObjectsFile(objects.filePath);
+    assert.ok(!fs.existsSync(objects.filePath));
+    assert.doesNotThrow(() => service.removeObjectsFile(objects.filePath));
+    assert.ok(fs.existsSync(getRepositoryObjectsDir(workspaceRoot)));
+  });
+
+  test('removeObjectsFile не трогает файл вне каталога objects/', () => {
+    const { workspaceRoot, service } = createTwoTargets();
+    const outside = path.join(workspaceRoot, '.v8vscedit', 'repository', 'outside.xml');
+    const nested = path.join(getRepositoryObjectsDir(workspaceRoot), 'nested', 'deep.xml');
+    for (const filePath of [outside, nested]) {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, '<Objects/>', 'utf-8');
+    }
+
+    service.removeObjectsFile(outside);
+    service.removeObjectsFile(nested);
+
+    assert.ok(fs.existsSync(outside));
+    assert.ok(fs.existsSync(nested));
+  });
+
+  const bindingActions: { name: string; run: (service: RepositoryService, target: RepositoryTarget) => Promise<void> }[] = [
+    { name: 'clearBinding', run: (service, target) => service.clearBinding(target) },
+    {
+      name: 'saveBinding',
+      run: (service, target) => service.saveBinding(target, { repoPath: 'tcp://repo/storage', repoUser: 'tester', repoPassword: 'secret' }),
+    },
+  ];
+  for (const action of bindingActions) {
+    test(`${action.name} удаляет снимки и манифест своей цели, снимки другой цели остаются`, async () => {
+      const { service, cf, cfe } = createTwoTargets();
+      captureSnapshots(service, cf, 'Справочник.Валюты');
+      captureSnapshots(service, cfe, 'Справочник.Контрагенты');
+
+      await action.run(service, cf);
+
+      assert.strictEqual(service.snapshots.readSnapshotInfo(cf, 'Справочник.Валюты'), undefined);
+      assert.strictEqual(service.snapshots.readRootManifestHashes(cf), undefined);
+      assert.ok(service.snapshots.readSnapshotInfo(cfe, 'Справочник.Контрагенты'));
+      assert.ok(service.snapshots.readRootManifestHashes(cfe));
+    });
+  }
+});
