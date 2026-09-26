@@ -499,9 +499,13 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень конфигу
     assert.strictEqual(harness.repositoryService.isRootLocked(harness.target), true);
   });
 
-  test('корень рекурсивно, нет проектного ConfigDumpInfo.xml — fallback на полную выгрузку (mode:"full")', async () => {
+  test('корень рекурсивно, нет проектного ConfigDumpInfo.xml — fallback на полную выгрузку (mode:"full") без запроса update-info', async () => {
     const harness = createHarness();
-    // Проектного ConfigDumpInfo.xml нет вовсе.
+    // Реальная фикстура ставится вместе с собственным ConfigDumpInfo.xml (createHarness
+    // копирует example/2.21/src/cf целиком) — файл нужно удалить явно, иначе
+    // readConfigDumpInfoFile(projectInfo) находит его и ветка "нет проектного файла"
+    // (acquireRootIncrementalDump, строки до первого deps.dumpToTemp) не выполняется.
+    fs.rmSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'));
     const dump = makeTempDump({});
     const modes: string[] = [];
     const deps = baseDeps({
@@ -515,7 +519,13 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень конфигу
     const outcome = await runRepositoryLockFlow(rootNode(harness), true, harness.services, deps);
 
     assert.strictEqual(outcome, 'done');
-    assert.ok(modes.includes('full'), `Ожидался fallback-режим "full" при отсутствии проектного ConfigDumpInfo.xml, получено: ${modes.join(',')}`);
+    // Без проектного ConfigDumpInfo.xml сравнивать не с чем — код обязан пропустить
+    // зондирующий запрос "update-info" и уйти сразу в полную выгрузку.
+    assert.deepStrictEqual(modes, ['full']);
+    assert.ok(
+      harness.outputLines.some((line) => line.includes('нет проектного ConfigDumpInfo.xml — полная выгрузка')),
+      `Ожидалось сообщение о fallback из-за отсутствия проектного ConfigDumpInfo.xml, получено: ${harness.outputLines.join(' | ')}`
+    );
   });
 });
 
