@@ -52,23 +52,6 @@ export function pickUnlockForce(nodeLabel: string): Promise<boolean | undefined>
   ]);
 }
 
-export function pickUpdateForce(title: string, nodeLabel: string): Promise<boolean | undefined> {
-  return pickRepositoryChoice(title, `Как получить «${nodeLabel}» из хранилища?`, [
-    {
-      label: 'Получить изменения',
-      description: 'без -force',
-      detail: 'Новые объекты хранилища не добавляются, удалённые в хранилище не удаляются.',
-      value: false,
-    },
-    {
-      label: 'Получить с добавлением и удалением объектов',
-      description: '-force',
-      detail: 'Подтверждает получение новых объектов и удаление объектов, удалённых в хранилище.',
-      value: true,
-    },
-  ]);
-}
-
 export function pickDisconnectForce(displayName: string): Promise<boolean | undefined> {
   return pickRepositoryChoice('Отключение от хранилища', `Как отключить «${displayName}» от хранилища?`, [
     {
@@ -80,7 +63,7 @@ export function pickDisconnectForce(displayName: string): Promise<boolean | unde
     {
       label: 'Принудительно',
       description: '-force',
-      detail: 'Без аутентификации в хранилище и без проверки захваченных изменённых объектов: непомещённые изменения поместить уже не получится.',
+      detail: 'Без аутентификации в хранилище и без проверки захваченных изменённых объектов: непомещённые изменения поместить уже не получится, а объекты остаются захваченными в хранилище — снять захват может администратор хранилища.',
       value: true,
     },
   ]);

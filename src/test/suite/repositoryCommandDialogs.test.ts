@@ -4,7 +4,6 @@ import {
   askRecursiveMode,
   pickDisconnectForce,
   pickUnlockForce,
-  pickUpdateForce,
   promptRepositoryVersion,
   type RepositoryChoiceItem,
   validateRepositoryVersion,
@@ -54,7 +53,6 @@ suite('RepositoryCommandDialogs — диалоги команд хранилищ
   const choiceDialogs: readonly { readonly name: string; readonly subject: string; readonly run: () => Promise<boolean | undefined> }[] = [
     { name: 'askRecursiveMode', subject: 'Контрагенты', run: () => askRecursiveMode('Захват объектов', 'Контрагенты', true) },
     { name: 'pickUnlockForce', subject: 'Контрагенты', run: () => pickUnlockForce('Контрагенты') },
-    { name: 'pickUpdateForce', subject: 'Контрагенты', run: () => pickUpdateForce('Получение из хранилища', 'Контрагенты') },
     { name: 'pickDisconnectForce', subject: 'Основная конфигурация', run: () => pickDisconnectForce('Основная конфигурация') },
   ];
 
@@ -90,10 +88,11 @@ suite('RepositoryCommandDialogs — диалоги команд хранилищ
     assert.strictEqual(quickPicks[0].options?.title, 'Освобождение объектов');
   });
 
-  test('pickUpdateForce: заголовок диалога — переданный title', async () => {
-    await pickUpdateForce('Получение версии из хранилища', 'Контрагенты');
+  test('pickDisconnectForce: «Принудительно» предупреждает, что захваты остаются на сервере (issue #80)', async () => {
+    await pickDisconnectForce('Основная конфигурация');
 
-    assert.strictEqual(quickPicks[0].options?.title, 'Получение версии из хранилища');
+    const forced = quickPicks[0].items.find((item) => item.value);
+    assert.match(forced?.detail ?? '', /остаются захваченными в хранилище/);
   });
 
   test('promptRepositoryVersion: ввод обрезается по краям', async () => {

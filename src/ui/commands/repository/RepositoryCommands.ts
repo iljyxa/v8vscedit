@@ -11,7 +11,6 @@ import {
   askRecursiveMode,
   pickDisconnectForce,
   pickUnlockForce,
-  pickUpdateForce,
   promptRepositoryVersion,
 } from './RepositoryCommandDialogs';
 import { type RepositoryCliCommandServices, runRepositoryCliCommand } from './RepositoryCommandRunner';
@@ -563,12 +562,10 @@ async function runRepositoryUpdateCommand(
   if (recursive === undefined) {
     return;
   }
-  const force = await pickUpdateForce(title, label);
-  if (force === undefined) {
-    return;
-  }
-
-  if (await runRepositoryUpdateFlow(repositoryNode, { recursive, force, version }, services, deps) === 'done') {
+  // `-Force` всегда: на стенде 8.5.1 он не меняет результат (новые и удалённые объекты
+  // применяются и без него), а по документации платформы подтверждает их получение —
+  // вопрос пользователю ничего бы не решал (issue #80).
+  if (await runRepositoryUpdateFlow(repositoryNode, { recursive, force: true, version }, services, deps) === 'done') {
     refreshRepositoryUi(services);
   }
 }

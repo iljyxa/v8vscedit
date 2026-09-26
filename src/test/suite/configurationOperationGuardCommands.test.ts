@@ -850,8 +850,8 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
     const cases: { command: string; cli: string; answers: boolean[]; input?: string }[] = [
       { command: 'v8vscedit.repository.lock', cli: 'repository-lock', answers: [false] },
       { command: 'v8vscedit.repository.unlock', cli: 'repository-unlock', answers: [false, true] },
-      { command: 'v8vscedit.repository.update', cli: 'repository-update', answers: [true, false] },
-      { command: 'v8vscedit.repository.updateToVersion', cli: 'repository-update', answers: [true, false], input: ' 125 ' },
+      { command: 'v8vscedit.repository.update', cli: 'repository-update', answers: [true] },
+      { command: 'v8vscedit.repository.updateToVersion', cli: 'repository-update', answers: [true], input: ' 125 ' },
       { command: 'v8vscedit.repository.commit', cli: 'repository-commit', answers: [] },
     ];
 
@@ -893,7 +893,7 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
     });
 
     test('repository.update: номер версии не запрашивается и не передаётся (issue #61)', async () => {
-      pickAnswers = [false, false];
+      pickAnswers = [false];
       inputAnswer = '125';
 
       await vscode.commands.executeCommand('v8vscedit.repository.update', catalogNode(true));
@@ -904,7 +904,7 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
     });
 
     test('repository.updateToVersion: версия из поля ввода передаётся парой «-Version», «125» без пробелов (issue #61)', async () => {
-      pickAnswers = [false, false];
+      pickAnswers = [false];
       inputAnswer = ' 125 ';
 
       await vscode.commands.executeCommand('v8vscedit.repository.updateToVersion', catalogNode(true));
@@ -917,15 +917,33 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
       assert.strictEqual(args[versionIndex + 1], '125');
     });
 
+    /**
+     * Issue #80: на стенде 8.5.1 `-force` у UpdateCfg не меняет результат — новые и удалённые
+     * объекты применяются и без него, — поэтому вопрос не задаётся, ключ передаётся всегда.
+     */
+    [
+      { command: 'v8vscedit.repository.update', input: '' },
+      { command: 'v8vscedit.repository.updateToVersion', input: '9' },
+    ].forEach(({ command, input }) => {
+      test(`${command}: единственный вопрос — рекурсия, «-Force» передаётся всегда (issue #80)`, async () => {
+        pickAnswers = [false];
+        inputAnswer = input;
+
+        await vscode.commands.executeCommand(command, catalogNode(true));
+
+        assert.strictEqual(quickPickCalls, 1);
+        assert.strictEqual(cliRequests.length, 1);
+        assert.ok(cliRequests[0].extraArgs.includes('-Force'), cliRequests[0].extraArgs.join(' '));
+      });
+    });
+
     ([
       { command: 'v8vscedit.repository.lock', answers: [undefined], input: '' },
       { command: 'v8vscedit.repository.unlock', answers: [undefined], input: '' },
       { command: 'v8vscedit.repository.unlock', answers: [false, undefined], input: '' },
       { command: 'v8vscedit.repository.update', answers: [undefined], input: '' },
-      { command: 'v8vscedit.repository.update', answers: [false, undefined], input: '' },
       { command: 'v8vscedit.repository.updateToVersion', answers: [], input: undefined },
       { command: 'v8vscedit.repository.updateToVersion', answers: [undefined], input: '5' },
-      { command: 'v8vscedit.repository.updateToVersion', answers: [false, undefined], input: '5' },
     ] as { command: string; answers: (boolean | undefined)[]; input: string | undefined }[]).forEach(({ command, answers, input }, index) => {
       test(`${command}: пользователь отменил диалог (вариант ${String(index + 1)}) → Конфигуратор не запускается`, async () => {
         pickAnswers = [...answers];
@@ -977,8 +995,8 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
     const leafCommands: { command: string; answers: boolean[]; input?: string }[] = [
       { command: 'v8vscedit.repository.lock', answers: [] },
       { command: 'v8vscedit.repository.unlock', answers: [false] },
-      { command: 'v8vscedit.repository.update', answers: [false] },
-      { command: 'v8vscedit.repository.updateToVersion', answers: [false], input: '7' },
+      { command: 'v8vscedit.repository.update', answers: [] },
+      { command: 'v8vscedit.repository.updateToVersion', answers: [], input: '7' },
     ];
 
     leafCommands.forEach(({ command, answers, input }) => {
