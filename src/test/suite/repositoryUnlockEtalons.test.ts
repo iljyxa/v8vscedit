@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
 import { acquireUnlockEtalons } from '../../ui/commands/repository/RepositoryUnlockEtalons';
 import type { RepositoryFileSyncDeps, RepositoryFileSyncServices, RepositorySubject } from '../../ui/commands/repository/RepositoryFileSyncShared';
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
-import { subordinateUnitFullName } from '../../infra/repository/RepositoryObjectNames';
+import { CONFIGURATION_ROOT_LOCK_NAME, subordinateUnitFullName } from '../../infra/repository/RepositoryObjectNames';
 import { resolveObjectScope } from '../../infra/repository/RepositoryObjectScope';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOperationGuard';
@@ -410,5 +410,54 @@ suite('RepositoryUnlockEtalons — isAbsentInDumpedParent: непосредст�
     } finally {
       fs.rmSync(dumpDirLevel0, { recursive: true, force: true });
     }
+  });
+});
+
+suite('RepositoryUnlockEtalons — рекурсивный корень без заранее посчитанных хешей (issue #1, N1)', () => {
+  let harness: Harness;
+
+  setup(() => {
+    harness = createHarness();
+  });
+
+  teardown(() => {
+    fs.rmSync(harness.workspaceRoot, { recursive: true, force: true });
+  });
+
+  function rootSubject(): RepositorySubject {
+    return {
+      target: harness.target,
+      objectsFile: path.join(harness.workspaceRoot, 'Objects.xml'),
+      anchor: CONFIGURATION_ROOT_LOCK_NAME,
+      members: [CONFIGURATION_ROOT_LOCK_NAME],
+      isRoot: true,
+      mode: 'recursive',
+      plan: { kind: 'root-incremental' },
+    };
+  }
+
+  test('хеши корня не переданы — функция хеширует проект сама: без изменений против манифеста эталонов нет и выгрузки нет', async () => {
+    harness.repositoryService.snapshots.captureRootManifest(harness.target);
+
+    const result = await acquireUnlockEtalons(rootSubject(), [CONFIGURATION_ROOT_LOCK_NAME], true, {}, harness.services, baseDeps());
+
+    assert.strictEqual(result.status, 'ready');
+    assert.deepStrictEqual(result.objects, []);
+    result.dispose();
+  });
+
+  test('хеши корня не переданы, модуль формы изменён после манифеста — изменение найдено собственным хешированием', async () => {
+    harness.repositoryService.snapshots.captureRootManifest(harness.target);
+    fs.appendFileSync(path.join(harness.configRoot, 'Catalogs', 'Контрагенты', 'Forms', 'ФормаЭлемента', 'Ext', 'Form', 'Module.bsl'), '\n// локальная правка\n', 'utf-8');
+    const requested: string[][] = [];
+
+    await acquireUnlockEtalons(rootSubject(), [CONFIGURATION_ROOT_LOCK_NAME], true, {}, harness.services, baseDeps({
+      dumpToTemp: (_target, request) => {
+        requested.push(request.mode === 'partial' ? [...request.fullNames] : [request.mode]);
+        return Promise.resolve({ ok: false, reason: 'выгрузка не нужна для проверки' });
+      },
+    }));
+
+    assert.deepStrictEqual(requested, [['Справочник.Контрагенты.Форма.ФормаЭлемента']]);
   });
 });
