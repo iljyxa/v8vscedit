@@ -185,6 +185,17 @@ Post-mutation: `suppressConfigurationReloadForFiles` → запись и пат�
 `planReadonlyTransitions` переключает readonly открытых вкладок (включая правую сторону диффа) без
 переоткрытия: видимые — сразу, скрытые — при активации.
 
+Дерево (`MetadataTreeProvider.resolveRepositoryState`), панель свойств
+(`ui/views/properties/propertyEditLock.ts:resolveRepositoryEditProbePath`) и MCP-шлюз
+(`McpMutationGate.assertNodeContentEditable`) проверяют захват формы/макета по **её собственному**
+дескриптору (`Forms/Y.xml`/`Templates/Y.xml`), а не по владельцу — `isSubordinateUnitNode`
+(`RepositoryService.ts`) применяет то же правило, что и `resolveFullName`/`buildSubordinateUnitFullName`.
+Если у узла нет собственного XML-дескриптора (общая для дерева проверка не нашла форму/макет владельца
+через `findObjectXmlInFolder`) — откат на проверку по XML владельца, как раньше. Операции, меняющие
+СОСТАВ владельца (добавление/удаление/переименование формы, `add_form`/`remove_form`/`remove_metadata`/
+`rename_metadata`), по-прежнему проверяются через `assertNodeEditable`/`isMetadataEditRestricted` по
+владельцу — состав хранится в `ChildObjects` владельца, а не в самой единице.
+
 ## Настройка
 
 `v8vscedit.repository.syncFilesOnLockUnlock` (по умолчанию `true`) включает выгрузку, слияние, снимки и откат.
@@ -207,9 +218,8 @@ Post-mutation: `suppressConfigurationReloadForFiles` → запись и пат�
 - Удаление подчинённого объекта в хранилище при нерекурсивном получении платформой не проверено; такие файлы
   не трогаются, в журнал пишется предупреждение.
 - `bind`/`create`/`unbind`/`report`/`dump`/`users`/`label` идут мимо guard'а (issue #40).
-- Значок захвата узла формы/макета считается по самой единице; `editRestricted` (только для чтения,
-  `-repoEditAllowed`) и редактируемость свойств формы в панели свойств по-прежнему считаются по владельцу
-  (issue #46); режим поддержки перерасчётов/таблиц/вложенных подсистем берётся от владельца (#47).
+- Режим поддержки перерасчётов/таблиц/вложенных подсистем берётся от владельца, а не от самой единицы
+  (issue #47).
 - Тесты вложенных подсистем временно на синтетике, «удалённая в хранилище форма» — правкой копии реального XML:
   ждут фикстуры F1/F4 (issue #48).
 
