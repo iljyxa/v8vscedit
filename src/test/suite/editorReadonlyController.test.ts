@@ -1046,7 +1046,7 @@ suite('EditorReadonlyController — несохранённые правки пр
     started.controller.onDocumentChanged(docA);
     await started.settle();
 
-    assert.deepStrictEqual(spy?.calls, [{ command: SET_COMMAND, activeUri: uriA.toString() }]);
+    assert.deepStrictEqual(spy.calls, [{ command: SET_COMMAND, activeUri: uriA.toString() }]);
   });
 
   test('откат правок вместо сохранения → readonly применяется', async function () {
