@@ -216,7 +216,7 @@ resolveObjectXmlForBsl` (поиск владельца для режима по�
 
 После захвата и отмены захвата `EditorReadonlyController` (`ui/readonly/`) переключает readonly уже
 открытых вкладок (в том числе правой стороны диффа) без переоткрытия: видимые — сразу, скрытые — при
-активации. `files.readonlyInclude` соблюдается (снятие readonly идёт командой `reset…ReadonlyInSession`).
+активации; несохранённый документ становится readonly только после сохранения или отката правок. `files.readonlyInclude` соблюдается (снятие readonly идёт командой `reset…ReadonlyInSession`).
 Старые записи `state.json` без режима захвата делают редактируемыми и файлы подчинённых, как до issue #1.
 Подробно — [repository-file-sync.md](./repository-file-sync.md#readonly).
 
