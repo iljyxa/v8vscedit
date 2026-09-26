@@ -367,9 +367,10 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 function filesAreEqual(leftPath: string, rightPath: string): boolean {
   try {
     return fs.readFileSync(leftPath).equals(fs.readFileSync(rightPath));
-  /* c8 ignore next 3 -- оба файла проверены existsSync перед вызовом; сбой чтения — только
+  /* c8 ignore start -- оба файла проверены existsSync перед вызовом; сбой чтения — только
      гонка с внешним удалением, и тогда файлы считаются различными. */
   } catch {
     return false;
   }
+  /* c8 ignore stop */
 }
