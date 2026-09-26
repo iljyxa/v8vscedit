@@ -10,7 +10,7 @@
 1. **Навигатор метаданных** — дерево объектов из XML-выгрузки (CF и CFE), свойства, чтение/создание/редактирование метаданных, открытие BSL-модулей.
 2. **Языковая поддержка BSL** — LSP-клиент для внешнего `bsl-analyzer`.
 
-Подробная документация — в `./docs` (`architecture.md`, `metadata-navigator.md`, `metadata-parser.md`, `bsl-language-support.md`, `mcp-paths.md`, `mcp-server-lifecycle.md`, `xml-format-rulesets.md`, `agentic-pipeline.md`, `vscode-extension-best-practices.md`, `git-metadata-changes.md`, `git-history-graph.md`).
+Подробная документация — в `./docs` (`architecture.md`, `metadata-navigator.md`, `metadata-parser.md`, `bsl-language-support.md`, `mcp-paths.md`, `mcp-server-lifecycle.md`, `xml-format-rulesets.md`, `agentic-pipeline.md`, `vscode-extension-best-practices.md`, `git-metadata-changes.md`, `git-history-graph.md`, `repository-file-sync.md`). Справочники, вынесенные из этого файла ради экономии контекста агентов: **[change-recipes.md](./docs/change-recipes.md)** — какие файлы трогать по сценарию, [project-layout.md](./docs/project-layout.md) — подробная раскладка `src/`, [tech-debt.md](./docs/tech-debt.md) — известные технические долги.
 
 ## Язык общения
 
@@ -25,47 +25,29 @@
 
 ## Конвейер агентной разработки (оркестратор + субагенты)
 
-Разработка ведётся TDD-конвейером специализированных субагентов (`.claude/agents/*.md`), которыми
-дирижирует **оркестратор — основной чат**. Полное описание — `docs/agentic-pipeline.md`. Обязательный
-стандарт качества для `architect` и `reviewer` — `docs/vscode-extension-best-practices.md`.
+Разработка идёт TDD-конвейером субагентов (`.claude/agents/*.md`), которыми дирижирует **оркестратор —
+основной чат**. Полное описание, триаж и протокол возврата — `docs/agentic-pipeline.md`; стандарт
+качества для `architect` и `reviewer` — `docs/vscode-extension-best-practices.md`.
 
-**Роли:** `architect` (opus, план, кода не пишет) → `test-writer` (sonnet, падающие тесты) →
-`developer` (opus, реализация до «зелёного») → `qa-e2e` (sonnet, полный прогон + E2E + покрытие) →
-`reviewer` (opus, соответствие ТЗ/конвенциям/SOLID/best-practices) → `documenter` (sonnet, доки в конце).
-
-**Триаж оркестратора — какой трек выбрать:**
-
-- **FULL-трек** (architect → test-writer → developer → qa-e2e → reviewer → documenter) — если задача
-  правит центральные контракты (`META_TYPES`, `MetaPathResolver`, `PropertySchema`, ruleset формата),
-  добавляет тип метаданных/слот/тег/схему/MCP-инструмент/команду, меняет контракт webview↔расширение,
-  затрагивает > 2–3 файлов или пересекает границы слоёв.
-- **FAST-трек** — мелкая нерисковая задача (локальная правка одного файла, узкий фикс, правка доки):
-  оркестратор реализует сам, затем `qa-e2e` → `reviewer` → (при изменении контракта/архитектуры)
-  `documenter`.
-
-**Инвариант: `reviewer` и `qa-e2e` выполняются ВСЕГДА, на любом треке.** Меняется только объём
-предшествующих стадий. Ревьюер при расхождении с ТЗ возвращает задачу на `developer` или `architect`
-с конкретными замечаниями; после доработки — повторный `qa-e2e` и `reviewer`. При сомнении в размере
-задачи оркестратор выбирает FULL-трек.
-
-**Исключение для нерантайм-изменений:** если задача не затрагивает production/test runtime-код
-(правки `.claude/**`, `.gitignore`, `docs/` без кода, конфигурация инструментария), `qa-e2e` не гоняет
-полный `npm test`/`coverage:changed` — фиксирует `N/A` и проверяет только структуру/текст/конфигурацию.
-`reviewer` выполняется в любом случае. Как только задача касается `src/**`, `src-ui/**`, `src/test/**`
-или их генерации — инвариант действует буквально. Подробности — `docs/agentic-pipeline.md`.
-
-**Эффективность конвейера (обязанности оркестратора):**
-
-- **Не дроби `test-writer`.** Один брифинг = все тесты задачи сразу: покрытие новых файлов до 100% (все
-  ветки), параметризация по конечным множествам значений (enum/настройки, напр. `host`), helper'ы
-  диалогов и т.п. Отдельные вызовы «дописать тест на X», «добрать покрытие Y» — это лишние ре-циклы;
-  включай их в первый бриф. Исключение — реальный возврат от reviewer/qa по новому дефекту.
-- **Гейт покрытия — `coverage:changed`, не глобальный `coverage`.** qa-e2e проверяет 100% на изменённых
-  файлах; глобальный порог красный из-за легаси и НЕ основание для RED. Не давай агентам гонять
-  stash/baseline-сравнения и десятки повторов «на стабильность».
-- **Флейк = дефект теста, а не окружения.** Возврат автору тестов, а не бесконечные повторы.
-- **Быстрый цикл на промежуточных стадиях:** `test:compile` → `MOCHA_GREP=… test:fast`; полный `npm test`
-  — один раз на стадии qa-e2e.
+- **FULL-трек:** `architect` (opus, план + сигнатуры + план тестов) → `implementer` (opus, TDD в одном
+  контексте: контракт → красные тесты → реализация → compile + lint) → **QA-гейт** → `reviewer` (opus) →
+  `documenter` (sonnet). Выбирается, если задача правит центральные контракты (`META_TYPES`,
+  `MetaPathResolver`, `PropertySchema`, ruleset формата), добавляет тип/слот/тег/схему/MCP-инструмент/
+  команду, меняет контракт webview↔расширение, затрагивает > 2–3 файлов или пересекает слои. При
+  сомнении — FULL.
+- **FAST-трек:** оркестратор сам пишет тест и код → QA-гейт → `reviewer` → (`documenter` при изменении
+  контракта).
+- **QA-гейт — скрипт, а не агент:** `bash .claude/scripts/qa-gate.sh [база=main]`. Он выполняет lint,
+  sanity-проверки и один полный прогон `coverage:changed`, который одновременно регресс `npm test` и
+  100% patch coverage. Нерантайм-изменения (`.claude/**`, `docs/` без кода) скрипт распознаёт сам и
+  ставит тестам `N/A`. При RED с неочевидной причиной вызывается агент `qa-e2e` на разбор
+  `out/qa-gate.log`; прогон он не повторяет.
+- **Инвариант: QA-гейт и `reviewer` выполняются ВСЕГДА, на любом треке.** Ревьюер не повторяет
+  механические проверки гейта и возвращает задачу на `implementer` или `architect`; после доработки
+  снова идут гейт и `reviewer`.
+- **Эффективность:** один бриф на задачу (все тесты и ветки сразу); не пересказывать `CLAUDE.md` в
+  брифах, он уже в контексте агентов; флейк — дефект теста, а не повод для повторов; глобальный
+  `coverage` красный из-за легаси и гейтом не является.
 
 ## Команды
 
@@ -119,104 +101,19 @@ container/ext   ←   всё
 - `ui/**` не содержит regex-парсинга XML и вычислений путей — только вызовы `infra/*`.
 - LSP-подсистема не содержит встроенного сервера; все языковые возможности — через внешний `bsl-analyzer`.
 
-### Раскладка каталогов
+### Раскладка каталогов (кратко; подробно — [project-layout.md](./docs/project-layout.md))
 
 ```
 src/
-├── extension.ts                      # тонкий activate/deactivate → делегирует Container
-├── Container.ts                      # composition root: собирает сервисы, регистрирует команды/watcher/view
-│
-├── domain/                           # Чистый домен — НЕ импортирует vscode, fs, path
-│   ├── MetaTypes.ts                  # Единый реестр META_TYPES: Record<MetaKind, MetaTypeDef>
-│   ├── ChildTag.ts                   # Теги дочерних элементов + CHILD_TAG_CONFIG
-│   ├── ModuleSlot.ts                 # Слоты модулей: 'Object'|'Manager'|'Form'|'Command'|…
-│   ├── Configuration.ts              # ConfigInfo, ConfigEntry, ChildObjectsMap
-│   ├── MetaObject.ts                 # MetaObject, MetaChild (результат парсинга XML объекта)
-│   ├── StandardAttribute.ts          # стандартные реквизиты по видам
-│   └── Ownership.ts                  # «свой/заимствованный» по namePrefix для CFE
-│
-├── infra/                            # ФС, XML, окружение, git, хранилище, CFE, роли; vscode не импортировать
-│   ├── xml/                          # ридеры/эдиторы XML
-│   │   ├── ConfigXmlReader.ts        # парсер Configuration.xml
-│   │   ├── ObjectXmlReader.ts        # парсер XML объекта + updateType/updateProperty
-│   │   ├── PropertySchema.ts         # декларативные схемы свойств по MetaKind
-│   │   ├── TypedFieldPropertyRules.ts# свойства типизированных полей по типу
-│   │   ├── XmlUtils.ts               # extract*, экранирование, writeTextFilePreservingBomAndEol
-│   │   ├── ConfigurationXmlEditor.ts # редактирование Configuration.xml
-│   │   ├── MetadataXmlCreator.ts     # создание новых XML-объектов метаданных
-│   │   ├── MetadataXmlRemover.ts     # удаление XML-объектов метаданных
-│   │   └── format/                   # ruleset формата сериализации (см. docs/xml-format-rulesets.md)
-│   │       ├── FormatRuleset.ts      # интерфейс правил генерации одного поколения формата
-│   │       ├── baselineRuleset.ts    # правила текущего формата (2.21)
-│   │       └── formatRegistry.ts     # реестр «версия → ruleset» + version-guard
-│   ├── fs/
-│   │   ├── ConfigLocator.ts          # рекурсивный поиск Configuration.xml
-│   │   ├── MetaPathResolver.ts       # единый resolver: XML + все модули по ModuleSlot
-│   │   ├── ConfigurationCleanWindow.ts # окно тишины по корню конфигурации после
-│   │   │                              # импорта/обновления БД (Container.markConfigurationsClean,
-│   │   │                              # см. docs/architecture.md)
-│   │   └── AtomicFileWrite.ts        # writeFileAtomicSync — общая атомарная запись
-│   │                                  # служебных кэшей (tmp+rename), см. cache/ ниже
-│   ├── cfe/                          # расширения: CfeBorrowService, CfeDiffService, CfePatchMethodService
-│   ├── support/                      # SupportInfoReader/Service (ParentConfigurations.bin), Logger,
-│   │                                  # PerfLog — формат строк замера `[perf]` (docs/architecture.md)
-│   ├── cache/                        # MetadataCache, hashCache (CLI), FileStatIndex — stat-индекс
-│   │                                  # рабочего дерева (ускоритель ConfigurationChangeDetector, не
-│   │                                  # источник правды), см. docs/architecture.md
-│   ├── repository/                   # хранилище 1С: RepositoryService (фасад), RepositoryLockState
-│   │                                  # (state.json), RepositoryLockSnapshotStore (снимки), единицы
-│   │                                  # хранилища и области (RepositoryObjectNames/Scope), раунды
-│   │                                  # выгрузки (RepositoryDumpPlan/Rounds), трёхстороннее слияние
-│   │                                  # (RepositoryMergePlanner/Applier) — см. docs/repository-file-sync.md
-│   ├── git/                          # статус Git для узлов метаданных (GitMetadataStatusService,
-│   │                                  # декорации) + представление «Изменения метаданных»
-│   │                                  # (GitPorcelainReader, MetadataChangeResolver,
-│   │                                  # MetadataChangeAggregator, GitBlobReader, GitStatusReader,
-│   │                                  # GitWriteService — см. docs/git-metadata-changes.md) +
-│   │                                  # чистое ядро графа истории (GitLogReader, GitLogParser,
-│   │                                  # GitGraphLayout, GitCommitChangesReader — см.
-│   │                                  # docs/git-history-graph.md; граф — сворачиваемый блок панели
-│   │                                  # «Изменения метаданных», отдельного webview/вкладки нет)
-│   ├── environment/                  # bsl-analyzer.toml, окружение проекта, реестр баз
-│   ├── process/                      # поиск платформы, spawn, декодер OEM/Win1251,
-│   │                                  # ConfigurationOperationGuard — единая блокировка
-│   │                                  # полного импорта/обновления/применения конфигурации
-│   │                                  # к базе в пределах одного окна (см. docs/architecture.md)
-│   ├── mcp/                          # McpServerIdentity/McpStartDecision/McpPortProbe/
-│   │                                  # McpConflictPrompt/McpHost — чистая логика жизненного цикла
-│   │                                  # встроенного MCP-сервера (bind/reuse/conflict, закрытие порта),
-│   │                                  # без vscode; см. docs/mcp-server-lifecycle.md
-│   └── skills/                       # AiSkillsInstaller — установка ИИ-навыков
-│
-├── ui/                               # Всё, что знает про vscode API
-│   ├── tree/                         # MetadataTreeProvider (тонкий), TreeNode, nodeBuilders/, decorations/
-│   ├── views/                        # webview-провайдеры
-│   │   ├── universal/                # UniversalPanelViewProvider — ОСНОВНОЙ UI навигатора
-│   │   ├── properties/               # PropertyBuilder по PropertySchema
-│   │   ├── changes/                  # changesDtoBuilder (листья, чистый) + changesTreeAssembler
-│   │   │                              # (сборка навигаторной иерархии секции, чистый) +
-│   │   │                              # changesHistorySection (чистый helper состояния блока
-│   │   │                              # «История» поверх views/history/*, см. ниже) +
-│   │   │                              # MetadataChangesViewProvider (ЕДИНСТВЕННЫЙ webview-провайдер
-│   │   │                              # v8vsceditChanges — панель с ДВУМЯ сворачиваемыми блоками
-│   │   │                              # «Изменения»/«История»; дерево «Изменения» повторяет иерархию
-│   │   │                              # навигатора через treeProvider; см. docs/git-metadata-changes.md
-│   │   │                              # и docs/git-history-graph.md)
-│   │   ├── history/                  # ТОЛЬКО чистые модули (без vscode): historyGraphDtoBuilder/
-│   │   │                              # historyGraphController — read-only переиспользование движка
-│   │   │                              # changes/; см. docs/git-history-graph.md
-│   │   └── subsystem|search|repository|environment|standalone|…
-│   ├── commands/                     # CommandRegistry.registerAll + подпапки по доменам
-│   ├── git/                          # OnecGitContentProvider — схема onec-git для diff HEAD/индекс
-│   ├── mcp/                          # V8McpServer (тонкий HTTP-фасад: транспорт MCP, служебные
-│   │                                  # эндпоинты /identity+/shutdown — не MCP-инструменты,
-│   │                                  # см. docs/mcp-server-lifecycle.md), McpNodeRegistry,
-│   │                                  # McpPropertyService
-│   └── readonly/                     # BslReadonlyGuard
-│
-├── lsp/                              # LspManager + analyzer/ (внешний bsl-analyzer; встроенного сервера нет)
-├── cli/                             # Node entry onec-tools.ts + commands/ + core/ (адаптеры)
-└── test/                            # runTests.ts + suite/
+├── extension.ts, Container.ts   # тонкий activate/deactivate; composition root
+├── domain/     # чистый домен: META_TYPES, ChildTag, ModuleSlot, MetaObject, CanonicalNames — без vscode/fs/path
+├── infra/      # xml/ (ридеры/эдиторы, PropertySchema, format/ ruleset), fs/ (MetaPathResolver), cfe/, support/,
+│               # cache/, repository/, git/, environment/, process/ (ConfigurationOperationGuard), mcp/, skills/ — без vscode
+├── ui/         # tree/, views/ (universal/ — ОСНОВНОЙ UI, properties/, changes/, history/, …), commands/, git/, mcp/, readonly/
+├── lsp/        # LspManager + внешний bsl-analyzer
+├── cli/        # отдельный потребитель domain/infra (onec-tools.ts, commands/, core/)
+└── test/       # runTests.ts + suite/
+src-ui/         # Vue-webview: apps/* (панели), shared/ (protocol/, state/, components/, api/)
 ```
 
 `cli/` — отдельный потребитель `domain/` и `infra/`. Если код нужен и расширению, и CLI — он живёт в `infra/<подпапка>/`, а `cli/core/*` даёт тонкий re-export.
@@ -268,7 +165,7 @@ export interface MetaTypeDef {
 
 ### Webview (`src-ui/`)
 
-Vue-приложения (сборка `vite.webview.config.ts`, проверка типов `vue-tsc`/`tsconfig.ui.json`). `src-ui/apps/*` — отдельные панели (`universal`, `dynamic-panel`, `environment`, `subsystem`, `repository-*`, `standalone`, `ai`, `tree-search`, `changes` — панель «Изменения метаданных»: ДВА сворачиваемых блока — «Изменения» (SCM-шапка + дерево, повторяющее навигаторную иерархию, обрезанную по изменениям) и «История» (граф git-коммитов `CommitGraph.vue` с inline-раскрытием коммита: детали + дерево изменений через общий `UniversalTree`, read-only, ленивая загрузка при первом раскрытии, см. `docs/git-history-graph.md`); отдельного приложения `apps/history` больше нет — граф целиком часть `apps/changes`). `src-ui/shared/` — общий код: `protocol/` (контракт сообщений webview ↔ расширение), `state/`, `components/` (в т.ч. `components/tree/UniversalTree*.vue` — дерево, общее для навигатора и панели изменений, включая её блок истории), `api/`. При изменении взаимодействия панели и расширения правьте обе стороны протокола.
+Vue-приложения (сборка `vite.webview.config.ts`, проверка типов `vue-tsc`/`tsconfig.ui.json`): `src-ui/apps/*` — отдельные панели, `src-ui/shared/` — общий код (`protocol/` — контракт сообщений webview ↔ расширение, `state/`, `components/` в т.ч. общее дерево `UniversalTree*.vue`, `api/`). Состав панелей — [project-layout.md](./docs/project-layout.md#webview-src-ui). При изменении взаимодействия панели и расширения правьте обе стороны протокола.
 
 ## MCP-сервер для ИИ-агентов
 
@@ -290,143 +187,9 @@ Vue-приложения (сборка `vite.webview.config.ts`, проверк�
 - Английских алиасов (`Catalog.X`) и legacy-форм нет; любая такая форма отбивается с подсказкой канона.
 - У инструментов, работающих с одним узлом, аргумент называется `path`; парные `compile_*` принимают `parentPath`. Никаких `objectPath`/`formPath`/`modulePath` и т.п.
 
-### Перенос новой функции из скилов в расширение
+## Инвариант изменений — рецепты в [change-recipes.md](./docs/change-recipes.md)
 
-1. Бизнес-логику — в `infra/<область>/<Service>.ts` без `vscode` и shell.
-2. Тест на реальных XML-фикстурах или временной структуре выгрузки.
-3. Если нужно человеку в UI — команда в `ui/commands/**` + действие в `UniversalPanelViewProvider.getNodeActions()`.
-4. Если меняет конфигурацию/расширение — MCP-инструмент в `V8McpServer.registerTools()` + запись в `EXTENSION_MCP_TOOLS`.
-5. Обновить кэш/дерево/статус через общий post-mutation путь.
-
-## Инвариант изменений — как добавлять функциональность
-
-Для каждого сценария указано, какие файлы трогать. Если требуется править сверх списка — задача решается в другом слое.
-
-- **Новый тип метаданных:** запись в `META_TYPES` → при спец-модуле `ModuleSlot` + карта в `MetaPathResolver` → при наборе свойств схема в `PROPERTY_SCHEMAS` → иконка `src/icons/{light,dark}/<icon>.svg` → при нестандартной сборке узла builder в `ui/tree/nodeBuilders/` → тест `ObjectXmlReader` на пример из `example/`.
-- **Новый слот модуля (`ModuleSlot`):** литерал в `domain/ModuleSlot.ts` → путь в карте `MetaPathResolver` → при необходимости `OpenModuleCommandId` + команда → поле `modules` в записях `META_TYPES`.
-- **Новый дочерний тег (`ChildTag`):** значение в `domain/ChildTag.ts` + `CHILD_TAG_CONFIG` → при своём контейнере расширить `ObjectXmlReader.parseChildren` → тег в `childTags` нужных `META_TYPES`.
-- **Новый контейнерный дочерний тип со своими вложенными листьями** (паттерн ТЧ→Колонка; второй прецедент — HTTPСервис→URLШаблон→Метод, см. [mcp-paths.md](./docs/mcp-paths.md#26-расширенные-примеры-путей) и [metadata-navigator.md](./docs/metadata-navigator.md#контейнерные-дочерние-узлы-тчколонка-и-httpсервисurlшаблонметод)): контейнер и лист — обе отдельные записи `MetaKind`/`META_TYPES`/`ChildTag`; лист парсится в `MetaChild.columns` контейнера через `ObjectXmlReader.toXxxChild` (образец `toTabularSectionChild`) → имя родителя-контейнера пробрасывается ПАРАЛЛЕЛЬНЫМ полем контекста (`tabularSectionName`/`urlTemplateName`), а не переименованием существующего слота и не новым реестром → `domain/CanonicalNames.ts` (`canonicalChildPath`) обобщает контейнерную ветку по этому полю → узел дерева строится симметрично в ДВУХ источниках — `infra/cache/MetadataCache.ts` (webview) и `ui/tree/nodeBuilders/metaObjectTreeBuilder.ts` (нативный TreeView/свойства) → `infra/xml/XmlUtils.ts` получает nesting-aware `findXxxRangeInYyy`/`extractXxxXmlFromYyy` (образец `findColumnRangeInTabularSection`) → MCP add-инструмент для листа получает флаг-аналог `inTabularSection` (например `inUrlTemplate`) в `McpAddToolsRegistration.ts`, владелец — сам контейнер (`allowedOwnerKinds: ['<Контейнер>']`).
-- **Новая схема свойств:** объект-схема в `PROPERTY_SCHEMAS` → при новом `PropertyValueKind` расширить `_types.ts` + `PropertyBuilder.ts`. Регулярки — только в `infra/xml/`.
-- **Новое правило состава свойств типизированного поля** (какие теги `<Properties>` допустимы у
-  реквизита/измерения/ресурса/колонки конкретного вида объекта-владельца, см.
-  [xml-format-rulesets.md](./docs/xml-format-rulesets.md#состав-свойств-типизированного-поля-по-виду-владельца)):
-  правило регистра-владельца — запись в `REGISTER_FIELD_RULES` (`infra/xml/TypedFieldPropertyRules.ts`,
-  снимается с эталона `example/`) → при новом управляемом ключе свойства — добавить его в
-  `CONTROLLED_PROPERTY_KEYS` (позиция — по месту в `xs:sequence` схемы 1С, список остаётся единой
-  надпоследовательностью всех наблюдаемых в эталонах порядков) → значение по умолчанию в
-  `DEFAULT_VALUES` (или в `getFieldDefaultValues`, если оно зависит от `registerKind`) → тест на
-  реальном объекте из `example/2.20`+`example/2.21` (запись через `normalizeTypedFieldPropertiesAfterTypeChange`,
-  панель свойств через `getDisplayTypedFieldPropertyKeys`, `validate_metadata` с кодом
-  `property-not-allowed`). **Состав задаёт ВИД ОБЪЕКТА-ВЛАДЕЛЬЦА** (корень XML-файла,
-  `ObjectXmlReader.detectRootObjectKind`), **а не тип поля** (`<Type>`) — сужение по типу отдельная
-  политика генератора (`getAllowedPropertyKeys` по `FieldTypeCategory`), не ограничение формата; для
-  видов, правила которых ещё не сняты с эталона (пример — регистр расчёта), свойства владельца
-  ТОЛЬКО сохраняются из исходного XML, а не дописываются «по умолчанию».
-- **Новая команда:** класс в `ui/commands/...` с `readonly id` → регистрация в `CommandRegistry.registerAll` → `package.json → contributes.commands` → при меню узла `contributes.menus` c `when: viewItem =~ /…/` → при хоткее `contributes.keybindings`.
-- **Новый builder узла:** `ui/tree/nodeBuilders/<имя>.ts` → регистрация в диспетчере `metaObjectTreeBuilder.ts`. XML — только через `parseObjectXml`/`ObjectXmlReader`.
-- **Новая декорация узла:** класс в `ui/tree/decorations/` (реализует `vscode.FileDecorationProvider`) → регистрация в `Container.wireTreeView` → суффикс `contextValue` — только в `TreeNode`.
-- **Новый view/webview:** класс в `ui/views/<Имя>ViewProvider.ts` (без XML/FS) → данные готовит отдельный сервис → создание и команда открытия через `Container`.
-- **Новый сервис инфры:** класс в `infra/<подпапка>/<Имя>Service.ts` без `vscode`, `Logger` через конструктор → создать в `Container.bootstrap` → тест на пример из `example/`.
-- **Новая возможность LSP:** встроенных провайдеров нет; completion/hover/diagnostics добавляются в `bsl-analyzer`, здесь проверяется только интеграция `LspManager`.
-- **Новая настройка:** `package.json → contributes.configuration.properties` с префиксом `v8vscedit.<область>.<ключ>`, `description` на русском → читать только через `vscode.workspace.getConfiguration('v8vscedit')` в UI/Container → при рантайм-влиянии подписка на `onDidChangeConfiguration`.
-- **Новый watcher:** `FileSystemWatcher` — только в `Container` или `ui/support/`; обработчик делегирует в сервис.
-- **Внешняя интеграция (vrunner):** запуск процесса в `ui/commands/ext/`; декодирование OEM/Win1251 через `iconv-lite`; прогресс/отмена через `vscode.window.withProgress`.
-- **Новая операция чтения данных из базы через пакетный Конфигуратор** (данных, которых нет в
-  XML-выгрузке — список/состояние; образец — список подключённых расширений для
-  `v8vscedit.connectExtension`): CLI-команда `cli/commands/<name>.ts` с гейтом по `exitCode` процесса
-  (не по тексту лога) и передачей результата через `-ResultFile` (не marker-блок в stdout — избегает
-  порчи данных построчным `LineBufferedDecoder`) → чистый парсер в `infra/<область>/<Name>Parser.ts` без
-  `vscode`/spawn (снятие BOM, разбор строк, при необходимости — чистая функция выбора для UI) → тонкая
-  UI-обёртка `ui/commands/.../*CommandRunner.ts` (спавн CLI + чтение `-ResultFile`, `undefined` при
-  недоступности) → диалог без ручного fallback-ввода: при `undefined`/пустом/полностью исчерпанном
-  списке — явные `showErrorMessage`/`showInformationMessage` по причине и отмена операции, без
-  переключения на ручной ввод значения пользователем. Подробности и обоснование —
-  [architecture.md](./docs/architecture.md#паттерн-чтение-данных-из-базы-через-пакетный-конфигуратор-file-handoff).
-- **Открытие BSL-модулей:** только реальные `file://` документы (виртуальная схема `onec://` удалена). Readonly — через `ui/readonly/BslReadonlyGuard.ts`.
-- **Новая операция хранилища, меняющая файлы проекта** (аналог `repository.lock`/`update`/`unlock`/`commit`,
-  см. [repository-file-sync.md](./docs/repository-file-sync.md)): поток в `ui/commands/repository/*Sync.ts`
-  с внешними точками через `RepositoryFileSyncDeps` → занятость guard'а проверяется
-  (`ensureRepositoryGuardFree`) до первого диалога → ОДНА аренда `runExclusive` только на CLI хранилища,
-  `applyLock`/`applyUnlock` и выгрузку во временный каталог (`runDumpRounds`) → слияние
-  (`RepositoryMergePlanner`/`Applier`), модальные диалоги и диффы — после аренды → выгрузка никогда не пишется
-  прямо в проект, имена подчинённых объектов в `-listFile` берутся только из источника, соответствующего базе
-  (несуществующее имя роняет всю выгрузку) → новый вид подчинённого объекта с собственным XML — запись в
-  `REPOSITORY_SUBORDINATE_LAYOUT` (`RepositoryObjectNames.ts`), а не новый словарь → тест на копии реальной
-  фикстуры с имитацией платформы `src/test/suite/support/partialDumpFixture.ts`.
-- **Новая операция, запускающая Конфигуратор для полного импорта/обновления/применения конфигурации к
-  базе** (аналог `importConfigurations`/`updateChangedConfigurations`/`runPostRepositorySync`): захват —
-  через `services.configurationOperationGuard` (`runExclusive(title, op)` для одной атомарной цепочки
-  либо `tryAcquire(title)` + `release()` в `finally`, если между проверкой и запуском есть модальный
-  диалог, тогда отказ отдаётся вызовом `tryAcquireOrHeldBy(title)` — единая точка, сразу возвращающая
-  `heldBy` держателя) → сообщение о занятости — только `notifyConfigurationOperationBusy`
-  (`ui/commands/ext/configurationOperationBusy.ts`), **без `await`** (см. запрет №18) → фоновый (`void`)
-  путь без ожидающего пользователя логирует исход в `outputChannel` и уведомляет тем же способом, а не
-  падает молча → контекст enablement `v8vscedit.isUpdatingConfigurations` вручную нигде не выставлять —
-  его синхронизирует только `Container.wireConfigurationOperationContext()` подпиской на
-  `guard.onDidChangeBusy` → модальные диалоги подтверждения по возможности держать ВНЕ аренды (проверка
-  занятости — до диалога, повторный захват — после) → runner'ы Конфигуратора и диалоги внедряются через
-  `deps`-объект по умолчанию (образец — `RepositoryDatabaseSync.ts`/`RepositoryDatabaseSyncDeps`), чтобы
-  логику захвата можно было протестировать без реального процесса 1С → **если команда доступна MCP-мосту
-  `v8vscedit_execute_command`** (`V8McpServer`/`McpConfigLifecycleTools.ts`), она обязана на КАЖДОМ пути
-  возвращать `ConfigurationCommandOutcome` (`ui/commands/ext/configurationCommandOutcome.ts`:
-  `done`/`no-changes`/`no-targets`/`cancelled`/`busy`/`failed`), а при занятости — `{ status: 'busy',
-  heldBy }`; мост транслирует этот исход как есть и НЕ опрашивает guard заранее (второй источник правды +
-  TOCTOU между проверкой и запуском команды). Подробности —
-  [architecture.md](./docs/architecture.md#сериализация-операций-конфигуратора-с-базой-configurationoperationguard).
-- **Изменение жизненного цикла/безопасности встроенного MCP-сервера** (порт, идентичность процесса,
-  graceful shutdown, Host/Origin, отличается от «новый MCP-инструмент» из раздела выше): чистая логика —
-  в `infra/mcp/` (`McpServerIdentity`, `McpStartDecision`, `McpPortProbe`, `McpConflictPrompt`, `McpHost`,
-  без `vscode`) → тонкий адаптер конкретного эндпоинта/диалога — `ui/mcp/V8McpServer.ts` (HTTP-роутинг,
-  служебные `/identity`+`/shutdown` — не MCP-инструменты) и `Container` (чтение настроек `v8vscedit.mcp.*`,
-  показ диалога конфликта порта). См. [mcp-server-lifecycle.md](./docs/mcp-server-lifecycle.md).
-- **Новая часть объекта в панели «Изменения метаданных»** (`MetadataPartKind`, см.
-  [git-metadata-changes.md](./docs/git-metadata-changes.md)): случай в
-  `infra/git/MetadataChangeResolver.ts` (`resolveSubPath`/дизамбигуация слота через
-  `META_TYPES[kind].modules`) → при новом варианте схлопывания статуса — `combineStatus` в
-  `infra/git/MetadataChangeAggregator.ts` → метка/статус ЛИСТА в
-  `ui/views/changes/changesDtoBuilder.ts` (`partLabelOf`/`toGitStatus`, функции `buildObjectNode`/
-  `buildPartNode`; навигаторную иерархию НАД листом строит `changesTreeAssembler.ts` +
-  `MetadataChangesViewProvider.resolveAncestors`, этот слой не трогается для новой части) → тест на
-  реальном временном git-репозитории (образец — `support/changesFixtures.ts`). Каноничный путь владельца
-  — только через `domain/CanonicalNames.ts` (`canonicalRootPath`), не новый форматтер.
-- **Новая git-мутация над панелью изменений** (аналог stage/unstage/discard/commit): движок — функция
-  в `infra/git/GitWriteService.ts` (без `vscode`) → действие подключается веткой в
-  `MetadataChangesViewProvider.handleMessage` (значение `command` протокола) → то же значение `command`
-  добавляется на стороне ui в `src-ui/apps/changes/ChangesApp.vue` (пункт контекстного меню узла и/или
-  кнопка в `ChangesCommitBox.vue`) → узлы для действия строит `changesDtoBuilder` из `ChangesModel`
-  (`resolveChangeAddress` — единственное место, расшифровывающее `nodeId` обратно в файлы). Никаких
-  команд `package.json → contributes.commands`/меню `view/item/context` для этой панели не заводится —
-  весь UI-контракт живёт во внутреннем протоколе webview (см.
-  [git-metadata-changes.md](./docs/git-metadata-changes.md#формат-сообщений-протокола)).
-- **Новый триггер обновления панели изменений/декораций по git-событию** (аналог Git Extension API):
-  чистый селектор репозитория — `infra/git/GitRepositorySelector.ts` (без `vscode`) → тонкий наблюдатель
-  поверх события — `ui/git/` (образец `GitStateObserver.ts` + типовой фасад `gitExtensionApi.ts`) →
-  подключение в `Container` (образец `wireGitStateWatcher()`), с обязательным fallback fs-вотчером на
-  случай недоступности источника → единственный выход обоих триггеров —
-  `Container.scheduleDecorationRefresh()` (не заводить параллельный debounce/refresh-путь). См.
-  [git-metadata-changes.md](./docs/git-metadata-changes.md#триггеры-обновления-панели-и-декораций-git-extension-api--fallback-fs-вотчер).
-- **Новая возможность блока «История»** (граф git-коммитов внутри панели «Изменения метаданных», НЕ
-  отдельная вкладка/провайдер, см. [git-history-graph.md](./docs/git-history-graph.md)), в зависимости от
-  слоя:
-  - новая колонка/поле графа (например автор-аватар, статус CI) — `RawCommit`/`GitLogParser` (если
-    берётся из `git log`) → `GraphRowDto` в `ui/views/history/historyGraphDtoBuilder.ts` →
-    `src-ui/shared/types/history.ts` (зеркало) → отрисовка в `src-ui/apps/changes/CommitGraph.vue`;
-  - новая команда протокола (аналог `selectCommit`/`openCommitDiff`/`historyLoadMore`/`historyRefresh`) —
-    `MetadataChangesViewProvider.handleMessage` (ветка `switch (message.command)`) → та же строка
-    `command` добавляется в `src-ui/apps/changes/ChangesApp.vue` (`sendCommand`); чистая бизнес-логика
-    команды — в `historyGraphController.ts`/`ChangesHistorySection` (`ui/views/changes/
-    changesHistorySection.ts`), а не в самом провайдере;
-  - изменение алгоритма раскладки дорожек — только `infra/git/GitGraphLayout.ts` (чистая функция без
-    `vscode`), тест на реальном временном git-репозитории с ветвлением/merge (образец —
-    `support/changesFixtures.ts:buildHistoryRepo`);
-  - новое поле/метод состояния графа (пагинация, выбор коммита) — `ChangesHistorySection`
-    (`ui/views/changes/changesHistorySection.ts`), а не поля самого `MetadataChangesViewProvider` —
-    провайдер остаётся тонким диспетчером команд поверх этого helper'а;
-  - новая часть/статус объекта в дереве изменений коммита переиспользует ТОТ ЖЕ путь, что и панель
-    изменений (см. пункт выше «Новая часть объекта в панели «Изменения метаданных»»), т.к.
-    `buildCommitChangesSection` вызывает те же `buildObjectNode`/`buildPartNode`/`synthesizeAncestors` —
-    отдельного реестра для блока истории не заводится.
-- **Декомпозиция God-класса (косметика, без изменения поведения):** characterization/байт-golden-тест ДО дробления (фиксирует текущий выход) → вынос по доменам/ответственности в подпапку того же слоя (`ui/mcp/registration/`, `infra/xml/<область>/`) через `git mv`/перенос функций без изменения публичного API фасада → диспетчер-`switch` → таблица (данные в `META_TYPES`/спец-реестр infra, поведение — функции поверх) → эталоны golden при этом НЕ редактируются: их правка означает регресс поведения, а не косметику. Для XML-генераторов (`MetadataXmlCreator`, `FormBuilders`) байт-golden обязателен как входное условие (см. запрет №17).
+Для каждого сценария там указано, какие файлы трогать; если требуется править сверх списка — задача решается в другом слое. `architect` и `reviewer` сверяются с рецептом обязательно. Сценарии: новый тип метаданных; слот модуля (`ModuleSlot`); дочерний тег (`ChildTag`); контейнерный дочерний тип с вложенными листьями (ТЧ→Колонка, HTTPСервис→URLШаблон→Метод); схема свойств; правило состава свойств типизированного поля; команда; builder узла; декорация узла; view/webview; сервис инфры; возможность LSP; настройка; watcher; внешняя интеграция (vrunner); чтение данных из базы через пакетный Конфигуратор; открытие BSL-модулей; операция хранилища, меняющая файлы проекта; операция Конфигуратора с базой (`ConfigurationOperationGuard`); жизненный цикл встроенного MCP-сервера; часть объекта в панели «Изменения метаданных»; git-мутация над панелью изменений; триггер обновления панели по git-событию; возможность блока «История»; декомпозиция God-класса; перенос функции из 1С-скилов в расширение.
 
 ## Запреты и анти-паттерны
 
@@ -460,11 +223,11 @@ Vue-приложения (сборка `vite.webview.config.ts`, проверк�
 ## TDD и покрытие
 
 1. **Любое изменение поведения начинается с теста** (красный → код → зелёный).
-2. **Покрытие кода, ЗАТРОНУТОГО изменением, — 100%** по строкам, веткам, функциям, операторам. Гейт задачи — `npm run coverage:changed` (patch coverage: для новых файлов — все исполняемые строки, для изменённых — только добавленные/изменённые строки диффа). По умолчанию сравнение с `HEAD` (только незакоммиченное); если хотя бы часть изменений задачи закоммичена, нужна явная база (иначе гейт проверит лишь незакоммиченный остаток) — `COVERAGE_BASE_REF=main npm run coverage:changed` (сравнение с точкой ответвления `git merge-base <ref> HEAD`; явная база без изменённых production-файлов или неизвестный ref — ошибка вызова, exit 2). Если `npm test` внутри гейта падает на унаследованных/не связанных с патчем тестах — сначала классифицировать падения, затем `npm run coverage:changed -- --ignore-test-failures` (или `COVERAGE_IGNORE_TEST_FAILURES=1`); флаг не подменяет проверку регресса — она делается отдельным полным `npm test`. Глобальный `npm run coverage --100` сейчас красный из-за унаследованного легаси-долга в несвязанных областях (`ui/tree/nodeBuilders/*`, `ExtensionCommandRunner`, `RepositoryCommandRunner`, `InitializeProjectCommand`, `infra/xml/form/*` и др.) — это **известное состояние, не предмет каждой задачи**; не трать время, доказывая это заново через stash/baseline. `Container.ts`/`extension.ts` исполняются в Extension Host и c8 не инструментируются — покрываются интеграционно, из гейта изменённых файлов исключены.
-3. **Заглушки/фиктивные ассёрты/тесты ради покрытия запрещены.** Тест проверяет реальное поведение на настоящих XML-фикстурах (`example/2.20/src/cf`, `example/2.21/src/cf`, `example/2.21/src/cfe/EVOLC`), реальных временных файлах или реальном процессе; mock/stub допустимы только для внешней недоступной системы с обоснованием. Тесты **детерминированы** — без гонок/угадывания таймингов; учитывай фоновое поведение SDK/клиентов.
-4. Непокрываемую из-за VS Code API логику выносить в `domain/`/`infra/` и покрывать unit-тестом; тонкий UI-адаптер — интеграционным тестом. Осознанно недостижимую защитную ветку — `/* c8 ignore */` с обоснованием, а не оставлять пробел для qa.
-5. **Покрытие новых файлов доводится до 100% за один проход автора тестов** (перечислить ветки заранее: ошибки, таймауты, guard'ы, граничные входы; параметризовать по конечным множествам значений — enum/настройки, напр. `host ∈ {127.0.0.1, localhost, ::1}`), чтобы не гонять лишний ре-цикл через qa.
-6. Перед завершением задачи — `npm test` (регресс) и `npm run coverage:changed` (100% на изменённом, при необходимости с `COVERAGE_BASE_REF`/`--ignore-test-failures`, см. раздел «Команды»). Если нельзя выполнить локально — зафиксировать причину, задачу не считать завершённой.
+2. **Покрытие кода, ЗАТРОНУТОГО изменением, — 100%** по строкам, веткам, функциям, операторам. Гейт — `npm run coverage:changed` (patch coverage: новые файлы целиком, изменённые — только строки диффа), в конвейере — через `.claude/scripts/qa-gate.sh`, который всегда передаёт `COVERAGE_BASE_REF=<база>` (иначе сравнение с `HEAD` видит лишь незакоммиченное). `--ignore-test-failures` (`COVERAGE_IGNORE_TEST_FAILURES=1`) — только после классификации падений как унаследованных; флаг не подменяет проверку регресса, она делается отдельным полным `npm test`. Глобальный `npm run coverage --100` красный из-за легаси-долга (`ui/tree/nodeBuilders/*`, `ExtensionCommandRunner`, `RepositoryCommandRunner`, `InitializeProjectCommand`, `infra/xml/form/*` и др.) — **известное состояние, не предмет задачи**; не доказывать это заново через stash/baseline. `Container.ts`/`extension.ts` c8 не инструментирует — они покрываются интеграционно и исключены из гейта.
+3. **Заглушки/фиктивные ассёрты/тесты ради покрытия запрещены.** Тест проверяет реальное поведение на настоящих XML-фикстурах (`example/2.20/src/cf`, `example/2.21/src/cf`, `example/2.21/src/cfe/EVOLC`), реальных временных файлах или реальном процессе; mock/stub — только для недоступной внешней системы с обоснованием. Тесты **детерминированы** — без гонок/угадывания таймингов; учитывай фоновое поведение SDK/клиентов.
+4. Непокрываемую из-за VS Code API логику выносить в `domain/`/`infra/` и покрывать unit-тестом; тонкий UI-адаптер — интеграционным тестом. Осознанно недостижимую защитную ветку — `/* c8 ignore */` с обоснованием.
+5. **Все тесты задачи — за один проход** (ветки заранее: ошибки, таймауты, guard'ы, граничные входы; параметризация по конечным множествам — enum/настройки, напр. `host ∈ {127.0.0.1, localhost, ::1}`), чтобы не гонять ре-цикл через гейт.
+6. Перед завершением задачи QA-гейт — GREEN. Если его нельзя выполнить локально — зафиксировать причину, задачу не считать завершённой.
 
 ## Рабочий процесс и отладка
 
@@ -487,33 +250,7 @@ Vue-приложения (сборка `vite.webview.config.ts`, проверк�
 
 ## Известные технические долги
 
-1. `CommandRegistry.ts` — один файл, пока не разбит на `open/`, `properties/`, `support/`, `ext/`.
-2. `TreeNode.ts` не разделён на `TreeNodeModel` (POJO) + vscode-обёртку.
-3. Миграция XML-парсинга на `fast-xml-parser` (внутри `infra/xml/*` — регулярки), без изменения публичного API ридеров.
-4. Сильная типизация дерева: `TreeNodeModel` → discriminated union по `kind`.
-5. `ui/views/properties/_types.ts` — окончательно отделить типы панели свойств.
-6. `infra/git/GitStatusReader.ts` дублирует запуск `git status`/поиск корня с `GitMetadataStatusService`
-   (панель «Изменения метаданных» vs декорации навигатора) — кандидат на объединение, см.
-   [git-metadata-changes.md](./docs/git-metadata-changes.md#известные-ограничения).
-7. Панель «Изменения метаданных» показывает дерево навигаторной иерархии, но лист (объект) раскрывается
-   только до глубины «объект → изменённая часть» (модуль/Свойства/форма), без разворота части до
-   атрибута/колонки — см. [git-metadata-changes.md](./docs/git-metadata-changes.md#известные-ограничения).
-8. Панель «Изменения метаданных»: `findNavigatorNode` ищет узел объекта в `MetadataTreeProvider`
-   отдельным DFS-обходом на КАЖДУЮ изменённую группу (O(изменения × размер дерева) на `refresh()`) —
-   кандидат на индексацию дерева одним проходом; `synthesizeAncestors` для удалённых объектов группы
-   `documents-branch` не восстанавливает промежуточную ветвь «Документы» — см.
-   [git-metadata-changes.md](./docs/git-metadata-changes.md#известные-ограничения).
-9. Блок «История» панели «Изменения метаданных»: пагинация графа — полная перераскладка растущего окна
-   `git log --max-count` на каждый `historyLoadMore` (без курсора/`--skip`, осознанно ради детерминизма
-   дорожек); резолвинг принадлежности файлов коммита объектам идёт по ТЕКУЩЕМУ списку `configRoots`, а не
-   по структуре выгрузки на момент коммита — см. [git-history-graph.md](./docs/git-history-graph.md#известные-ограничения).
-10. Хранилище (`infra/repository/`): `ONE_C_TYPE_NAMES` (русские имена типов для `-listFile`/`Objects.xml`) и
-    `REPOSITORY_SUBORDINATE_LAYOUT` (каталоги и имена подчинённых объектов с собственным XML — перерасчёты,
-    таблицы, кубы, таблицы измерения не являются `MetaKind`) живут вне `META_TYPES`; при появлении этих видов в
-    навигаторе данные переезжают в реестр. `SupportInfoService.CHILD_FOLDERS_WITH_OWN_XML` дублирует часть
-    таблицы (issue #47). Команды `repository.bind`/`create`/`unbind`/`report`/`dump`/`users`/`label` идут мимо
-    `ConfigurationOperationGuard` (issue #40). См.
-    [repository-file-sync.md](./docs/repository-file-sync.md#известные-ограничения).
+Перечень — [tech-debt.md](./docs/tech-debt.md). Сверяться при планировании задач в затронутых областях (`CommandRegistry`, `TreeNode`, XML-парсинг на регулярках, панель «Изменения метаданных», блок «История», хранилище).
 
 ## `.cursor/`, `.codex/`, `.claude/skills/` — это доменные 1С-скилы, а не разработка расширения
 
