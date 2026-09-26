@@ -10,7 +10,7 @@
  * `a,b,uuid,uuid` с ОДИНАКОВЫМИ uuid; пара РАЗНЫХ uuid записью не является.
  *
  * Фикстуры реальные: `example/2.20/src/cf/Ext/ParentConfigurations.bin` и
- * `example/2.21/src/cf/Ext/ParentConfigurations.bin` (228 записей одной и той же
+ * `example/2.21/src/cf/Ext/ParentConfigurations.bin` (230 записей одной и той же
  * поставки, флаг запрета изменений = 0) и
  * `example/support/changes-forbidden/ParentConfigurations.bin` (та же поставка,
  * флаг = 1). Синтетические тексты — только там, где реальной фикстуры для
@@ -48,9 +48,9 @@ function countByCode(records: readonly ParentConfigurationsRecord[]): Record<num
 const REAL_VERSIONS: ('2.20' | '2.21')[] = ['2.20', '2.21'];
 
 suite('parseParentConfigurations', () => {
-  suite('реальная фикстура (228 записей одной поставки)', () => {
+  suite('реальная фикстура (230 записей одной поставки)', () => {
     for (const version of REAL_VERSIONS) {
-      test(`example/${version}/src/cf — флаг снят, 1 поставщик, 228 записей, коды 205/14/9`, () => {
+      test(`example/${version}/src/cf — флаг снят, 1 поставщик, 230 записей, коды 193/25/12`, () => {
         const configRoot = EXAMPLE_CF_ROOTS[version];
         const text = readBin(configRoot);
         const result = parseParentConfigurations(text);
@@ -59,13 +59,13 @@ suite('parseParentConfigurations', () => {
 
         assert.strictEqual(result.info.changesForbidden, false);
         assert.strictEqual(result.info.vendorCount, 1);
-        assert.strictEqual(result.info.declaredRecordCount, 228);
-        assert.strictEqual(result.info.records.length, 228);
+        assert.strictEqual(result.info.declaredRecordCount, 230);
+        assert.strictEqual(result.info.records.length, 230);
 
         for (const r of result.info.records) {
           assert.ok([0, 1, 2].includes(r.code), `неожиданный код: ${String(r.code)}`);
         }
-        assert.deepStrictEqual(countByCode(result.info.records), { 0: 205, 1: 14, 2: 9 });
+        assert.deepStrictEqual(countByCode(result.info.records), { 0: 193, 1: 25, 2: 12 });
 
         const configUuid = readRootUuid(path.join(configRoot, 'Configuration.xml'));
         const integrationServiceUuid = readRootUuid(
@@ -88,8 +88,8 @@ suite('parseParentConfigurations', () => {
     assert.strictEqual(result.ok, true, `ожидался успешный разбор: ${JSON.stringify(result)}`);
 
     assert.strictEqual(result.info.changesForbidden, true);
-    assert.strictEqual(result.info.declaredRecordCount, 228);
-    assert.strictEqual(result.info.records.length, 228);
+    assert.strictEqual(result.info.declaredRecordCount, 230);
+    assert.strictEqual(result.info.records.length, 230);
 
     const configUuid = readRootUuid(path.join(EXAMPLE_CF_ROOTS['2.21'], 'Configuration.xml'));
     const kontragentyUuid = readRootUuid(path.join(EXAMPLE_CF_ROOTS['2.21'], 'Catalogs', 'Контрагенты.xml'));
@@ -118,8 +118,8 @@ suite('parseParentConfigurations', () => {
 
         const result = parseParentConfigurations(text);
         assert.strictEqual(result.ok, true, `ожидался успешный разбор: ${JSON.stringify(result)}`);
-        assert.strictEqual(result.info.declaredRecordCount, 228);
-        assert.strictEqual(result.info.records.length, 228);
+        assert.strictEqual(result.info.declaredRecordCount, 230);
+        assert.strictEqual(result.info.records.length, 230);
       });
     }
   });

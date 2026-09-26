@@ -66,7 +66,7 @@
 			<ChoiceHistoryOnInput>Auto</ChoiceHistoryOnInput>
 			<DefaultObjectForm/>
 			<DefaultRecordForm/>
-			<DefaultListForm/>
+			<DefaultListForm>ExternalDataSource.ИнтернетМагазин.Table.Заказы.Form.ФормаСписка</DefaultListForm>
 			<DefaultChoiceForm/>
 			<ObjectPresentation/>
 			<ExtendedObjectPresentation/>
@@ -411,6 +411,7 @@
 					<AllowNull>true</AllowNull>
 				</Properties>
 			</Field>
+			<Form>ФормаСписка</Form>
 		</ChildObjects>
 	</Table>
 </MetaDataObject>

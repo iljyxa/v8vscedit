@@ -32,7 +32,10 @@ Issue #1 форка. Команды хранилища `v8vscedit.repository.loc
 удалось определить имя (`label` не задан), `resolveFullName` возвращает `null` без отката на владельца —
 команда завершается ошибкой «не удалось сформировать полное имя объекта».
 
-Раскладка подчинённых — `REPOSITORY_SUBORDINATE_LAYOUT` (`infra/repository/RepositoryObjectNames.ts`):
+Список подкаталогов подчинённых со своим XML — единственный источник `SUBORDINATE_OBJECT_FOLDERS`
+(`infra/fs/SubordinateObjectLayout.ts`); его же использует `SupportInfoService` для определения режима
+поддержки BSL-модулей (см. [bsl-language-support.md](./bsl-language-support.md#определение-режима-поддержки-bsl-модуля)).
+Раскладка подчинённых для хранилища — `REPOSITORY_SUBORDINATE_LAYOUT` (`infra/repository/RepositoryObjectNames.ts`):
 
 | Тег ChildObjects | Каталог | Имя в `-listFile` / `Objects.xml` |
 |---|---|---|

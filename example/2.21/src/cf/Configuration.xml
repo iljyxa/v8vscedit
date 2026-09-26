@@ -266,26 +266,26 @@
 		</Properties>
 		<ChildObjects>
 			<Language>Русский</Language>
-			<Subsystem>Продажи</Subsystem>
-			<Subsystem>Персонал</Subsystem>
-			<Subsystem>Закупки</Subsystem>
 			<Subsystem>АдминистрированиеСервиса</Subsystem>
+			<Subsystem>Закупки</Subsystem>
+			<Subsystem>Персонал</Subsystem>
+			<Subsystem>Продажи</Subsystem>
 			<StyleItem>ЭлементСтиля1</StyleItem>
 			<Style>Стиль1</Style>
 			<CommonPicture>ОбщаяКартинка1</CommonPicture>
-			<SessionParameter>ТекущаяОрганизация</SessionParameter>
 			<SessionParameter>АвторизованныйПользователь</SessionParameter>
+			<SessionParameter>ТекущаяОрганизация</SessionParameter>
 			<SessionParameter>ТекущийПользователь</SessionParameter>
 			<Role>Администратор</Role>
-			<Role>Продавец</Role>
 			<Role>Кладовщик</Role>
+			<Role>Продавец</Role>
 			<CommonTemplate>Макет</CommonTemplate>
 			<FilterCriterion>ДокументыКонтрагента</FilterCriterion>
+			<CommonModule>GoogleПереводчик</CommonModule>
+			<CommonModule>ОбновлениеЦен</CommonModule>
 			<CommonModule>ОбщегоНазначения</CommonModule>
 			<CommonModule>РаботаСКонтрагентами</CommonModule>
 			<CommonModule>ЧатБотСервер</CommonModule>
-			<CommonModule>ОбновлениеЦен</CommonModule>
-			<CommonModule>GoogleПереводчик</CommonModule>
 			<CommonAttribute>Организация</CommonAttribute>
 			<ExchangePlan>Мобильные</ExchangePlan>
 			<XDTOPackage>ПакетXDTO1</XDTOPackage>
@@ -306,40 +306,40 @@
 			<CommandGroup>Информация</CommandGroup>
 			<Constant>ИспользоватьВозвраты</Constant>
 			<CommonForm>АЛКОВводРеквизитовОП</CommonForm>
-			<Catalog>Контрагенты</Catalog>
-			<Catalog>Пользователи</Catalog>
-			<Catalog>Номенклатура</Catalog>
-			<Catalog>Склады</Catalog>
-			<Catalog>Организации</Catalog>
-			<Catalog>ПричиныВозврата</Catalog>
 			<Catalog>АвансовыйОтчетПрисоединенныеФайлы</Catalog>
-			<Catalog>Валюты</Catalog>
-			<Catalog>Банки</Catalog>
-			<Catalog>Регионы</Catalog>
-			<Catalog>Товары</Catalog>
-			<Catalog>РолиКонтактныхЛиц</Catalog>
 			<Catalog>АвтоматическиеСкидки</Catalog>
-			<Catalog>КолонкиКалендарейСотрудников</Catalog>
+			<Catalog>Банки</Catalog>
+			<Catalog>Валюты</Catalog>
 			<Catalog>ВидыРесурсовПредприятия</Catalog>
+			<Catalog>КолонкиКалендарейСотрудников</Catalog>
+			<Catalog>Контрагенты</Catalog>
+			<Catalog>Номенклатура</Catalog>
+			<Catalog>Организации</Catalog>
+			<Catalog>Пользователи</Catalog>
+			<Catalog>ПричиныВозврата</Catalog>
+			<Catalog>Регионы</Catalog>
+			<Catalog>РолиКонтактныхЛиц</Catalog>
+			<Catalog>Склады</Catalog>
+			<Catalog>Товары</Catalog>
 			<Catalog>УдалитьСотрудникиДляИнтеграцииБЗКБУНФ</Catalog>
+			<Document>АвансовыйОтчет</Document>
+			<Document>ВозвратТовара</Document>
+			<Document>Заказ</Document>
 			<Document>ПриходТовара</Document>
 			<Document>РасходТовара</Document>
-			<Document>ВозвратТовара</Document>
-			<Document>АвансовыйОтчет</Document>
-			<Document>Заказ</Document>
 			<DocumentJournal>ДокументыСклада</DocumentJournal>
 			<Enum>PushУведомления</Enum>
-			<Report>Пользователи</Report>
 			<Report>Запасы</Report>
+			<Report>Пользователи</Report>
 			<Report>ПраваДоступа</Report>
 			<DataProcessor>Обработка1</DataProcessor>
-			<InformationRegister>ЦеныНоменклатуры</InformationRegister>
 			<InformationRegister>КонтактнаяИнформация</InformationRegister>
-			<InformationRegister>ПараметрыФункциональныхОпций</InformationRegister>
 			<InformationRegister>КурсыВалют</InformationRegister>
-			<AccumulationRegister>ТоварыНаСкладах</AccumulationRegister>
-			<AccumulationRegister>Взаиморасчеты</AccumulationRegister>
+			<InformationRegister>ПараметрыФункциональныхОпций</InformationRegister>
+			<InformationRegister>ЦеныНоменклатуры</InformationRegister>
 			<AccumulationRegister>БонусныеБаллы</AccumulationRegister>
+			<AccumulationRegister>Взаиморасчеты</AccumulationRegister>
+			<AccumulationRegister>ТоварыНаСкладах</AccumulationRegister>
 			<ChartOfCharacteristicTypes>ВидыСубконтоХозрасчетные</ChartOfCharacteristicTypes>
 			<ChartOfAccounts>Хозрасчетный</ChartOfAccounts>
 			<AccountingRegister>Хозрасчетный</AccountingRegister>

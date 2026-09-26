@@ -1,5 +1,6 @@
 import { CHILD_TAG_CONFIG } from '../../domain/ChildTag';
 import { META_TYPES, type MetaKind } from '../../domain/MetaTypes';
+import { SUBORDINATE_OBJECT_FOLDERS, type SubordinateObjectTag } from '../fs/SubordinateObjectLayout';
 import type { RepositoryTarget } from './RepositoryService';
 
 /**
@@ -106,10 +107,10 @@ export function parseRepositoryFullName(fullName: string): { kind: MetaKind; nam
 
 /**
  * Подчинённые объекты с собственным XML: у каждого свои захват, строка `-listFile`,
- * запись ConfigDumpInfo и каталог выгрузки. Команды сюда не входят — платформа не
- * сохраняет их в отдельный файл, они выгружаются вместе с владельцем.
+ * запись ConfigDumpInfo и каталог выгрузки. Состав видов и их папки — общие с
+ * сервисом поддержки ({@link SUBORDINATE_OBJECT_FOLDERS}).
  */
-export type RepositorySubordinateTag = 'Form' | 'Template' | 'Recalculation' | 'Table' | 'Cube' | 'DimensionTable' | 'Subsystem';
+export type RepositorySubordinateTag = SubordinateObjectTag;
 
 export interface RepositorySubordinateLayout {
   /** Подкаталог владельца в выгрузке. */
@@ -127,20 +128,21 @@ function requireRegistryValue(value: string | undefined, what: string): string {
 }
 
 /**
- * Раскладка единиц-подчинённых. Форма, макет и подсистема выводятся из реестров
- * (CHILD_TAG_CONFIG, ONE_C_TYPE_NAMES, META_TYPES); перерасчёт, таблица, куб и
- * таблица измерения — не MetaKind, поэтому заданы литералами (технический долг:
- * при появлении этих видов в навигаторе папки переезжают в META_TYPES).
+ * Раскладка единиц-подчинённых: папка — из общей раскладки выгрузки, русское имя
+ * формы, макета и подсистемы — из реестров (CHILD_TAG_CONFIG, ONE_C_TYPE_NAMES);
+ * перерасчёт, таблица, куб и таблица измерения — не MetaKind, их имена заданы
+ * литералами (технический долг: при появлении этих видов в навигаторе переезжают
+ * в реестр).
  */
 export const REPOSITORY_SUBORDINATE_LAYOUT: Readonly<Record<RepositorySubordinateTag, RepositorySubordinateLayout>> = {
-  Form: { folder: 'Forms', oneCName: CHILD_TAG_CONFIG.Form.pathSegment },
-  Template: { folder: 'Templates', oneCName: CHILD_TAG_CONFIG.Template.pathSegment },
-  Recalculation: { folder: 'Recalculations', oneCName: 'Перерасчет' },
-  Table: { folder: 'Tables', oneCName: 'Таблица' },
-  Cube: { folder: 'Cubes', oneCName: 'Куб' },
-  DimensionTable: { folder: 'DimensionTables', oneCName: 'ТаблицаИзмерения' },
+  Form: { folder: SUBORDINATE_OBJECT_FOLDERS.Form, oneCName: CHILD_TAG_CONFIG.Form.pathSegment },
+  Template: { folder: SUBORDINATE_OBJECT_FOLDERS.Template, oneCName: CHILD_TAG_CONFIG.Template.pathSegment },
+  Recalculation: { folder: SUBORDINATE_OBJECT_FOLDERS.Recalculation, oneCName: 'Перерасчет' },
+  Table: { folder: SUBORDINATE_OBJECT_FOLDERS.Table, oneCName: 'Таблица' },
+  Cube: { folder: SUBORDINATE_OBJECT_FOLDERS.Cube, oneCName: 'Куб' },
+  DimensionTable: { folder: SUBORDINATE_OBJECT_FOLDERS.DimensionTable, oneCName: 'ТаблицаИзмерения' },
   Subsystem: {
-    folder: requireRegistryValue(META_TYPES.Subsystem.folder, 'META_TYPES.Subsystem.folder'),
+    folder: SUBORDINATE_OBJECT_FOLDERS.Subsystem,
     oneCName: requireRegistryValue(ONE_C_TYPE_NAMES.Subsystem, 'ONE_C_TYPE_NAMES.Subsystem'),
   },
 };

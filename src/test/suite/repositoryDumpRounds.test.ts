@@ -144,10 +144,11 @@ suite('RepositoryDumpRounds — expandSubordinateUnits (issue #1, раздел 1
 suite('RepositoryDumpRounds — createSubsystemExpansion (issue #1, раздел 10, Р4, P1)', () => {
   const SUBSYSTEM_XML = path.join(EXAMPLE_CF, 'Subsystems', 'Продажи.xml');
 
-  test('подсистема: раскрывается в Content (переведённые в русский fullName), без вложенных (в фикстуре их нет — F1)', () => {
+  test('подсистема: раскрывается в Content (переведённые в русский fullName) и вложенные подсистемы', () => {
     const expansion = createSubsystemExpansion(true);
     const result = expansion('Подсистема.Продажи', SUBSYSTEM_XML);
     assert.deepStrictEqual([...result].sort(), [
+      'Подсистема.Продажи.Подсистема.Розница',
       'РегистрНакопления.БонусныеБаллы',
       'РегистрНакопления.Взаиморасчеты',
       'РегистрНакопления.ТоварыНаСкладах',
@@ -365,12 +366,13 @@ suite('RepositoryDumpRounds — runDumpRounds: раунд 0 успешен (issu
         'ExternalDataSources/ИнтернетМагазин/Cubes/Продажи.xml': 'h2',
         'ExternalDataSources/ИнтернетМагазин/Cubes/Продажи/DimensionTables/Товары.xml': 'h3',
         'ExternalDataSources/ИнтернетМагазин/Cubes/Продажи/DimensionTables/Регионы.xml': 'h4',
+        'ExternalDataSources/ИнтернетМагазин/Tables/Заказы/Forms/ФормаСписка.xml': 'h5',
       };
       // buildOptimisticDumpList раскрывает список раунда 0 по РЕАЛЬНОМУ ПРОЕКТНОМУ XML
       // (не по временной выгрузке): owner→{Table,Cube} читается из проектного
-      // ИнтернетМагазин.xml, а Cube→{DimTable×2} — из проектного Cubes/Продажи.xml
+      // ИнтернетМагазин.xml, Cube→{DimTable×2} — из проектного Cubes/Продажи.xml, а Table→Form — из Tables/Заказы.xml
       // (тот же реальный файл, что уже лежит в фикстуре) за один и тот же BFS-проход,
-      // ДО первого запуска выгрузки. Поэтому при непустом, но ПОЛНОМ хеш-кэше (все 4
+      // ДО первого запуска выгрузки. Поэтому при непустом, но ПОЛНОМ хеш-кэше (все 5
       // подчинённых уже известны с прошлой синхронизации) весь список собирается сразу
       // и выгружается ровно одним вызовом (10.1.5: «подчинённые в хеш-кэше → 1 вызов»).
       const result = await runDumpRounds({
@@ -391,6 +393,7 @@ suite('RepositoryDumpRounds — runDumpRounds: раунд 0 успешен (issu
         KNOWN_FIXTURE_UNITS.internetMagazinProdazhi,
         KNOWN_FIXTURE_UNITS.internetMagazinTovary,
         KNOWN_FIXTURE_UNITS.internetMagazinRegiony,
+        KNOWN_FIXTURE_UNITS.internetMagazinZakazyFormaSpiska,
       ].sort());
       result.dispose();
     } finally {

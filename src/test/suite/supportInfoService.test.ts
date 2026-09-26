@@ -58,13 +58,16 @@ suite('SupportInfoService', () => {
  * Реальная выгрузка `example/2.20` и `example/2.21` — одна и та же поставка
  * (`example/tools/support-rules.json`): Configuration, Document.ПриходТовара,
  * AccumulationRegister.ТоварыНаСкладах — editable (код `a`=1); Catalog.Контрагенты
- * — снят с поддержки (код `a`=2 → SupportMode.Removed, issue #21); всё
+ * — снят с поддержки (код `a`=2 → SupportMode.Removed, issue #21); подчинённые
+ * со своим XML с режимом, отличным от родителя (issue #47): Таблица.Заказы и
+ * Перерасчет.Перерасчеты, Подсистема.Продажи.Подсистема.Розница — editable,
+ * форма таблицы Заказы — locked, ТаблицаИзмерения.Регионы — removed; всё
  * остальное — locked (код `a`=0), включая последнюю запись файла
  * (IntegrationServices/СервисИнтеграции1) — регрессия «последней записи»,
  * которую старая реализация не находила вовсе (искала совпадение до конца
  * файла без учёта хвоста).
  */
-suite('SupportInfoService — реальная фикстура (228 записей одной поставки)', () => {
+suite('SupportInfoService — реальная фикстура (230 записей одной поставки)', () => {
   const versions: ('2.20' | '2.21')[] = ['2.20', '2.21'];
 
   for (const version of versions) {
@@ -163,6 +166,49 @@ suite('SupportInfoService — реальная фикстура (228 запис�
         const bslPath = path.join(configRoot, 'HTTPServices', 'Chatbot', 'Ext', 'Module.bsl');
         assert.strictEqual(service.getSupportMode(bslPath), SupportMode.Locked);
       });
+
+      // Подчинённые со своим XML (issue #47): режим каждого задан в support-rules.json
+      // отличным от родителя, чтобы резолв к родителю давал заведомо другой ответ.
+      const source = ['ExternalDataSources', 'ИнтернетМагазин'];
+      const subordinateCases: { label: string; relPath: string[]; expected: SupportMode }[] = [
+        {
+          label: 'модуль таблицы внешнего источника (Таблица.Заказы editable, источник locked) → Editable',
+          relPath: [...source, 'Tables', 'Заказы', 'Ext', 'ManagerModule.bsl'],
+          expected: SupportMode.Editable,
+        },
+        {
+          label: 'модуль формы таблицы (Форма.ФормаСписка locked, таблица editable) → Locked',
+          relPath: [...source, 'Tables', 'Заказы', 'Forms', 'ФормаСписка', 'Ext', 'Form', 'Module.bsl'],
+          expected: SupportMode.Locked,
+        },
+        {
+          label: 'модуль таблицы измерения куба (ТаблицаИзмерения.Регионы removed, куб locked) → Removed',
+          relPath: [...source, 'Cubes', 'Продажи', 'DimensionTables', 'Регионы', 'Ext', 'ManagerModule.bsl'],
+          expected: SupportMode.Removed,
+        },
+        {
+          label: 'XML перерасчёта (Перерасчет.Перерасчеты editable, регистр locked) → Editable',
+          relPath: ['CalculationRegisters', 'Начисления', 'Recalculations', 'Перерасчеты.xml'],
+          expected: SupportMode.Editable,
+        },
+        {
+          label: 'XML вложенной подсистемы (Подсистема.Продажи.Подсистема.Розница editable, родитель locked) → Editable',
+          relPath: ['Subsystems', 'Продажи', 'Subsystems', 'Розница.xml'],
+          expected: SupportMode.Editable,
+        },
+        {
+          label: 'XML родительской подсистемы Продажи → Locked',
+          relPath: ['Subsystems', 'Продажи.xml'],
+          expected: SupportMode.Locked,
+        },
+      ];
+      for (const { label, relPath, expected } of subordinateCases) {
+        test(label, () => {
+          const filePath = path.join(configRoot, ...relPath);
+          assert.ok(fs.existsSync(filePath), `нет файла фикстуры ${relPath.join('/')}`);
+          assert.strictEqual(service.getSupportMode(filePath), expected);
+        });
+      }
     });
   }
 });

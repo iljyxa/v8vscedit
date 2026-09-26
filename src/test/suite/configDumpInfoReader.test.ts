@@ -21,21 +21,21 @@ const EXAMPLE_2_20_CF = path.resolve(__dirname, '../../../example/2.20/src/cf');
 const EXAMPLE_EVOLC = path.resolve(__dirname, '../../../example/2.21/src/cfe/EVOLC');
 
 suite('ConfigDumpInfoReader — parseConfigDumpInfo/readConfigDumpInfoFile', () => {
-  test('2.21 cf: 149 записей с configVersion, Catalog.Валюты и Configuration.*.SessionModule присутствуют', () => {
+  test('2.21 cf: 154 записи с configVersion, Catalog.Валюты и Configuration.*.SessionModule присутствуют', () => {
     const map = readConfigDumpInfoFile(path.join(EXAMPLE_2_21_CF, 'ConfigDumpInfo.xml'));
     assert.ok(map, 'Файл фикстуры должен разбираться.');
-    assert.strictEqual(map.size, 149);
-    assert.strictEqual(map.get('Catalog.Валюты'), 'b2c1740596102948bcc8dafa5528a56e00000000');
-    assert.strictEqual(map.get('Configuration.ТорговыйУчет.SessionModule'), 'aff050ed4cbe8945b1cd4679b6d3dcaf00000000');
+    assert.strictEqual(map.size, 154);
+    assert.strictEqual(map.get('Catalog.Валюты'), 'bb71d1cc90d8644484433b5f58f0efb600000000');
+    assert.strictEqual(map.get('Configuration.ТорговыйУчет.SessionModule'), 'a65cae10b6c5a14282c7261c2b557fd900000000');
     // Вложенная ссылка на реквизит без атрибута configVersion не должна попасть в карту.
     assert.strictEqual(map.has('AccumulationRegister.БонусныеБаллы.Attribute.ВидОперации'), false);
   });
 
-  test('2.20 cf: тот же состав (149 записей с configVersion), Catalog.Валюты сохраняет значение', () => {
+  test('2.20 cf: тот же состав (154 записи с configVersion), Catalog.Валюты сохраняет значение', () => {
     const map = readConfigDumpInfoFile(path.join(EXAMPLE_2_20_CF, 'ConfigDumpInfo.xml'));
     assert.ok(map);
-    assert.strictEqual(map.size, 149);
-    assert.strictEqual(map.get('Catalog.Валюты'), 'b2c1740596102948bcc8dafa5528a56e00000000');
+    assert.strictEqual(map.size, 154);
+    assert.strictEqual(map.get('Catalog.Валюты'), 'bb71d1cc90d8644484433b5f58f0efb600000000');
   });
 
   test('EVOLC (cfe): 7 записей с configVersion из 8 объявленных, Configuration.EVOLC присутствует', () => {

@@ -37,6 +37,9 @@ src/
 │   │   ├── ConfigurationCleanWindow.ts # окно тишины по корню конфигурации после
 │   │   │                              # импорта/обновления БД (Container.markConfigurationsClean,
 │   │   │                              # см. docs/architecture.md)
+│   │   ├── SubordinateObjectLayout.ts # единственный источник подкаталогов подчинённых со своим XML
+│   │   │                              # (Forms/Templates/Recalculations/Tables/Cubes/DimensionTables/
+│   │   │                              # Subsystems) — используют RepositoryObjectNames и SupportInfoService
 │   │   └── AtomicFileWrite.ts        # writeFileAtomicSync — общая атомарная запись
 │   │                                  # служебных кэшей (tmp+rename), см. cache/ ниже
 │   ├── cfe/                          # расширения: CfeBorrowService, CfeDiffService, CfePatchMethodService

@@ -5,6 +5,11 @@
     "Configuration": "editable",
     "Document.ПриходТовара": "editable",
     "AccumulationRegister.ТоварыНаСкладах": "editable",
-    "Catalog.Контрагенты": "removed"
+    "Catalog.Контрагенты": "removed",
+    "ExternalDataSource.ИнтернетМагазин.Table.Заказы": "editable",
+    "ExternalDataSource.ИнтернетМагазин.Table.Заказы.Form.ФормаСписка": "locked",
+    "ExternalDataSource.ИнтернетМагазин.Cube.Продажи.DimensionTable.Регионы": "removed",
+    "CalculationRegister.Начисления.Recalculation.Перерасчеты": "editable",
+    "Subsystem.Продажи.Subsystem.Розница": "editable"
   }
 }

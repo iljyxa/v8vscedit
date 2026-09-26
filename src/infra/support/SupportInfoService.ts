@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { findObjectXmlInFolder } from '../fs/ObjectLocation';
+import { isSubordinateObjectFolder } from '../fs/SubordinateObjectLayout';
 import type { Logger } from './Logger';
 import { parseParentConfigurations, type ParentConfigurationsInfo } from './ParentConfigurationsParser';
 
@@ -66,13 +67,6 @@ interface ConfigSupportData {
   /** UUID объекта → режим поддержки */
   uuidToMode: Map<string, SupportMode>;
 }
-
-/**
- * Дочерние папки объекта, у элементов которых бывает собственный XML со своей
- * строкой в `ParentConfigurations.bin`. Команд здесь нет: в выгрузке команда
- * описана внутри XML владельца, отдельного файла у неё нет.
- */
-const CHILD_FOLDERS_WITH_OWN_XML: readonly string[] = ['Forms', 'Templates'];
 
 const UUID_ATTR_RE = /uuid="([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i;
 
@@ -151,9 +145,11 @@ export class SupportInfoService {
    * Для BSL-модулей режим берётся по XML объекта-владельца, который лежит либо в
    * глубокой (`<Тип>/<Имя>/<Имя>.xml`), либо в плоской (`<Тип>/<Имя>.xml`)
    * раскладке выгрузки: модуль всегда в `<Тип>/<Имя>/Ext/`, а XML объекта при
-   * плоской выгрузке — уровнем выше. Модули форм и макетов берут режим из
-   * собственного XML, если он есть. Команда объекта своего XML не имеет, и её
-   * модуль получает режим владельца. Это приближение: у `<Command uuid=…>` в XML
+   * плоской выгрузке — уровнем выше. Модули подчинённых со своим XML (формы,
+   * макеты, таблицы и кубы внешних источников, таблицы измерений, вложенные
+   * подсистемы) берут режим из XML самого глубокого такого подчинённого, если он
+   * есть. Команда объекта своего XML не имеет, и её модуль получает режим
+   * владельца. Это приближение: у `<Command uuid=…>` в XML
    * владельца есть собственный uuid, и его режим в `ParentConfigurations.bin`
    * может отличаться, но поиск uuid дочернего элемента внутри XML владельца
    * здесь не выполняется — прежнее поведение (всегда `None`) было хуже.
@@ -295,9 +291,12 @@ export class SupportInfoService {
 
   /**
    * По пути к BSL-модулю находит XML-файл, по uuid которого определяется режим:
-   *   - модуль формы/макета `TypeFolder/ObjectName/{Forms|Templates}/Child/Ext/…` →
-   *     собственный XML `TypeFolder/ObjectName/{Forms|Templates}/Child.xml`, если он есть;
-   *   - иначе (модуль объекта, команда, дочерний без своего XML) → XML владельца в
+   *   - модуль подчинённого со своим XML — `Тип/Имя/Папка/Имя/…/Ext/…` (пар
+   *     «Папка/Имя» одна и более, каждая `Папка` — из {@link isSubordinateObjectFolder})
+   *     → XML самого глубокого
+   *     подчинённого цепочки, у которого файл `…/Папка/Имя.xml` есть: форма таблицы
+   *     внешнего источника получает режим формы, а не таблицы и не источника;
+   *   - иначе (модуль объекта, команда, подчинённый без своего XML) → XML владельца в
    *     глубокой или плоской раскладке через {@link findObjectXmlInFolder}.
    * Папка типа берётся из пути, а не из реестра типов: так режим определяется и
    * для папок, которых реестр не знает.
@@ -320,13 +319,12 @@ export class SupportInfoService {
     const objectName = bslParts[rootDepth + 1];
     if (!typeFolder || !objectName) { return undefined; }
 
-    const childFolder = bslParts[rootDepth + 2];
-    const childName = bslParts[rootDepth + 3];
-    if (childFolder && childName && CHILD_FOLDERS_WITH_OWN_XML.includes(childFolder)) {
-      const childXmlPath = path.join(originalRoot, typeFolder, objectName, childFolder, childName + '.xml');
-      if (fs.existsSync(childXmlPath)) {
-        return childXmlPath;
-      }
+    const subordinateXmlPath = findDeepestSubordinateXml(
+      path.join(originalRoot, typeFolder, objectName),
+      bslParts.slice(rootDepth + 2, rootDepth + extIdx)
+    );
+    if (subordinateXmlPath) {
+      return subordinateXmlPath;
     }
 
     const ownerXmlPath = findObjectXmlInFolder(originalRoot, typeFolder, objectName);
@@ -360,6 +358,24 @@ export class SupportInfoService {
       return undefined;
     }
   }
+}
+
+/**
+ * Проходит сегменты пути под каталогом владельца парами «папка/имя», пока папка —
+ * подкаталог подчинённых, и возвращает XML самого глубокого подчинённого, чей файл
+ * `<папка>/<имя>.xml` существует; `undefined` — ни одного такого файла нет.
+ */
+function findDeepestSubordinateXml(ownerDir: string, segments: readonly string[]): string | undefined {
+  let dir = ownerDir;
+  let deepest: string | undefined;
+  for (let i = 0; i + 1 < segments.length && isSubordinateObjectFolder(segments[i]); i += 2) {
+    const xmlPath = path.join(dir, segments[i], segments[i + 1] + '.xml');
+    if (fs.existsSync(xmlPath)) {
+      deepest = xmlPath;
+    }
+    dir = path.join(dir, segments[i], segments[i + 1]);
+  }
+  return deepest;
 }
 
 /** Режим по uuid; дубль uuid (несколько поставщиков) — самый строгий из режимов. */
