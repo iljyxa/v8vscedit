@@ -18,6 +18,12 @@ import { MAX_DUMP_ROUNDS } from '../../infra/repository/RepositoryDumpRounds';
 import type { ConfigurationDumpRequest } from '../../infra/agent';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import type { MetadataTreeProvider } from '../../ui/tree/MetadataTreeProvider';
+import {
+  bumpAllConfigDumpInfoVersions,
+  bumpConfigDumpInfoVersion,
+  removeChildObjectEntry,
+  removeConfigDumpInfoEntry,
+} from './support/configDumpInfoFixture';
 
 /**
  * Issue #1 — `RepositoryLockSync` (lock/update) поверх общего
@@ -477,9 +483,9 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень конфигу
 
   test('корень рекурсивно без изменений после update-info — Конфигуратор не запускается повторно (один вызов dumpToTemp)', async () => {
     const harness = createHarness();
-    // Проектный ConfigDumpInfo.xml идентичен тому, что "вернёт" update-info-выгрузка.
-    const configDumpInfoContent = '<ConfigDumpInfo xmlns="http://v8.1c.ru/8.3/xcf/dumpinfo"><ConfigVersions/></ConfigDumpInfo>';
-    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), configDumpInfoContent, 'utf-8');
+    // Проектный ConfigDumpInfo.xml (реальный, из createHarness) идентичен тому,
+    // что "вернёт" update-info-выгрузка — сравнивать не с чем, изменений нет.
+    const configDumpInfoContent = fs.readFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), 'utf-8');
     const dump = makeTempDump({ 'ConfigDumpInfo.xml': configDumpInfoContent });
 
     let dumpCalls = 0;
@@ -935,38 +941,32 @@ suite('RepositoryLockSync — runRepositoryLockFlow: область объект
 });
 
 suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурсивно — режим "partial" (изменённые/добавленные/удалённые владельцы)', () => {
-  function configDumpInfoXml(entries: { name: string; version: string }[]): string {
-    const items = entries.map((entry) => `<Metadata name="${entry.name}" id="${entry.name}-id" configVersion="${entry.version}"/>`).join('');
-    return `<ConfigDumpInfo xmlns="http://v8.1c.ru/8.3/xcf/dumpinfo">${items}</ConfigDumpInfo>`;
+  /**
+   * Реальный `example/2.21/src/cf/ConfigDumpInfo.xml` даёт ~105 единиц (см.
+   * `ConfigDumpInfoReader`/`extractDumpInfoUnit`) — этого достаточно, чтобы доля
+   * ОДНОГО изменённого владельца оставалась далеко ниже порога
+   * `ROOT_INCREMENTAL_MAX_SHARE` без «тихих» синтетических объектов-заполнителей:
+   * знаменатель уже даёт настоящая конфигурация фикстуры.
+   */
+  function readProjectConfigDumpInfo(harness: Harness): string {
+    return fs.readFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), 'utf-8');
   }
 
   test('изменён один владелец (доля ниже порога) — частичная выгрузка ровно по нему, ConfigDumpInfo.xml заменён', async () => {
     const harness = createHarness();
-    // Ещё 3 "молчаливых" владельца нужны только для знаменателя decideRootIncrementalStrategy
-    // (доля изменений должна остаться <=50%, иначе стратегия перейдёт на "full").
-    const projectInfo = configDumpInfoXml([
-      { name: 'Catalog.Изменяемый.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий1.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий2.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий3.ObjectModule', version: '1' },
-    ]);
-    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), projectInfo, 'utf-8');
-    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
-    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Изменяемый.xml'), '<MetaDataObject>старое</MetaDataObject>', 'utf-8');
-
-    const nextInfo = configDumpInfoXml([
-      { name: 'Catalog.Изменяемый.ObjectModule', version: '2' },
-      { name: 'Catalog.Тихий1.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий2.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий3.ObjectModule', version: '1' },
-    ]);
+    const projectInfo = readProjectConfigDumpInfo(harness);
+    const nextInfo = bumpConfigDumpInfoVersion(projectInfo, 'Catalog.Валюты.ObjectModule', '0000000000000000000000000000000000000a');
     const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextInfo });
-    const partialDump = makeTempDump({ 'Catalogs/Изменяемый.xml': '<MetaDataObject>новое из хранилища</MetaDataObject>' });
+
+    const modulePath = path.join(harness.configRoot, 'Catalogs', 'Валюты', 'Ext', 'ObjectModule.bsl');
+    const originalModuleContent = fs.readFileSync(modulePath, 'utf-8');
+    const repositoryModuleContent = `${originalModuleContent}\n// правка из хранилища`;
+    const partialDump = makeTempDump({ 'Catalogs/Валюты/Ext/ObjectModule.bsl': repositoryModuleContent });
 
     const requests: ConfigurationDumpRequest[] = [];
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
-      // Локальная копия объекта отличается от версии хранилища и хеш-кэш пуст — законный
+      // Локальный модуль отличается от версии хранилища и хеш-кэш пуст — законный
       // конфликт по правилам трёхстороннего слияния; "replace" принимает версию хранилища.
       chooseConflictResolution: () => Promise.resolve('replace'),
       dumpToTemp: (_target, request) => {
@@ -986,54 +986,67 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
 
     assert.strictEqual(outcome, 'done');
     assert.deepStrictEqual(requests.map((r) => r.mode), ['update-info', 'partial']);
-    assert.deepStrictEqual(requests[1], { mode: 'partial', fullNames: ['Справочник.Изменяемый'] });
-    assert.strictEqual(fs.readFileSync(path.join(harness.configRoot, 'Catalogs', 'Изменяемый.xml'), 'utf-8'), '<MetaDataObject>новое из хранилища</MetaDataObject>');
+    assert.deepStrictEqual(requests[1], { mode: 'partial', fullNames: ['Справочник.Валюты'] });
+    assert.strictEqual(fs.readFileSync(modulePath, 'utf-8'), repositoryModuleContent);
     assert.strictEqual(fs.readFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), 'utf-8'), nextInfo, 'проектный ConfigDumpInfo.xml обязан замениться версией из выгрузки.');
     assert.strictEqual(harness.repositoryService.isRootLocked(harness.target), true);
   });
 
-  test('добавленный владелец → ChildObjects Configuration.xml пополняется; неопознанный владелец в diff — пропускается с логом', async () => {
+  test('добавленный владелец → ChildObjects Configuration.xml пополняется', async () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lock-sync-root-added-'));
     try {
-      fs.cpSync(path.resolve(__dirname, '../../../example/2.21/src/cf'), tempRoot, { recursive: true });
+      fs.cpSync(EXAMPLE_CF, tempRoot, { recursive: true });
       const guard = new ConfigurationOperationGuard();
       const outputLines: string[] = [];
-      const suppressCalls: string[][] = [];
-      const markChangedCalls: string[][] = [];
       let reloadCalls = 0;
-      const workspaceRootForTarget = tempRoot;
-      const repositoryService = new RepositoryService(workspaceRootForTarget, new ProjectSecretStorage(createFakeSecretStore(), workspaceRootForTarget));
+      const repositoryService = new RepositoryService(tempRoot, new ProjectSecretStorage(createFakeSecretStore(), tempRoot));
       const target = repositoryService.resolveTargetByConfigRoot(tempRoot);
       assert.ok(target, 'предпосылка: реальная фикстура example/2.21/src/cf должна резолвиться в target.');
       const services: RepositoryFileSyncServices = {
         configurationOperationGuard: guard,
-        workspaceFolder: { uri: vscode.Uri.file(workspaceRootForTarget), name: 'test', index: 0 },
+        workspaceFolder: { uri: vscode.Uri.file(tempRoot), name: 'test', index: 0 },
         outputChannel: { appendLine: (line: string) => outputLines.push(line) } as unknown as vscode.OutputChannel,
         repositoryService,
         projectSecretStorage: {} as unknown as RepositoryFileSyncServices['projectSecretStorage'],
         supportService: undefined,
-        suppressConfigurationReloadForFiles: (files: string[]) => suppressCalls.push(files),
-        markChangedConfigurationByFiles: (files: string[]) => markChangedCalls.push(files),
+        suppressConfigurationReloadForFiles: () => undefined,
+        markChangedConfigurationByFiles: () => undefined,
         treeProvider: { refresh: () => undefined, refreshCacheForFiles: () => true } as unknown as MetadataTreeProvider,
         refreshActionsView: () => undefined,
         reloadEntries: () => { reloadCalls += 1; return Promise.resolve(); },
       };
 
-      const projectConfigDumpInfo = fs.readFileSync(path.join(tempRoot, 'ConfigDumpInfo.xml'), 'utf-8');
-      // "Неопознанный" владелец — префикс, которого нет в таблице соответствия типов,
-      // проверяет ветку toFullName(...)===null (лог и фильтрация, а не исключение).
-      const nextConfigDumpInfo = projectConfigDumpInfo.replace('</ConfigDumpInfo>', '') +
-        '<Metadata name="Catalog.НовыйКорневойСправочник.ObjectModule" id="new-id" configVersion="1"/>' +
-        '<Metadata name="НеизвестныйПрефикс.Что-то.ObjectModule" id="unknown-id" configVersion="1"/>' +
-        '</ConfigDumpInfo>';
-      const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextConfigDumpInfo });
-      const partialDump = makeTempDump({ 'Catalogs/НовыйКорневойСправочник.xml': '<MetaDataObject/>' });
+      // «Добавленный» владелец имитируется НАОБОРОТ: реальный минимальный справочник
+      // "Регионы" (один XML-файл, БЕЗ Ext/форм/макетов; одна запись ConfigDumpInfo;
+      // одна строка ChildObjects) удаляется из КОПИИ ПРОЕКТА — для diff-а он окажется
+      // присутствующим только в "next" (реальном, немодифицированном) ConfigDumpInfo.xml,
+      // т.е. добавленным в хранилище.
+      const regionyXmlPath = path.join(tempRoot, 'Catalogs', 'Регионы.xml');
+      assert.ok(fs.existsSync(regionyXmlPath), 'предпосылка: реальная фикстура содержит Catalogs/Регионы.xml.');
+      fs.rmSync(regionyXmlPath);
+      fs.writeFileSync(
+        path.join(tempRoot, 'ConfigDumpInfo.xml'),
+        removeConfigDumpInfoEntry(fs.readFileSync(path.join(tempRoot, 'ConfigDumpInfo.xml'), 'utf-8'), 'Catalog.Регионы'),
+        'utf-8'
+      );
+      fs.writeFileSync(
+        path.join(tempRoot, 'Configuration.xml'),
+        removeChildObjectEntry(fs.readFileSync(path.join(tempRoot, 'Configuration.xml'), 'utf-8'), 'Catalog', 'Регионы'),
+        'utf-8'
+      );
+
+      // "Следующий" ConfigDumpInfo.xml — реальный НЕМОДИФИЦИРОВАННЫЙ файл фикстуры:
+      // "Регионы" там присутствует, поэтому diff распознаёт владельца как "добавленный".
+      const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': fs.readFileSync(path.join(EXAMPLE_CF, 'ConfigDumpInfo.xml'), 'utf-8') });
+      const partialDumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lock-sync-added-partial-'));
+      fs.mkdirSync(path.join(partialDumpDir, 'Catalogs'), { recursive: true });
+      fs.copyFileSync(path.join(EXAMPLE_CF, 'Catalogs', 'Регионы.xml'), path.join(partialDumpDir, 'Catalogs', 'Регионы.xml'));
 
       const deps = baseDeps({
         runRepositoryCli: () => Promise.resolve({ status: 'done' }),
         dumpToTemp: (_t, request) => Promise.resolve(request.mode === 'update-info'
           ? { ok: true, dir: infoDump.dir, dispose: infoDump.dispose }
-          : { ok: true, dir: partialDump.dir, dispose: partialDump.dispose }),
+          : { ok: true, dir: partialDumpDir, dispose: () => fs.rmSync(partialDumpDir, { recursive: true, force: true }) }),
       });
 
       const outcome = await runRepositoryLockFlow(
@@ -1044,30 +1057,19 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
       );
 
       assert.strictEqual(outcome, 'done');
-      assert.strictEqual(fs.existsSync(path.join(tempRoot, 'Catalogs', 'НовыйКорневойСправочник.xml')), true);
+      assert.strictEqual(fs.existsSync(regionyXmlPath), true, 'файл владельца, добавленного в хранилище, обязан быть восстановлен в проекте.');
       const configXmlText = fs.readFileSync(path.join(tempRoot, 'Configuration.xml'), 'utf-8');
-      assert.ok(configXmlText.includes('<Catalog>НовыйКорневойСправочник</Catalog>'), 'новый владелец должен появиться в ChildObjects Configuration.xml.');
-      assert.ok(
-        outputLines.some((line) => line.includes('владелец') && line.includes('не распознан') && line.includes('НеизвестныйПрефикс')),
-        'нераспознанный владелец из diff обязан быть залогирован, а не привести к исключению.'
-      );
+      assert.ok(configXmlText.includes('<Catalog>Регионы</Catalog>'), 'новый владелец должен появиться в ChildObjects Configuration.xml.');
       assert.strictEqual(reloadCalls, 1, 'структурное изменение (новый ChildObjects) требует полного reloadEntries.');
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });
 
-  test('частичная выгрузка изменённых владельцев провалилась — outcome "done" (захват уже состоялся), лог сбоя', async () => {
+  test('частичная выгрузка изменённого владельца провалилась — outcome "done" (захват уже состоялся), лог сбоя', async () => {
     const harness = createHarness();
-    const projectInfo = '<ConfigDumpInfo xmlns="http://v8.1c.ru/8.3/xcf/dumpinfo">' +
-      '<Metadata name="Catalog.Изменяемый.ObjectModule" id="a" configVersion="1"/>' +
-      '<Metadata name="Catalog.Тихий1.ObjectModule" id="b" configVersion="1"/>' +
-      '<Metadata name="Catalog.Тихий2.ObjectModule" id="c" configVersion="1"/>' +
-      '<Metadata name="Catalog.Тихий3.ObjectModule" id="d" configVersion="1"/>' +
-      '</ConfigDumpInfo>';
-    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), projectInfo, 'utf-8');
-    const nextInfo = projectInfo.replace('configVersion="1"/>\n    <Metadata name="Catalog.Тихий1', 'configVersion="2"/><Metadata name="Catalog.Тихий1')
-      .replace('name="Catalog.Изменяемый.ObjectModule" id="a" configVersion="1"', 'name="Catalog.Изменяемый.ObjectModule" id="a" configVersion="2"');
+    const projectInfo = readProjectConfigDumpInfo(harness);
+    const nextInfo = bumpConfigDumpInfoVersion(projectInfo, 'Catalog.Валюты.ObjectModule', '0000000000000000000000000000000000000b');
     const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextInfo });
     let partialCalls = 0;
     const deps = baseDeps({
@@ -1095,7 +1097,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
 
   test('сбой выгрузки update-info (ConfigDumpInfo.xml) — fallback на full, лог причины', async () => {
     const harness = createHarness();
-    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), configDumpInfoXml([{ name: 'Catalog.А.ObjectModule', version: '1' }]), 'utf-8');
+    // Проектный ConfigDumpInfo.xml — уже реальный, непустой (createHarness) — правка не нужна.
     const fullDump = makeTempDump({});
     const modes: string[] = [];
     const deps = baseDeps({
@@ -1123,7 +1125,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
 
   test('новый ConfigDumpInfo.xml из базы не разбирается (пуст при непустом проектном) — fallback на full', async () => {
     const harness = createHarness();
-    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), configDumpInfoXml([{ name: 'Catalog.А.ObjectModule', version: '1' }]), 'utf-8');
+    // Проектный ConfigDumpInfo.xml — уже реальный, непустой (createHarness) — правка не нужна.
     const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': 'битый-не-xml' });
     const fullDump = makeTempDump({});
     const modes: string[] = [];
@@ -1151,9 +1153,13 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
 
   test('доля изменённых владельцев выше порога — fallback на full; сбой полной выгрузки — outcome "done" (захват уже состоялся)', async () => {
     const harness = createHarness();
-    // Единственный владелец в проекте и в базе — доля изменений 100% (> 50%), даже без превышения абсолютного порога.
-    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), configDumpInfoXml([{ name: 'Catalog.А.ObjectModule', version: '1' }]), 'utf-8');
-    const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': configDumpInfoXml([{ name: 'Catalog.А.ObjectModule', version: '2' }]) });
+    const projectInfo = readProjectConfigDumpInfo(harness);
+    // Правка ВСЕХ значений configVersion реальной конфигурации — гарантированно 100%
+    // владельцев считаются изменившимися (заведомо выше ROOT_INCREMENTAL_MAX_SHARE),
+    // без добавления "тихих" объектов: имена и структура файла остаются настоящими,
+    // меняются только версии (реверс шестнадцатеричной строки).
+    const nextInfo = bumpAllConfigDumpInfoVersions(projectInfo);
+    const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextInfo });
     const modes: string[] = [];
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
@@ -1182,27 +1188,19 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
 
   test('изменён владелец, choice="keep-local" — хеш-манифест корня получает хеш ХРАНИЛИЩА через overrides, а не оставленного локального содержимого', async () => {
     const harness = createHarness();
-    const projectInfo = configDumpInfoXml([
-      { name: 'Catalog.Изменяемый.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий1.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий2.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий3.ObjectModule', version: '1' },
-    ]);
-    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), projectInfo, 'utf-8');
-    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
-    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Изменяемый.xml'), '<MetaDataObject>локальная правка</MetaDataObject>', 'utf-8');
-
-    const nextInfo = configDumpInfoXml([
-      { name: 'Catalog.Изменяемый.ObjectModule', version: '2' },
-      { name: 'Catalog.Тихий1.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий2.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий3.ObjectModule', version: '1' },
-    ]);
+    const projectInfo = readProjectConfigDumpInfo(harness);
+    const nextInfo = bumpConfigDumpInfoVersion(projectInfo, 'Catalog.Валюты.ObjectModule', '0000000000000000000000000000000000000c');
     const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextInfo });
-    const partialDump = makeTempDump({ 'Catalogs/Изменяемый.xml': '<MetaDataObject>версия хранилища</MetaDataObject>' });
-    // Хеш version-хранилища снимается ДО запуска потока: applyMergeWithPostMutation
+
+    const modulePath = path.join(harness.configRoot, 'Catalogs', 'Валюты', 'Ext', 'ObjectModule.bsl');
+    const originalModuleContent = fs.readFileSync(modulePath, 'utf-8');
+    const localModuleContent = `${originalModuleContent}\n// локальная правка`;
+    fs.writeFileSync(modulePath, localModuleContent, 'utf-8');
+    const repositoryModuleContent = `${originalModuleContent}\n// версия хранилища`;
+    const partialDump = makeTempDump({ 'Catalogs/Валюты/Ext/ObjectModule.bsl': repositoryModuleContent });
+    // Хеш версии хранилища снимается ДО запуска потока: applyMergeWithPostMutation
     // вызывает dump.dispose() в finally, temp-каталог выгрузки к концу теста уже удалён.
-    const repositoryHash = computeFileHash(path.join(partialDump.dir, 'Catalogs', 'Изменяемый.xml'));
+    const repositoryHash = computeFileHash(path.join(partialDump.dir, 'Catalogs', 'Валюты', 'Ext', 'ObjectModule.bsl'));
 
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
@@ -1220,11 +1218,11 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
     );
 
     assert.strictEqual(outcome, 'done');
-    assert.strictEqual(fs.readFileSync(path.join(harness.configRoot, 'Catalogs', 'Изменяемый.xml'), 'utf-8'), '<MetaDataObject>локальная правка</MetaDataObject>', 'keep-local — локальный файл не трогается.');
+    assert.strictEqual(fs.readFileSync(modulePath, 'utf-8'), localModuleContent, 'keep-local — локальный файл не трогается.');
     const manifestHashes = harness.repositoryService.snapshots.readRootManifestHashes(harness.target);
     assert.ok(manifestHashes);
     assert.strictEqual(
-      manifestHashes['Catalogs/Изменяемый.xml'],
+      manifestHashes['Catalogs/Валюты/Ext/ObjectModule.bsl'],
       repositoryHash,
       'Эталон отмены обязан отражать версию ХРАНИЛИЩА для keep-local файла, а не оставленную локальную (иначе изменения будут потеряны при следующем сравнении с базой).'
     );
@@ -1239,31 +1237,24 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
    */
   test('Р4: keep-local на conflict-delete — локальный файл без версии хранилища исключается из манифеста корня', async () => {
     const harness = createHarness();
-    const projectInfo = configDumpInfoXml([
-      { name: 'Catalog.Изменяемый.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий1.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий2.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий3.ObjectModule', version: '1' },
-    ]);
-    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), projectInfo, 'utf-8');
-    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
-    // Собственный XML владельца совпадает с версией хранилища — единственный конфликт
-    // в сценарии обязан быть только из-за "осиротевшего" локального файла ниже.
-    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Изменяемый.xml'), '<MetaDataObject>версия хранилища v2</MetaDataObject>', 'utf-8');
+    const projectInfo = readProjectConfigDumpInfo(harness);
+    const nextInfo = bumpConfigDumpInfoVersion(projectInfo, 'Catalog.Валюты.ObjectModule', '0000000000000000000000000000000000000d');
+    const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextInfo });
+
+    // Выгрузка содержит ВЕСЬ реальный каталог владельца НЕМОДИФИЦИРОВАННЫМ (главный XML
+    // + весь Ext/) — единственный конфликт в сценарии обязан быть только из-за
+    // "осиротевшего" локального файла ниже, а не из-за отсутствия других частей владельца
+    // в выгрузке (без этого «неполная выгрузка» защитила бы вообще все файлы владельца).
+    const partialDumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lock-sync-orphan-partial-'));
+    fs.mkdirSync(path.join(partialDumpDir, 'Catalogs'), { recursive: true });
+    fs.copyFileSync(path.join(EXAMPLE_CF, 'Catalogs', 'Валюты.xml'), path.join(partialDumpDir, 'Catalogs', 'Валюты.xml'));
+    fs.cpSync(path.join(EXAMPLE_CF, 'Catalogs', 'Валюты'), path.join(partialDumpDir, 'Catalogs', 'Валюты'), { recursive: true });
+
     // Локальный файл, которого НИКОГДА не было и нет в версии хранилища (нет хеш-кэша,
     // поэтому localHash !== baseHash===null) — законный "conflict-delete".
-    const orphanPath = path.join(harness.configRoot, 'Catalogs', 'Изменяемый', 'Ext', 'ЧерновыеЗаметки.txt');
-    fs.mkdirSync(path.dirname(orphanPath), { recursive: true });
+    const orphanPath = path.join(harness.configRoot, 'Catalogs', 'Валюты', 'Ext', 'ЧерновыеЗаметки.txt');
     fs.writeFileSync(orphanPath, 'локальный черновик, которого никогда не было в хранилище', 'utf-8');
 
-    const nextInfo = configDumpInfoXml([
-      { name: 'Catalog.Изменяемый.ObjectModule', version: '2' },
-      { name: 'Catalog.Тихий1.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий2.ObjectModule', version: '1' },
-      { name: 'Catalog.Тихий3.ObjectModule', version: '1' },
-    ]);
-    const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextInfo });
-    const partialDump = makeTempDump({ 'Catalogs/Изменяемый.xml': '<MetaDataObject>версия хранилища v2</MetaDataObject>' });
     let conflictCount = -1;
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
@@ -1273,7 +1264,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
       },
       dumpToTemp: (_target, request) => Promise.resolve(request.mode === 'update-info'
         ? { ok: true, dir: infoDump.dir, dispose: infoDump.dispose }
-        : { ok: true, dir: partialDump.dir, dispose: partialDump.dispose }),
+        : { ok: true, dir: partialDumpDir, dispose: () => fs.rmSync(partialDumpDir, { recursive: true, force: true }) }),
     });
 
     const outcome = await runRepositoryLockFlow(
@@ -1284,13 +1275,13 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
     );
 
     assert.strictEqual(outcome, 'done');
-    assert.strictEqual(conflictCount, 1, 'предпосылка: единственный конфликт в сценарии — осиротевший локальный файл (главный XML совпадает с хранилищем).');
+    assert.strictEqual(conflictCount, 1, 'предпосылка: единственный конфликт в сценарии — осиротевший локальный файл (остальной владелец совпадает с хранилищем).');
     assert.strictEqual(fs.existsSync(orphanPath), true, 'keep-local не должен удалять локальный файл.');
 
     const diff = harness.repositoryService.snapshots.diffRootManifest(harness.target);
     assert.ok(diff.hasManifest);
     assert.ok(
-      diff.owners.includes('Справочник.Изменяемый'),
+      diff.owners.includes('Справочник.Валюты'),
       `владелец локального файла без версии хранилища обязан считаться расхождением сразу после захвата, иначе он «прощён» навсегда (получено owners=${JSON.stringify(diff.owners)}).`
     );
   });
@@ -1299,8 +1290,9 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
 suite('RepositoryLockSync — runRepositoryUpdateFlow: корень рекурсивно, ранее захваченный (issue #1)', () => {
   test('получение (update) без изменений на уже рекурсивно захваченном корне — хеш-манифест всё равно пересоздаётся (shouldCaptureRootManifest по isRootRecursiveLocked)', async () => {
     const harness = createHarness();
-    const configDumpInfoContent = '<ConfigDumpInfo xmlns="http://v8.1c.ru/8.3/xcf/dumpinfo"><ConfigVersions/></ConfigDumpInfo>';
-    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), configDumpInfoContent, 'utf-8');
+    // Реальный проектный ConfigDumpInfo.xml (из createHarness) идентичен тому,
+    // что "вернёт" update-info-выгрузка — сравнивать не с чем, изменений нет.
+    const configDumpInfoContent = fs.readFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), 'utf-8');
     const dump = makeTempDump({ 'ConfigDumpInfo.xml': configDumpInfoContent });
     // Корень уже захвачен рекурсивно РАНЕЕ (в этом сценарии проверяется именно
     // update, а не сам захват) — operation==='update', поэтому shouldCaptureRootManifest

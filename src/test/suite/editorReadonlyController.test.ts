@@ -144,8 +144,14 @@ suite('EditorReadonlyController — issue #1: readonly-переходы уже �
     const outsideFile = path.join(outsideDir, 'Другой.bsl');
     fs.writeFileSync(outsideFile, 'Процедура X() КонецПроцедуры', 'utf-8');
     try {
-      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(outsideFile));
-      await vscode.window.showTextDocument(doc, { preview: false });
+      const outsideDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(outsideFile));
+      await vscode.window.showTextDocument(outsideDoc, { preview: false });
+      // Контрольная вкладка ВНУТРИ configRoot события: TARGET_WIDE_OWNER-эффект
+      // (см. EditorReadonlyController) переводит в очередь ЛЮБОЙ открытый файл того же
+      // configRoot независимо от fullNames — по факту её обработки проверяем, что
+      // очередь действительно дошла до этого события, вместо угадывания задержки таймером.
+      const controlDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePathA));
+      await vscode.window.showTextDocument(controlDoc, { preview: false });
 
       let listener: ChangeLocksListener | undefined;
       const repositoryService = fakeRepositoryService({
@@ -160,22 +166,25 @@ suite('EditorReadonlyController — issue #1: readonly-переходы уже �
       const controller = new EditorReadonlyController(repositoryService, supportService, guard, { appendLine: () => undefined } as unknown as vscode.OutputChannel);
       const disposable = controller.register();
 
-      let anyReadonlyCommandCalls = 0;
+      const activeUriWhenReadonlyCommandCalled: string[] = [];
       const originalExecuteCommand = vscode.commands.executeCommand;
       (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = ((command: string, ...rest: unknown[]) => {
         if (command.includes('ReadonlyInSession')) {
-          anyReadonlyCommandCalls += 1;
+          activeUriWhenReadonlyCommandCalled.push(vscode.window.activeTextEditor?.document.uri.toString() ?? '<none>');
         }
         return (originalExecuteCommand as (c: string, ...r: unknown[]) => Thenable<unknown>)(command, ...rest);
       }) as typeof vscode.commands.executeCommand;
 
       try {
-        // Событие относится к СОВСЕМ ДРУГОМУ configRoot (tmpDir), файл открыт из outsideDir.
-        // Планирование (planTransitions) синхронно: файл вне configRoot события не попадает
-        // в applyNow, поэтому очередь (enqueue) вообще не запускается — проверяем эффект
-        // сразу же, без ожидания по таймеру.
+        // Единственное событие относится к configRoot=tmpDir: контрольный файл (внутри
+        // tmpDir) обязан получить readonly-переход, файл из outsideDir — нет.
         listener?.({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: ['Справочник.А'] });
-        assert.strictEqual(anyReadonlyCommandCalls, 0);
+        await waitUntil(() => activeUriWhenReadonlyCommandCalled.includes(controlDoc.uri.toString()), 3000);
+
+        assert.ok(
+          !activeUriWhenReadonlyCommandCalled.includes(outsideDoc.uri.toString()),
+          'Файл вне configRoot события не должен становиться активным редактором для readonly-команды.'
+        );
       } finally {
         disposable.dispose();
         (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = originalExecuteCommand;

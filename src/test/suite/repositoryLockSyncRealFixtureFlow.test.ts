@@ -13,16 +13,24 @@ import { buildScopeKey, computeFileHash, saveHashCache } from '../../infra/cache
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import type { MetadataTreeProvider } from '../../ui/tree/MetadataTreeProvider';
 import { createPartialDumpFixture, KNOWN_FIXTURE_UNITS } from './support/partialDumpFixture';
+import { bumpConfigDumpInfoVersion, removeConfigDumpInfoEntry } from './support/configDumpInfoFixture';
 
 /**
- * Сквозные сценарии `RepositoryLockSync` на РЕАЛЬНОЙ копии `example/2.21/src/cf`
- * (Контрагенты/Начисления/ИнтернетМагазин) через `partialDumpFixture` — issue #1,
- * раздел 10, критерии 10.1.2/10.1.4/10.1.5. В отличие от `repositoryLockSync.test.ts`
- * (синтетические `<MetaDataObject/>`/`buildSubsystemXml`, узкие сценарии guard/
- * конфликтов/раундов), здесь проверяется СБОРКА реальных строительных блоков
- * (`buildRepositoryDumpPlan` → `acquireObjectsDump` → `runDumpRounds`) в
- * наблюдаемое число вызовов `dumpToTemp` и состав снимков/захвата для настоящих
- * объектов с подчинёнными единицами.
+ * Сквозные сценарии `RepositoryLockSync`/`RepositoryUnlockSync` на РЕАЛЬНОЙ копии
+ * `example/2.21/src/cf` (Контрагенты/Начисления/ИнтернетМагазин) через
+ * `partialDumpFixture` — issue #1, раздел 10, критерии:
+ *   10.1.2 — рекурсивный захват объекта с подчинёнными единицами;
+ *   10.1.3 — нерекурсивный захват объекта, изоляция подчинённых от области владельца;
+ *   10.1.4 — регресс D2b: единицы вне выгруженного состава (Recalculations/Tables/
+ *            Cubes/DimensionTables) не удаляются как «сироты»;
+ *   10.1.5 — раздельная довыгрузка подчинённых при пустом/непустом хеш-кэше и
+ *            обработка единиц, удалённых из хранилища (Р4);
+ *   10.1.7 — root-incremental по единицам (частичная выгрузка ровно по изменённой
+ *            единице, удаление единицы, исчезнувшей из ConfigDumpInfo.xml);
+ *   10.1.8 — отмена рекурсивного захвата корня по хеш-манифесту.
+ * Здесь проверяется СБОРКА реальных строительных блоков (`buildRepositoryDumpPlan` →
+ * `acquireObjectsDump` → `runDumpRounds`) в наблюдаемое число вызовов `dumpToTemp` и
+ * состав снимков/захвата для настоящих объектов с подчинёнными единицами.
  */
 
 const EXAMPLE_CF = path.resolve(__dirname, '../../../example/2.21/src/cf');
@@ -46,7 +54,7 @@ interface Harness {
   outputLines: string[];
 }
 
-// N6: copии всей example/2.21/src/cf занимают заметное место на диске — teardown
+// N6: копии всей example/2.21/src/cf занимают заметное место на диске — teardown
 // каждой suite ниже удаляет всё, что накопилось за её тесты (см. cleanupRealFixtureHarnesses).
 const createdWorkspaceRoots: string[] = [];
 
@@ -146,7 +154,7 @@ suite('RepositoryLockSync — реальная фикстура: рекурси�
     fixture.disposeAll();
   });
 
-  test('РегистрРасчета.Начисления рекурсивно: Pererascheты не удаляются как сироты (регресс D2b, критерий 10.1.4)', async () => {
+  test('РегистрРасчета.Начисления рекурсивно: Перерасчеты не удаляются как сироты (регресс D2b, критерий 10.1.4)', async () => {
     const harness = createRealFixtureHarness();
     const fixture = createPartialDumpFixture(EXAMPLE_CF, harness.target.displayName);
     const deps = baseDeps(fixture);
@@ -264,6 +272,16 @@ suite('RepositoryLockSync — реальная фикстура: нерекур�
     assert.strictEqual(
       harness.repositoryService.isEditRestricted(path.join(harness.configRoot, 'Catalogs', 'Контрагенты', 'Ext', 'ObjectModule.bsl')),
       false
+    );
+    assert.strictEqual(
+      harness.repositoryService.isEditRestricted(path.join(harness.configRoot, 'Catalogs', 'Контрагенты', 'Templates', 'ЗагрузкаИзФайла.xml')),
+      true,
+      'макет — подчинённая единица со своим захватом, нерекурсивная операция владельца её не касается.'
+    );
+    assert.strictEqual(
+      harness.repositoryService.isEditRestricted(path.join(harness.configRoot, 'Catalogs', 'Контрагенты', 'Commands', 'Покупатели', 'Ext', 'CommandModule.bsl')),
+      false,
+      'команда не имеет собственного XML верхнего уровня в ConfigDumpInfo — она в составе владельца, а не отдельная единица.'
     );
     fixture.disposeAll();
   });
@@ -397,27 +415,6 @@ suite('RepositoryLockSync — реальная фикстура: подчинё�
     }
   });
 });
-
-/** Экранирование fullName для использования в regex ниже. */
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/** Точечная текстовая правка значения атрибута `configVersion` в КОПИИ реального ConfigDumpInfo.xml. */
-function bumpConfigDumpInfoVersion(xml: string, metadataName: string, newVersion: string): string {
-  const pattern = new RegExp(`(<Metadata name="${escapeRegExp(metadataName)}"[^>]*configVersion=")[^"]*(")`);
-  const replaced = xml.replace(pattern, `$1${newVersion}$2`);
-  assert.notStrictEqual(replaced, xml, `запись "${metadataName}" обязана существовать в исходном ConfigDumpInfo.xml фикстуры.`);
-  return replaced;
-}
-
-/** Точечное удаление ЦЕЛОЙ строки `<Metadata .../>` (единица исчезла из версии хранилища). */
-function removeConfigDumpInfoEntry(xml: string, metadataName: string): string {
-  const pattern = new RegExp(`[ \\t]*<Metadata name="${escapeRegExp(metadataName)}"[^/]*/>\\r?\\n?`);
-  const replaced = xml.replace(pattern, '');
-  assert.notStrictEqual(replaced, xml, `запись "${metadataName}" обязана существовать в исходном ConfigDumpInfo.xml фикстуры.`);
-  return replaced;
-}
 
 function makeTempDump(seedFiles: Record<string, string>): { dir: string; dispose: () => void } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lock-sync-real-dump-'));

@@ -325,9 +325,10 @@ suite('RepositoryUnlockSync — корень рекурсивно с хеш-ма
 
   test('2 изменённых объекта относительно манифеста — частичная выгрузка ровно по ним', async () => {
     const harness = createHarness();
-    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
-    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'А.xml'), '<xml/>', 'utf-8');
-    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Б.xml'), '<xml/>', 'utf-8');
+    const valyutyModulePath = path.join(harness.configRoot, 'Catalogs', 'Валюты', 'Ext', 'ObjectModule.bsl');
+    const kontragentyModulePath = path.join(harness.configRoot, 'Catalogs', 'Контрагенты', 'Ext', 'ObjectModule.bsl');
+    const valyutyOriginal = fs.readFileSync(valyutyModulePath, 'utf-8');
+    const kontragentyOriginal = fs.readFileSync(kontragentyModulePath, 'utf-8');
 
     harness.repositoryService.lockState.applyLock(harness.target, {
       anchor: '__configuration_root__',
@@ -336,9 +337,9 @@ suite('RepositoryUnlockSync — корень рекурсивно с хеш-ма
     });
     harness.repositoryService.snapshots.captureRootManifest(harness.target);
 
-    // Изменяем оба объекта ПОСЛЕ снятия манифеста.
-    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'А.xml'), '<xml changed="true"/>', 'utf-8');
-    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Б.xml'), '<xml changed="true"/>', 'utf-8');
+    // Изменяем оба реальных объекта ПОСЛЕ снятия манифеста (дописывание в конец .bsl).
+    fs.writeFileSync(valyutyModulePath, `${valyutyOriginal}\n// правка после манифеста`, 'utf-8');
+    fs.writeFileSync(kontragentyModulePath, `${kontragentyOriginal}\n// правка после манифеста`, 'utf-8');
 
     const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-unlock-root-dump-'));
     let dumpRequest: unknown;
@@ -357,7 +358,7 @@ suite('RepositoryUnlockSync — корень рекурсивно с хеш-ма
     assert.ok(dumpRequest);
     const request = dumpRequest as { mode: string; fullNames?: string[] };
     assert.strictEqual(request.mode, 'partial');
-    assert.deepStrictEqual([...(request.fullNames ?? [])].sort(), ['Справочник.А', 'Справочник.Б'].sort());
+    assert.deepStrictEqual([...(request.fullNames ?? [])].sort(), ['Справочник.Валюты', 'Справочник.Контрагенты'].sort());
   });
 
   test('изменился САМ Configuration.xml относительно манифеста — откат структурный, даже без удалённых/пропавших файлов (критерий: line "Configuration.xml в корне" в rollbackToEtalons)', async () => {
@@ -371,8 +372,12 @@ suite('RepositoryUnlockSync — корень рекурсивно с хеш-ма
     });
     harness.repositoryService.snapshots.captureRootManifest(harness.target);
 
-    // Локальная правка Configuration.xml ПОСЛЕ снятия манифеста.
-    fs.writeFileSync(configXmlPath, '<MetaDataObject changed="true"/>', 'utf-8');
+    // Локальная правка Configuration.xml ПОСЛЕ снятия манифеста — дописанный XML-комментарий
+    // перед закрывающим тегом реального файла (валидный XML, отличное от хранилища содержимое),
+    // а не выдуманная замена всего файла.
+    const locallyEditedContent = originalContent.replace('</MetaDataObject>', '<!-- локальная правка --></MetaDataObject>');
+    assert.notStrictEqual(locallyEditedContent, originalContent, 'предпосылка: реальный Configuration.xml обязан заканчиваться </MetaDataObject>.');
+    fs.writeFileSync(configXmlPath, locallyEditedContent, 'utf-8');
 
     const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-unlock-root-configxml-'));
     fs.writeFileSync(path.join(dumpDir, 'Configuration.xml'), originalContent, 'utf-8');
@@ -499,8 +504,8 @@ suite('RepositoryUnlockSync — узел без валидной цели', () =
   test('runRepositoryCommitFlow: node.label не задан для КОРНЯ — objectLabel резолвится из target.displayName (имени конфигурации)', async () => {
     const harness = createHarness();
     // <Name> обязателен: resolveTargetByConfigRoot()/resolveTargetByXmlPath() читают
-    // реальное имя конфигурации из файла — без тега узел резолвится в имя каталога.
-    fs.writeFileSync(path.join(harness.configRoot, 'Configuration.xml'), '<MetaDataObject><Name>ИмяИзФайла</Name></MetaDataObject>', 'utf-8');
+    // реальное имя конфигурации из файла — реальный Configuration.xml фикстуры уже
+    // содержит настоящий <Name>ТорговыйУчет</Name>, синтетический XML не нужен.
     const node: RepositoryNodeRef = { nodeKind: 'configuration', xmlPath: path.join(harness.configRoot, 'Configuration.xml') };
     harness.repositoryService.lockState.applyLock(harness.target, { anchor: '__configuration_root__', members: ['__configuration_root__'] });
     let notifyInfoMessage: string | undefined;
@@ -515,7 +520,7 @@ suite('RepositoryUnlockSync — узел без валидной цели', () =
     assert.strictEqual(outcome, 'done');
     // Для корня node.label не задаётся вызывающей стороной вовсе — objectLabel обязан
     // резолвиться из target.displayName (имени конфигурации из <Name>), а не быть пустым.
-    assert.ok(notifyInfoMessage?.includes('ИмяИзФайла'), `сообщение обязано называть конфигурацию по имени: "${String(notifyInfoMessage)}"`);
+    assert.ok(notifyInfoMessage?.includes('ТорговыйУчет'), `сообщение обязано называть конфигурацию по имени: "${String(notifyInfoMessage)}"`);
   });
 });
 
@@ -644,8 +649,8 @@ suite('RepositoryUnlockSync — commit keepLocked с рекурсивным ко
 
   test('keepLocked=true, корень захвачен рекурсивно — снимок пересоздаётся как хеш-манифест из проекта (не из отдельных объектов)', async () => {
     const harness = createHarness();
-    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
-    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'А.xml'), '<xml/>', 'utf-8');
+    // Реальная фикстура (createHarness) уже содержит множество файлов — отдельный
+    // синтетический объект для хеш-манифеста не нужен.
     harness.repositoryService.lockState.applyLock(harness.target, {
       anchor: '__configuration_root__',
       members: ['__configuration_root__'],
@@ -725,17 +730,17 @@ suite('RepositoryUnlockSync — commit keepLocked с рекурсивным ко
 suite('RepositoryUnlockSync — корень рекурсивно без манифеста, но с непустым хеш-кэшем', () => {
   test('эталон строится из хеш-кэша (не из манифеста) — изменённый по кэшу объект восстанавливается частичной выгрузкой', async () => {
     const harness = createHarness();
-    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
-    const filePath = path.join(harness.configRoot, 'Catalogs', 'А.xml');
-    fs.writeFileSync(filePath, '<xml/>', 'utf-8');
+    const filePath = path.join(harness.configRoot, 'Catalogs', 'Валюты', 'Ext', 'ObjectModule.bsl');
+    const originalContent = fs.readFileSync(filePath, 'utf-8');
     // Хеш-кэш фиксирует состояние ДО правки — эталон для отката.
     const scopeKey = buildScopeKey('cf', harness.configRoot, '');
     saveHashCache(harness.workspaceRoot, {
       schemaVersion: 1, scopeKey, generatedAt: '',
-      files: { 'Catalogs/А.xml': computeFileHash(filePath) },
+      files: { 'Catalogs/Валюты/Ext/ObjectModule.bsl': computeFileHash(filePath) },
     });
-    // Правка ПОСЛЕ снятия хеш-кэша — то самое расхождение, которое обязан найти collectRootOwnersToRestore.
-    fs.writeFileSync(filePath, '<xml changed="true"/>', 'utf-8');
+    // Правка ПОСЛЕ снятия хеш-кэша (дописывание в конец .bsl) — то самое расхождение,
+    // которое обязан найти collectRootOwnersToRestore.
+    fs.writeFileSync(filePath, `${originalContent}\n// правка после хеш-кэша`, 'utf-8');
 
     harness.repositoryService.lockState.applyLock(harness.target, {
       anchor: '__configuration_root__',
@@ -766,6 +771,6 @@ suite('RepositoryUnlockSync — корень рекурсивно без ман�
     assert.ok(dumpRequest);
     const request = dumpRequest as { mode: string; fullNames?: string[] };
     assert.strictEqual(request.mode, 'partial');
-    assert.deepStrictEqual(request.fullNames, ['Справочник.А']);
+    assert.deepStrictEqual(request.fullNames, ['Справочник.Валюты']);
   });
 });
