@@ -49,7 +49,13 @@
   списке — явные `showErrorMessage`/`showInformationMessage` по причине и отмена операции, без
   переключения на ручной ввод значения пользователем. Подробности и обоснование —
   [architecture.md](./architecture.md#паттерн-чтение-данных-из-базы-через-пакетный-конфигуратор-file-handoff).
-- **Открытие BSL-модулей:** только реальные `file://` документы (виртуальная схема `onec://` удалена). Readonly — через `ui/readonly/BslReadonlyGuard.ts`.
+- **Открытие BSL-модулей:** только реальные `file://` документы (виртуальная схема `onec://` удалена).
+  Readonly модуля — через `ui/readonly/BslReadonlyGuard.ts`; readonly по захвату хранилища —
+  `EditorReadonlyController` (`ui/readonly/EditorReadonlyController.ts`). Обе точки применяют переход к
+  уже открытому ресурсу через общий адаптер `ui/readonly/sessionReadonly.ts`
+  (`collectOpenTabs`/`runWithResourceActive`) и выбор маршрута `ui/readonly/readonlyTabSelection.ts`
+  (`selectReadonlyApplyRoute`) — readonly-команда VS Code действует только на правую (основную) сторону
+  активного редактора, поэтому левая file:-сторона diff переключается через временную вкладку.
 - **Новая операция хранилища, меняющая файлы проекта** (аналог `repository.lock`/`update`/`unlock`/`commit`,
   см. [repository-file-sync.md](./repository-file-sync.md)): поток в `ui/commands/repository/*Sync.ts`
   с внешними точками через `RepositoryFileSyncDeps` → занятость guard'а проверяется
@@ -67,7 +73,13 @@
   `sweepRepositoryTempArtifacts`/`infra/repository/RepositoryTempCleanup.ts` — отдельно вызывать не
   нужно); ресурсы выгрузки во временный каталог до передачи владения вызывающему оборачивать в
   `disposeOnError`/`disposeOnErrorAsync` (там же), а не голым `try/catch` — см.
-  [repository-file-sync.md](./repository-file-sync.md#временные-файлы-и-очистка).
+  [repository-file-sync.md](./repository-file-sync.md#временные-файлы-и-очистка). Окна сравнения —
+  единая конвенция сторон (слева локальное состояние, справа версия хранилища, `MergeDiffPair` +
+  `formatMergeDiffTitle` в `RepositoryFileSyncDialogs.ts`); снятие/применение readonly сессии к ресурсу
+  файла проекта (в т.ч. когда он открыт только левой стороной diff) — через
+  `ui/readonly/sessionReadonly.ts` (`runWithResourceActive`) и `ui/readonly/readonlyTabSelection.ts`
+  (`selectReadonlyApplyRoute`), а не напрямую командой `resetActiveEditorReadonlyInSession` — см.
+  [repository-file-sync.md](./repository-file-sync.md#readonly).
 - **Новая операция, запускающая Конфигуратор для полного импорта/обновления/применения конфигурации к
   базе** (аналог `importConfigurations`/`updateChangedConfigurations`/`runPostRepositorySync`): захват —
   через `services.configurationOperationGuard` (`runExclusive(title, op)` для одной атомарной цепочки

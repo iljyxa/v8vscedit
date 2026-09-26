@@ -15,7 +15,12 @@ import {
   type RepositoryFileSyncDeps,
   type RepositoryFileSyncServices,
 } from '../../ui/commands/repository/RepositoryFileSyncShared';
-import type { MergeDiffPair } from '../../ui/commands/repository/RepositoryFileSyncDialogs';
+import {
+  formatMergeDiffTitle,
+  mergeDiffProjectPath,
+  type MergeDiffPair,
+  type MergeDiffProjectSide,
+} from '../../ui/commands/repository/RepositoryFileSyncDialogs';
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import { buildScopeKey, computeFileHash, loadHashCache, saveHashCache } from '../../infra/cache/HashCache';
@@ -632,5 +637,153 @@ suite('RepositoryFileSyncShared — reportMergeOutcome', () => {
     await reportMergeOutcome(harness.services, baseDeps(), [], { merge, changedFiles: [] }, 'replace', 'Товары');
 
     assert.ok(harness.outputLines.some((line) => line.includes('резервные копии') && line.includes('/tmp/backup/Module.bsl')));
+  });
+});
+
+/**
+ * Issue #63 — единая конвенция окон сравнения после синхронизации файлов: слева —
+ * локальное состояние, справа — версия хранилища; заголовок подписывает стороны и
+ * какая из них — файл проекта. Редактируемость определяется только по файлу проекта.
+ */
+suite('RepositoryFileSyncShared — стороны окна сравнения (issue #63)', () => {
+  const REL = 'Catalogs/Товары/Ext/ObjectModule.bsl';
+
+  interface Scenario {
+    choice: 'compare' | 'keep-local';
+    projectSide: MergeDiffProjectSide;
+    title: string;
+  }
+
+  const scenarios: Scenario[] = [
+    { choice: 'compare', projectSide: 'repository', title: 'ObjectModule.bsl (мои изменения: копия ↔ хранилище: файл проекта)' },
+    { choice: 'keep-local', projectSide: 'local', title: 'ObjectModule.bsl (мои изменения: файл проекта ↔ хранилище: копия)' },
+  ];
+
+  interface Fixture {
+    dir: string;
+    projectPath: string;
+    /** Резервная копия (compare) или копия версии хранилища (keep-local). */
+    otherPath: string;
+  }
+
+  function createFixture(withProjectFile = true): Fixture {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-filesync-sides-'));
+    const projectPath = path.join(dir, 'project', ...REL.split('/'));
+    const otherPath = path.join(dir, 'backup', ...REL.split('/'));
+    fs.mkdirSync(path.dirname(otherPath), { recursive: true });
+    fs.writeFileSync(otherPath, 'вторая сторона', 'utf-8');
+    if (withProjectFile) {
+      fs.mkdirSync(path.dirname(projectPath), { recursive: true });
+      fs.writeFileSync(projectPath, 'файл проекта', 'utf-8');
+    }
+    return { dir, projectPath, otherPath };
+  }
+
+  function mergeFor(choice: Scenario['choice'], fixture: Fixture): MergeApplicationResult['merge'] {
+    return choice === 'compare'
+      ? { ...emptyMerge(), backups: [{ rel: REL, backupPath: fixture.otherPath, projectPath: fixture.projectPath }] }
+      : {
+          ...emptyMerge(),
+          keptLocalFiles: [fixture.projectPath],
+          repositoryCopies: [{ rel: REL, repositoryPath: fixture.otherPath, projectPath: fixture.projectPath }],
+        };
+  }
+
+  /** Шпион проверок редактируемости: ограничен ровно один путь. */
+  function spyServices(harness: Harness, restrictedPath: string): { services: RepositoryFileSyncServices; checkedPaths: string[] } {
+    const checkedPaths: string[] = [];
+    const services: RepositoryFileSyncServices = {
+      ...harness.services,
+      repositoryService: {
+        isEditRestricted: (filePath: string) => { checkedPaths.push(filePath); return filePath === restrictedPath; },
+      } as unknown as RepositoryFileSyncServices['repositoryService'],
+      supportService: {
+        isLocked: (filePath: string) => { checkedPaths.push(filePath); return false; },
+      } as unknown as RepositoryFileSyncServices['supportService'],
+    };
+    return { services, checkedPaths };
+  }
+
+  /** compare открывает сравнение сразу, keep-local — по кнопке «Сравнить» уведомления. */
+  async function collectPairs(
+    services: RepositoryFileSyncServices,
+    scenario: Scenario,
+    fixture: Fixture
+  ): Promise<{ pairs: MergeDiffPair[] | undefined; info: string | undefined; actions: string[] }> {
+    let pairs: MergeDiffPair[] | undefined;
+    let info: string | undefined;
+    let actions: { label: string; run: () => void }[] = [];
+    const deps = baseDeps({
+      openDiffs: (opened) => { pairs = opened; },
+      notifyInfo: (message, items) => { info = message; actions = items ? [...items] : []; },
+    });
+    await reportMergeOutcome(services, deps, [], { merge: mergeFor(scenario.choice, fixture), changedFiles: [] }, scenario.choice, 'Товары');
+    if (scenario.choice === 'keep-local') {
+      assert.strictEqual(pairs, undefined, 'keep-local не открывает сравнение без нажатия кнопки.');
+      actions.find((action) => action.label === 'Сравнить')?.run();
+    }
+    return { pairs, info, actions: actions.map((action) => action.label) };
+  }
+
+  for (const scenario of scenarios) {
+    for (const restricted of ['project', 'other'] as const) {
+      test(`choice="${scenario.choice}", ограничен ${restricted === 'project' ? 'файл проекта' : 'второй файл'}: стороны, заголовок и writable по файлу проекта`, async () => {
+        const harness = createHarness();
+        const fixture = createFixture();
+        try {
+          const restrictedPath = restricted === 'project' ? fixture.projectPath : fixture.otherPath;
+          const { services, checkedPaths } = spyServices(harness, restrictedPath);
+
+          const { pairs, info, actions } = await collectPairs(services, scenario, fixture);
+
+          const expectedLocal = scenario.projectSide === 'local' ? fixture.projectPath : fixture.otherPath;
+          const expectedRepository = scenario.projectSide === 'local' ? fixture.otherPath : fixture.projectPath;
+          assert.deepStrictEqual(pairs, [{
+            title: scenario.title,
+            local: expectedLocal,
+            repository: expectedRepository,
+            projectSide: scenario.projectSide,
+            writable: restricted !== 'project',
+          }]);
+          assert.strictEqual(mergeDiffProjectPath(pairs[0]), fixture.projectPath);
+          assert.ok(checkedPaths.length > 0);
+          assert.ok(checkedPaths.every((checked) => checked === fixture.projectPath), `проверялись посторонние пути: ${checkedPaths.join(', ')}`);
+          if (scenario.choice === 'keep-local') {
+            assert.deepStrictEqual(actions, ['Сравнить']);
+            assert.strictEqual(info?.includes('Захватите объект, чтобы перенести правки.'), restricted === 'project');
+          }
+        } finally {
+          fs.rmSync(fixture.dir, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+
+  test('choice="keep-local": копия хранилища есть, файла проекта нет — пары нет, rel в журнале, кнопок нет', async () => {
+    const harness = createHarness();
+    const fixture = createFixture(false);
+    try {
+      const { services } = spyServices(harness, '');
+      let actions: readonly { label: string }[] | undefined;
+      const deps = baseDeps({ notifyInfo: (_message, items) => { actions = items ?? []; } });
+
+      await reportMergeOutcome(services, deps, [], { merge: mergeFor('keep-local', fixture), changedFiles: [] }, 'keep-local', 'Товары');
+
+      assert.deepStrictEqual(actions, []);
+      assert.ok(harness.outputLines.some((line) => line.includes('без окна сравнения') && line.includes(REL)));
+    } finally {
+      fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  test('formatMergeDiffTitle: подписи сторон для обеих конвенций, имя — последний сегмент rel', () => {
+    assert.strictEqual(formatMergeDiffTitle(REL, 'repository'), 'ObjectModule.bsl (мои изменения: копия ↔ хранилище: файл проекта)');
+    assert.strictEqual(formatMergeDiffTitle(REL, 'local'), 'ObjectModule.bsl (мои изменения: файл проекта ↔ хранилище: копия)');
+    assert.strictEqual(formatMergeDiffTitle('Configuration.xml', 'local'), 'Configuration.xml (мои изменения: файл проекта ↔ хранилище: копия)');
+  });
+
+  test('mergeDiffProjectPath: возвращает сторону, указанную projectSide', () => {
+    assert.strictEqual(mergeDiffProjectPath({ local: '/л', repository: '/х', projectSide: 'local' }), '/л');
+    assert.strictEqual(mergeDiffProjectPath({ local: '/л', repository: '/х', projectSide: 'repository' }), '/х');
   });
 });

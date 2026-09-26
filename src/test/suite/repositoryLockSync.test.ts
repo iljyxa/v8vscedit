@@ -18,6 +18,8 @@ import { MAX_DUMP_ROUNDS } from '../../infra/repository/RepositoryDumpRounds';
 import type { ConfigurationDumpRequest } from '../../infra/agent';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import type { MetadataTreeProvider } from '../../ui/tree/MetadataTreeProvider';
+import type { MergeDiffPair } from '../../ui/commands/repository/RepositoryFileSyncDialogs';
+import { getRepositoryMergeRoot } from '../../infra/repository/RepositoryTempCleanup';
 import {
   bumpAllConfigDumpInfoVersions,
   bumpConfigDumpInfoVersion,
@@ -390,17 +392,24 @@ suite('RepositoryLockSync — runRepositoryLockFlow: конфликт × {compar
     const { objectModulePath, dump } = setupConflict(harness);
 
     let openDiffsCalls = 0;
+    let openedPairs: MergeDiffPair[] = [];
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
       dumpToTemp: () => Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose }),
       chooseConflictResolution: () => Promise.resolve('compare'),
-      openDiffs: (pairs: unknown[]) => { openDiffsCalls += 1; assert.ok(Array.isArray(pairs)); assert.ok(pairs.length >= 1); },
+      openDiffs: (pairs: MergeDiffPair[]) => { openDiffsCalls += 1; openedPairs = pairs; },
     });
 
     const outcome = await runRepositoryLockFlow(node, false, harness.services, deps);
 
     assert.strictEqual(outcome, 'done');
     assert.strictEqual(openDiffsCalls, 1);
+    // Issue #63: слева — локальные правки (резервная копия), справа — файл проекта с версией хранилища.
+    assert.strictEqual(openedPairs.length, 1);
+    const mergeRoot = getRepositoryMergeRoot(harness.workspaceRoot);
+    assert.ok(openedPairs[0].local.startsWith(mergeRoot + path.sep), `левая сторона не в каталоге резервных копий: ${openedPairs[0].local}`);
+    assert.strictEqual(openedPairs[0].repository, objectModulePath);
+    assert.strictEqual(openedPairs[0].projectSide, 'repository');
     assert.strictEqual(fs.readFileSync(objectModulePath, 'utf-8'), 'версия хранилища');
   });
 

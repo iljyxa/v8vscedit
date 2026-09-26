@@ -1,4 +1,7 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
+import { selectReadonlyApplyRoute } from '../../readonly/readonlyTabSelection';
+import { collectOpenTabs, RESET_READONLY_COMMAND, runWithResourceActive } from '../../readonly/sessionReadonly';
 import type { MergeChoice } from '../../../infra/repository/RepositoryMergeApplier';
 
 /** Сводка конфликтов слияния для единственного модального диалога операции. */
@@ -21,16 +24,35 @@ export interface RollbackSummary {
   files: string[];
 }
 
+/** Какая сторона окна сравнения — файл проекта (вторая — резервная копия или копия хранилища). */
+export type MergeDiffProjectSide = 'local' | 'repository';
+
 /**
- * Пара для окна сравнения: `left` — версия, из которой переносят правки,
- * `right` — файл проекта. `writable` — правую сторону можно редактировать
- * (объект захвачен, поддержка разрешает), значит readonly сессии снимается.
+ * Пара для окна сравнения. Единая конвенция для захвата/получения: слева — локальное
+ * состояние, справа — версия хранилища, независимо от того, какая сторона — файл
+ * проекта. `writable` — файл проекта можно редактировать (объект захвачен, поддержка
+ * разрешает), значит readonly сессии с него снимается.
  */
 export interface MergeDiffPair {
   title: string;
-  left: string;
-  right: string;
+  /** Левая сторона — локальное состояние. */
+  local: string;
+  /** Правая сторона — версия хранилища. */
+  repository: string;
+  projectSide: MergeDiffProjectSide;
   writable: boolean;
+}
+
+export function mergeDiffProjectPath(pair: Pick<MergeDiffPair, 'local' | 'repository' | 'projectSide'>): string {
+  return pair[pair.projectSide];
+}
+
+/** Подписи сторон в заголовке: без них по окну не понять, какую сторону можно править. */
+export function formatMergeDiffTitle(rel: string, projectSide: MergeDiffProjectSide): string {
+  const sides = projectSide === 'local'
+    ? 'мои изменения: файл проекта ↔ хранилище: копия'
+    : 'мои изменения: копия ↔ хранилище: файл проекта';
+  return `${path.posix.basename(rel)} (${sides})`;
 }
 
 export interface NotificationAction {
@@ -60,7 +82,37 @@ export function showNotification(
   });
 }
 
-/* c8 ignore start -- модальные диалоги и открытие вкладок сравнения vscode не автоматизируются
+/**
+ * Файл мог быть открыт как readonly до захвата — сессионный флаг снимается явно,
+ * иначе перенести правки нельзя. Команда действует только на правую сторону активного
+ * сравнения, поэтому файл проекта слева снимается через временную обычную вкладку,
+ * а сравнение затем снова делается активным.
+ */
+export async function openMergeDiffs(pairs: readonly MergeDiffPair[]): Promise<void> {
+  for (const pair of pairs) {
+    const showDiff = (): Thenable<unknown> => vscode.commands.executeCommand(
+      'vscode.diff',
+      vscode.Uri.file(pair.local),
+      vscode.Uri.file(pair.repository),
+      pair.title,
+      { preview: false }
+    );
+    await showDiff();
+    if (pair.writable) {
+      const projectPath = mergeDiffProjectPath(pair);
+      await runWithResourceActive(
+        selectReadonlyApplyRoute(collectOpenTabs(), projectPath),
+        vscode.Uri.file(projectPath),
+        () => Promise.resolve(vscode.commands.executeCommand(RESET_READONLY_COMMAND))
+      );
+      if (pair.projectSide === 'local') {
+        await showDiff();
+      }
+    }
+  }
+}
+
+/* c8 ignore start -- модальные диалоги и тонкие чтения настроек/документов vscode не автоматизируются
    в тестовом хосте (правило CLAUDE.md №4); решения потоков проверяются через внедрённые deps. */
 
 /** Esc/закрытие диалога = `keep-local`: локальные правки не должны теряться без явного выбора. */
@@ -99,23 +151,6 @@ export async function confirmRollbackModal(summary: RollbackSummary): Promise<bo
     KEEP_CHOICE
   );
   return choice === ROLLBACK_CHOICE;
-}
-
-export async function openMergeDiffs(pairs: MergeDiffPair[]): Promise<void> {
-  for (const pair of pairs) {
-    await vscode.commands.executeCommand(
-      'vscode.diff',
-      vscode.Uri.file(pair.left),
-      vscode.Uri.file(pair.right),
-      pair.title,
-      { preview: false }
-    );
-    if (pair.writable) {
-      // Файл мог быть открыт как readonly до захвата — сессионный флаг снимается явно,
-      // иначе перенести правки в правую сторону сравнения нельзя.
-      await vscode.commands.executeCommand('workbench.action.files.resetActiveEditorReadonlyInSession');
-    }
-  }
 }
 
 export function isFileSyncOnLockUnlockEnabled(): boolean {

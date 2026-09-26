@@ -5,11 +5,16 @@ import { resolveLockUnitByRelativePath } from '../../infra/repository/Repository
 import type { RepositoryLocksChangedNotice, RepositoryService, RepositoryTarget } from '../../infra/repository/RepositoryService';
 import type { SupportInfoService } from '../../infra/support/SupportInfoService';
 import type { BslReadonlyGuard } from './BslReadonlyGuard';
+import { isImmediatelyApplicable, selectReadonlyApplyRoute } from './readonlyTabSelection';
 import { planReadonlyTransitions, type ReadonlyTransition } from './readonlyTransitionPlan';
-
-const SET_READONLY_COMMAND = 'workbench.action.files.setActiveEditorReadonlyInSession';
-// reset (а не «сделать редактируемым») уважает files.readonlyInclude пользователя.
-const RESET_READONLY_COMMAND = 'workbench.action.files.resetActiveEditorReadonlyInSession';
+import {
+  collectOpenTabs,
+  describeActivationOutcome,
+  RESET_READONLY_COMMAND,
+  runWithResourceActive,
+  SET_READONLY_COMMAND,
+  type OpenTab,
+} from './sessionReadonly';
 
 /**
  * Файлы вне конкретных объектов (корень, нераспознанные) пересчитываются на любое
@@ -18,20 +23,13 @@ const RESET_READONLY_COMMAND = 'workbench.action.files.resetActiveEditorReadonly
  */
 const TARGET_WIDE_OWNER = '\u0000target';
 
-interface OpenTab {
-  path: string;
-  uri: vscode.Uri;
-  visible: boolean;
-  /** Вкладка сравнения, где файл — правая (изменяемая) сторона. */
-  diff?: { original: vscode.Uri; label: string; viewColumn: vscode.ViewColumn };
-  viewColumn?: vscode.ViewColumn;
-}
-
 /**
  * Переводит уже открытые вкладки файлов объектов в readonly/редактируемые после
  * захвата/отмены захвата без переоткрытия. Readonly в VS Code 1.85 ставится только
  * командой для активного редактора, поэтому видимые вкладки ненадолго активируются
  * (фокус затем возвращается исходному редактору), а скрытые — ждут собственной активации.
+ * Файл, открытый только левой стороной сравнения, переключается сразу через временную
+ * обычную вкладку: событие активации сравнения приходит по правой стороне.
  */
 export class EditorReadonlyController {
   private readonly pending = new Map<string, boolean>();
@@ -114,7 +112,7 @@ export class EditorReadonlyController {
     // а корень здесь всё равно сводится к TARGET_WIDE_OWNER.
     const target: RepositoryTarget = { configRoot: event.target.configRoot, configKind: 'cf', displayName: '' };
     const plan = planReadonlyTransitions({
-      openFiles: tabs.map((tab) => ({ path: tab.path, visible: tab.visible })),
+      openFiles: tabs.map((tab) => ({ path: tab.path, visible: isImmediatelyApplicable(tab) })),
       changedOwnerFullNames: [...event.fullNames, TARGET_WIDE_OWNER],
       allObjects: event.allObjects,
       configRoot: event.target.configRoot,
@@ -128,9 +126,9 @@ export class EditorReadonlyController {
       isRestricted: (filePath) => this.supportService.isLocked(filePath) || this.repositoryService.isEditRestricted(filePath),
     });
     for (const transition of plan.defer) {
-      const tab = findTab(tabs, transition.path);
-      if (tab) {
-        this.pending.set(tab.uri.toString(), transition.readonly);
+      const route = selectReadonlyApplyRoute(tabs, transition.path);
+      if (route?.kind === 'defer') {
+        this.pending.set(route.tab.uri.toString(), transition.readonly);
       }
     }
     return { tabs, applyNow: plan.applyNow };
@@ -138,32 +136,21 @@ export class EditorReadonlyController {
 
   private async applyToVisibleTabs(tabs: readonly OpenTab[], transitions: readonly ReadonlyTransition[]): Promise<void> {
     const originalEditor = vscode.window.activeTextEditor;
+    const originalGroup = vscode.window.tabGroups.activeTabGroup;
+    const originalTab = originalGroup.activeTab;
+    const originalColumn = originalGroup.viewColumn;
     for (const transition of transitions) {
-      const tab = findTab(tabs, transition.path);
-      if (tab) {
-        await this.applyToVisibleTab(tab, transition);
+      const route = selectReadonlyApplyRoute(tabs, transition.path);
+      if (route) {
+        const uri = route.tab.uri;
+        const outcome = await runWithResourceActive(route, uri, () => this.applyToActive(uri, transition.readonly));
+        const note = describeActivationOutcome(outcome, uri);
+        if (note) {
+          this.log.appendLine(note);
+        }
       }
     }
-    if (originalEditor && vscode.window.activeTextEditor?.document !== originalEditor.document) {
-      await vscode.window.showTextDocument(originalEditor.document, { viewColumn: originalEditor.viewColumn });
-    }
-  }
-
-  /**
-   * Вкладка активируется с фокусом: команда readonly действует на активный редактор, а
-   * без фокуса вкладка другой группы активной не становится. Фокус возвращается
-   * исходному редактору после всех переходов.
-   */
-  private async applyToVisibleTab(tab: OpenTab, transition: ReadonlyTransition): Promise<void> {
-    if (tab.diff) {
-      await vscode.commands.executeCommand('vscode.diff', tab.diff.original, tab.uri, tab.diff.label, {
-        viewColumn: tab.diff.viewColumn,
-      });
-    } else {
-      const document = await vscode.workspace.openTextDocument(tab.uri);
-      await vscode.window.showTextDocument(document, { viewColumn: tab.viewColumn });
-    }
-    await this.applyToActive(tab.uri, transition.readonly);
+    await restoreActiveEditor(originalTab, originalColumn, originalEditor);
   }
 
   private async applyToActive(uri: vscode.Uri, readonly: boolean): Promise<void> {
@@ -176,35 +163,34 @@ export class EditorReadonlyController {
   }
 }
 
-function findTab(tabs: readonly OpenTab[], filePath: string): OpenTab | undefined {
-  const key = path.resolve(filePath).toLowerCase();
-  const matches = tabs.filter((tab) => path.resolve(tab.path).toLowerCase() === key);
-  return matches.find((tab) => tab.visible) ?? matches[0];
+/**
+ * Фокус возвращается исходному редактору. Сравнение открывается заново как сравнение:
+ * `showTextDocument` его правой стороны создал бы лишнюю обычную вкладку.
+ */
+async function restoreActiveEditor(
+  originalTab: vscode.Tab | undefined,
+  originalColumn: vscode.ViewColumn,
+  originalEditor: vscode.TextEditor | undefined
+): Promise<void> {
+  const input = originalTab?.input;
+  if (input instanceof vscode.TabInputTextDiff) {
+    if (!isActiveDiff(input, originalColumn)) {
+      await vscode.commands.executeCommand('vscode.diff', input.original, input.modified, originalTab?.label, {
+        viewColumn: originalColumn,
+      });
+    }
+    return;
+  }
+  if (originalEditor && vscode.window.activeTextEditor?.document !== originalEditor.document) {
+    await vscode.window.showTextDocument(originalEditor.document, { viewColumn: originalEditor.viewColumn });
+  }
 }
 
-/** Вкладки файлов (обычные и правая сторона сравнения) со схемой file. */
-function collectOpenTabs(): OpenTab[] {
-  const visibleUris = new Set(vscode.window.visibleTextEditors.map((editor) => editor.document.uri.toString()));
-  const result: OpenTab[] = [];
-  for (const group of vscode.window.tabGroups.all) {
-    for (const tab of group.tabs) {
-      const input = tab.input;
-      if (input instanceof vscode.TabInputText && input.uri.scheme === 'file') {
-        result.push({
-          path: input.uri.fsPath,
-          uri: input.uri,
-          visible: tab.isActive && visibleUris.has(input.uri.toString()),
-          viewColumn: group.viewColumn,
-        });
-      } else if (input instanceof vscode.TabInputTextDiff && input.modified.scheme === 'file') {
-        result.push({
-          path: input.modified.fsPath,
-          uri: input.modified,
-          visible: tab.isActive && visibleUris.has(input.modified.toString()),
-          diff: { original: input.original, label: tab.label, viewColumn: group.viewColumn },
-        });
-      }
-    }
-  }
-  return result;
+function isActiveDiff(diff: vscode.TabInputTextDiff, viewColumn: vscode.ViewColumn): boolean {
+  const group = vscode.window.tabGroups.activeTabGroup;
+  const input = group.activeTab?.input;
+  return group.viewColumn === viewColumn
+    && input instanceof vscode.TabInputTextDiff
+    && input.original.toString() === diff.original.toString()
+    && input.modified.toString() === diff.modified.toString();
 }
