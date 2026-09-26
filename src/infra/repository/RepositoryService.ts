@@ -7,7 +7,14 @@ import { escapeXmlAttribute as escapeXml, parseConfigXml, parseObjectXml } from 
 import { RepositoryBindingStore } from './RepositoryBindingStore';
 import { buildRepositoryScopeKey, RepositoryLockState } from './RepositoryLockState';
 import { RepositoryLockSnapshotStore } from './RepositoryLockSnapshotStore';
-import { getRootLockName, ONE_C_TYPE_NAMES, parseRepositoryUnit, subordinateUnitFullName } from './RepositoryObjectNames';
+import {
+  getRootLockName,
+  isRepositorySubordinateTag,
+  ONE_C_TYPE_NAMES,
+  parseRepositoryUnit,
+  subordinateUnitFullName,
+} from './RepositoryObjectNames';
+import type { RepositorySubordinateTag } from './RepositoryObjectNames';
 import { resolveUnitSuffixByRelativePath } from './RepositoryObjectScope';
 
 export interface RepositoryBinding {
@@ -67,10 +74,11 @@ interface CachedTarget {
 const REPOSITORY_NAMESPACE = 'http://v8.1c.ru/8.3/config/objects';
 
 /**
- * Виды дочерних узлов (ChildTag + Column), для которых захват идёт
- * через владельца, а не напрямую. Используется только для проверки
- * принадлежности — логика блокировки/разблокировки всегда работает
- * с полным именем корневого объекта-владельца.
+ * Виды дочерних узлов (ChildTag + Column), у которых нет собственного XML корневого
+ * объекта и полное имя выводится из владельца. Подчинённые с собственным объектом
+ * хранилища (`REPOSITORY_SUBORDINATE_LAYOUT`: формы, макеты) адресуются своей единицей
+ * `Владелец.Форма.Имя`, так как нерекурсивный захват владельца их не захватывает;
+ * остальные (реквизиты, ТЧ, команды и т.п.) хранятся внутри объекта и адресуются владельцем.
  */
 const CHILD_LIKE_KINDS: ReadonlySet<string> = new Set([
   'Attribute',
@@ -329,7 +337,11 @@ export class RepositoryService {
         return null;
       }
 
-      return this.resolveRootObjectFullName(ownerXmlPath);
+      const ownerFullName = this.resolveRootObjectFullName(ownerXmlPath);
+      if (!ownerFullName || !isRepositorySubordinateTag(kind)) {
+        return ownerFullName;
+      }
+      return this.buildSubordinateUnitFullName(ownerFullName, kind, node.label);
     }
 
     return this.buildRootObjectFullName(kind, node.xmlPath, node.label);
@@ -392,6 +404,23 @@ export class RepositoryService {
     }
 
     return `${rootKindName}.${objectName}`;
+  }
+
+  /**
+   * Полное имя подчинённой единицы хранилища. Вызывается из `getTreeItem` на горячем
+   * пути дерева, поэтому не бросает: при невалидном входе — `null`.
+   */
+  private buildSubordinateUnitFullName(ownerFullName: string, tag: RepositorySubordinateTag, name: string | undefined): string | null {
+    if (!name) {
+      return null;
+    }
+    // Имя владельца берётся из <Name> и точек не содержит; защита от испорченного XML,
+    // чтобы subordinateUnitFullName не бросил из getTreeItem (зеркало isEditRestricted).
+    /* c8 ignore next 3 */
+    if (!parseRepositoryUnit(ownerFullName)) {
+      return null;
+    }
+    return subordinateUnitFullName(ownerFullName, tag, name);
   }
 
   private resolveRootObjectFullName(xmlPath: string): string | null {

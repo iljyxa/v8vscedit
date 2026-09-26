@@ -547,3 +547,74 @@ suite('RepositoryLockState — lockModes и единицы (issue #1, разде
     }
   });
 });
+
+/**
+ * Issue #45: `applyUnlock` обязан убирать освобождённую единицу из ВСЕХ
+ * `lockGroups`, где она участвует, а не только из группы своего `anchor`.
+ * Баг: цикл `for (const [anchor, members] of Object.entries(scope.lockGroups))`
+ * фильтровал `members` ТОЛЬКО когда `anchor === request.anchor` — если единица
+ * (например, форма) была участником ЧУЖОЙ группы (группы владельца/подсистемы,
+ * захваченной как единое целое рекурсивно), а освобождалась САМА как собственный
+ * `anchor` (`{anchor: form, members:[form]}`), группа владельца её не теряла:
+ * `isLockedDirectly` продолжал находить форму через `lockGroups[owner]` и
+ * `isLocked(target, form)` оставался `true` после «успешного» unlock.
+ */
+suite('RepositoryLockState — applyUnlock убирает единицу из ВСЕХ lockGroups (issue #45, регресс группового захвата)', () => {
+  test('unlock формы, входящей в группу владельца (не как якорь unlock) — форма снята из lockGroups[владелец], владелец и остальные участники остаются', () => {
+    const { state, target } = createState();
+    const owner = 'Справочник.Контрагенты';
+    const form1 = 'Справочник.Контрагенты.Форма.ФормаЭлемента';
+    const form2 = 'Справочник.Контрагенты.Форма.ФормаСписка';
+    const template = 'Справочник.Контрагенты.Макет.ЗагрузкаИзФайла';
+    state.applyLock(target, { anchor: owner, members: [owner, form1, form2, template], mode: 'recursive' });
+
+    const removed = state.applyUnlock(target, { anchor: form1, members: [form1], recursive: false, isRoot: false });
+
+    assert.deepStrictEqual(removed, [form1]);
+    assert.strictEqual(state.isLocked(target, form1), false, 'форма обязана перестать считаться захваченной.');
+    assert.strictEqual(state.isLocked(target, owner), true, 'владелец не должен пострадать.');
+    assert.strictEqual(state.isLocked(target, form2), true, 'соседняя форма не должна пострадать.');
+    assert.strictEqual(state.isLocked(target, template), true, 'макет не должен пострадать.');
+    assert.ok(
+      !(state.getLockGroup(target, owner) ?? []).includes(form1),
+      `освобождённая форма обязана быть удалена из lockGroups["${owner}"], получено: ${JSON.stringify(state.getLockGroup(target, owner))}`
+    );
+  });
+
+  test('единица в ДВУХ разных группах одновременно (подсистема + владелец) — unlock убирает её из ОБЕИХ групп', () => {
+    const { state, target } = createState();
+    const subsystem = 'Подсистема.Продажи';
+    const owner = 'Справочник.Контрагенты';
+    const form1 = 'Справочник.Контрагенты.Форма.ФормаЭлемента';
+    state.applyLock(target, { anchor: subsystem, members: [subsystem, form1] });
+    state.applyLock(target, { anchor: owner, members: [owner, form1], mode: 'recursive' });
+
+    const removed = state.applyUnlock(target, { anchor: form1, members: [form1], recursive: false, isRoot: false });
+
+    assert.deepStrictEqual(removed, [form1]);
+    assert.strictEqual(state.isLocked(target, form1), false);
+    assert.strictEqual(state.isLocked(target, subsystem), true, 'подсистема-якорь первой группы не должна пострадать.');
+    assert.strictEqual(state.isLocked(target, owner), true, 'владелец-якорь второй группы не должен пострадать.');
+    assert.ok(!(state.getLockGroup(target, subsystem) ?? []).includes(form1), 'форма обязана уйти из группы подсистемы.');
+    assert.ok(!(state.getLockGroup(target, owner) ?? []).includes(form1), 'форма обязана уйти из группы владельца.');
+  });
+
+  test('рекурсивная отмена якоря-формы, входящей в группу владельца (у самой формы своей группы нет) — форма снята, группа владельца без неё, владелец захвачен', () => {
+    const { state, target } = createState();
+    const owner = 'Справочник.Контрагенты';
+    const form1 = 'Справочник.Контрагенты.Форма.ФормаЭлемента';
+    const form2 = 'Справочник.Контрагенты.Форма.ФормаСписка';
+    state.applyLock(target, { anchor: owner, members: [owner, form1, form2], mode: 'recursive' });
+
+    // recursive:true, но у form1 НЕТ собственной lockGroups-записи (fallback ?? [] в
+    // applyUnlock не добавляет ничего лишнего) — единственный кандидат на удаление
+    // из "чужих" групп — сама форма как member/anchor запроса.
+    const removed = state.applyUnlock(target, { anchor: form1, members: [form1], recursive: true, isRoot: false });
+
+    assert.deepStrictEqual(removed, [form1]);
+    assert.strictEqual(state.isLocked(target, form1), false, 'форма-якорь обязана быть снята.');
+    assert.strictEqual(state.isLocked(target, owner), true, 'владелец остаётся захваченным.');
+    assert.strictEqual(state.isLocked(target, form2), true, 'соседняя форма остаётся захваченной.');
+    assert.ok(!(state.getLockGroup(target, owner) ?? []).includes(form1), 'форма обязана быть удалена из группы владельца.');
+  });
+});

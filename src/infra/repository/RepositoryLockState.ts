@@ -160,7 +160,9 @@ export class RepositoryLockState {
    * отмена снимает группу якоря целиком (по составу на момент захвата и текущему
    * составу из XML — объекты могли быть включены или исключены). Нерекурсивная
    * отмена якоря группы убирает из неё только освобождённые единицы: подчинённые
-   * на сервере остаются захваченными.
+   * на сервере остаются захваченными. Освобождённые единицы уходят и из групп
+   * с чужим якорем: сервер их освободил, и оставшаяся запись в чужой группе
+   * продолжала бы показывать их захваченными.
    */
   applyUnlock(target: RepositoryTarget, request: RepositoryUnlockRequest): string[] {
     let removed: string[] = [];
@@ -175,7 +177,9 @@ export class RepositoryLockState {
       }
       const lockGroups: Record<string, string[]> = {};
       for (const [anchor, members] of Object.entries(scope.lockGroups ?? {})) {
-        const rest = anchor !== request.anchor ? members : members.filter((fullName) => !request.recursive && !affected.has(fullName));
+        const rest = anchor !== request.anchor
+          ? members.filter((fullName) => !affected.has(fullName))
+          : members.filter((fullName) => !request.recursive && !affected.has(fullName));
         if (rest.length > 0) {
           lockGroups[anchor] = rest;
         }
