@@ -15,6 +15,7 @@ import { SupportMode } from '../../../infra/support/SupportInfoService';
 import type { CommandServices } from '../../commands/_shared';
 import type { MetadataNode } from '../../tree/TreeNode';
 import { CHANGES_FORBIDDEN_REASON } from '../../support/supportLockReason';
+import { resolveRepositoryEditProbePath } from '../../views/properties/propertyEditLock';
 
 type McpCommandServices = Omit<CommandServices, 'aiMcpViewProvider'>;
 
@@ -63,9 +64,13 @@ export class McpMutationGate {
    *
    * `objectXmlPath` — XML-файл объекта-владельца (для дочерних элементов это
    * `metaContext.ownerObjectXmlPath`), как и в `RemoveMetadataCommand` /
-   * `PropertiesViewController`.
+   * `PropertiesViewController`. Поддержка всегда проверяется по нему.
+   *
+   * `repositoryProbePath` — файл, по которому определяется единица хранилища;
+   * для содержимого формы/макета это их собственный XML (захват единицы
+   * независим от владельца). Если не задан — проверяется `objectXmlPath`.
    */
-  assertMetadataEditable(objectXmlPath: string | undefined): void {
+  assertMetadataEditable(objectXmlPath: string | undefined, repositoryProbePath?: string): void {
     if (!objectXmlPath) {
       throw new Error('Не удалось определить XML-файл объекта для проверки блокировки изменения.');
     }
@@ -75,7 +80,7 @@ export class McpMutationGate {
       }
       throw new Error('Объект защищён от изменения: находится на поддержке с запретом редактирования.');
     }
-    if (this.services.repositoryService.isEditRestricted(objectXmlPath)) {
+    if (this.services.repositoryService.isEditRestricted(repositoryProbePath ?? objectXmlPath)) {
       throw new Error('Объект защищён от изменения: не захвачен в хранилище конфигурации.');
     }
   }
@@ -83,9 +88,22 @@ export class McpMutationGate {
   /**
    * Резолвит путь объекта-владельца у узла дерева так же, как UI
    * (`metaContext.ownerObjectXmlPath ?? xmlPath`) и проверяет блокировку.
+   * Граница — СОСТАВ владельца (добавление/удаление/переименование дочернего
+   * элемента меняет XML владельца), поэтому хранилище проверяется по владельцу
+   * даже для формы/макета.
    */
   assertNodeEditable(node: MetadataNode): void {
     this.assertMetadataEditable(node.metaContext?.ownerObjectXmlPath ?? node.xmlPath);
+  }
+
+  /**
+   * Граница — СОДЕРЖИМОЕ самого узла (свойства, тип, тело формы/макета). Поддержка
+   * проверяется по владельцу, хранилище — по единице узла так же, как панель
+   * свойств (`resolveRepositoryEditProbePath`): форма/макет объекта захватываются
+   * отдельно от владельца.
+   */
+  assertNodeContentEditable(node: MetadataNode): void {
+    this.assertMetadataEditable(node.metaContext?.ownerObjectXmlPath ?? node.xmlPath, resolveRepositoryEditProbePath(node));
   }
 
   afterMutation(filePaths: readonly string[]): void {

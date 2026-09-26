@@ -57,7 +57,7 @@ export function registerPropertyTools(server: McpServer, deps: McpRegistrationDe
     },
     ({ path: canonical, configuration, propertyKey, value }) => gate.wrap(() => {
       const node = paths.resolveNode(canonical, configuration);
-      gate.assertNodeEditable(node);
+      gate.assertNodeContentEditable(node);
       const result = properties.setProperty(node, propertyKey, value);
       gate.afterMutationIfSucceeded(result.changedFiles, result.success);
       return result;
@@ -90,7 +90,7 @@ export function registerPropertyTools(server: McpServer, deps: McpRegistrationDe
         throw new Error(`Метаданные по пути "${canonical}" не найдены.`);
       }
       const node = resolved.node;
-      gate.assertNodeEditable(node);
+      gate.assertNodeContentEditable(node);
       const totalRequested = Object.keys(propertiesInput).length;
       const result = properties.setProperties(node, propertiesInput);
       // McpSetPropertiesResult не несёт булева success: успех выражается наличием
@@ -136,7 +136,7 @@ export function registerPropertyTools(server: McpServer, deps: McpRegistrationDe
     },
     ({ path: canonical, configuration, propertyKey, ...typeInput }) => gate.wrap(() => {
       const node = paths.resolveNode(canonical, configuration);
-      gate.assertNodeEditable(node);
+      gate.assertNodeContentEditable(node);
       const result = properties.setType(node, propertyKey ?? 'Type', normalizeSetTypeToolInput(typeInput));
       gate.afterMutationIfSucceeded(result.changedFiles, result.success);
       return result;

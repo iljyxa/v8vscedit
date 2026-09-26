@@ -1,9 +1,9 @@
 import * as fs from 'fs';
 import type { MetadataNode } from '../../tree/TreeNode';
 import { extractChildMetaElementXml, extractColumnXmlFromTabularSection } from '../../../infra/xml';
-import type { RepositoryService } from '../../../infra/repository/RepositoryService';
+import { isSubordinateUnitNode, type RepositoryService } from '../../../infra/repository/RepositoryService';
 import { type SupportInfoService, SupportMode } from '../../../infra/support/SupportInfoService';
-import { extractUuidFromXml } from './PropertiesTargetResolver';
+import { extractUuidFromXml, resolvePropertyTarget } from './PropertiesTargetResolver';
 
 /**
  * Зависимости edit-lock резолвера. Сервисы прокидываются из уже
@@ -84,13 +84,29 @@ export function isChangesForbiddenBySupport(node: MetadataNode, deps: PropertyEd
   return deps.supportService.hasChangesForbidden(xmlPath);
 }
 
+/**
+ * XML-файл, по относительному пути которого `RepositoryService.isEditRestricted`
+ * определяет единицу хранилища узла. Для формы/макета объекта это их собственный
+ * дескриптор (`Forms/Имя.xml`, `Templates/Имя.xml`): только по нему видна
+ * вложенность, и захват считается по самой единице, а не по владельцу. Если
+ * дескриптора в выгрузке нет, откатываемся к XML владельца — прежнему поведению,
+ * чтобы не потерять блокировку вовсе. Остальные узлы адресуются владельцем.
+ */
+export function resolveRepositoryEditProbePath(node: MetadataNode): string | undefined {
+  const ownerXmlPath = node.metaContext?.ownerObjectXmlPath ?? node.xmlPath;
+  if (isSubordinateUnitNode(node)) {
+    return resolvePropertyTarget(node)?.xmlPath ?? ownerXmlPath;
+  }
+  return ownerXmlPath;
+}
+
 export function isEditLockedByRepository(node: MetadataNode, deps: PropertyEditLockDeps): boolean {
   const repositoryService = deps.repositoryService;
   if (!repositoryService) {
     return false;
   }
 
-  const xmlPath = node.metaContext?.ownerObjectXmlPath ?? node.xmlPath;
+  const xmlPath = resolveRepositoryEditProbePath(node);
   if (!xmlPath || !fs.existsSync(xmlPath)) {
     return false;
   }

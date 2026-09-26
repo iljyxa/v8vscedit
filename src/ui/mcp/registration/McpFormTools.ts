@@ -147,7 +147,7 @@ export function registerFormTools(server: McpServer, deps: McpRegistrationDeps):
       },
     },
     ({ path: canonical, configuration, ...rest }) => gate.wrap(() => {
-      gate.assertNodeEditable(paths.resolveNode(canonical, configuration));
+      gate.assertNodeContentEditable(paths.resolveNode(canonical, configuration));
       const outputPath = resolveFormXmlByCanonical(paths, canonical, configuration);
       const result = services.formToolsService.compile({ ...rest, outputPath });
       // Сервис бросает исключение при провале (перехват в wrap); дошли сюда — успех.
@@ -175,7 +175,7 @@ export function registerFormTools(server: McpServer, deps: McpRegistrationDeps):
       },
     },
     (args) => gate.wrap(() => {
-      gate.assertNodeEditable(paths.resolveNode(args.path, args.configuration));
+      gate.assertNodeContentEditable(paths.resolveNode(args.path, args.configuration));
       const formPath = resolveFormXmlByCanonical(paths, args.path, args.configuration);
       const result = services.formToolsService.edit({ ...args, formPath });
       // Сервис бросает исключение при провале (перехват в wrap); дошли сюда — успех.
