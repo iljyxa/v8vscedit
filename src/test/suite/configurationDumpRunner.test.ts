@@ -3,13 +3,13 @@ import { buildExportToTempCliArgs } from '../../ui/commands/ext/ConfigurationDum
 
 /**
  * `buildExportToTempCliArgs` — чистая сборка аргументов для уже существующего
- * внутреннего CLI `export-configuration` (`cli/commands/export-configuration.ts`,
- * см. `ExtensionCommandRunner.runBatchPartialDump` — тот же `-ProjectRoot/-Target/
- * -ConfigDir/-Mode/-Objects/-Extension` конвейер, только с новыми значениями `-Mode`
- * `UpdateInfo`/`Full` вместо единственного прежнего `Partial`). Реальный запуск
- * процесса (`dumpConfigurationToTemp`) не тестируется здесь — согласно плану
- * архитектора это единственная сознательно помеченная c8-ignore ветка нового
- * файла (внешний процесс, недоступный в CI).
+ * внутреннего CLI `export-configuration` (`cli/commands/export-configuration.ts`) —
+ * тот же `-ProjectRoot/-Target/-ConfigDir/-Mode/-Objects/-Extension` конвейер, что
+ * раньше использовал удалённый `ExtensionCommandRunner.runBatchPartialDump`, только
+ * с новыми значениями `-Mode` `UpdateInfo`/`Full` вместо единственного прежнего
+ * `Partial`. Реальный запуск процесса (`dumpConfigurationToTemp`) не тестируется
+ * здесь — согласно плану архитектора это единственная сознательно помеченная
+ * c8-ignore ветка нового файла (внешний процесс, недоступный в CI).
  */
 suite('ConfigurationDumpRunner — buildExportToTempCliArgs', () => {
   const cfTarget = { kind: 'cf' as const, name: 'ТорговыйУчет', rootPath: '/proj/src/cf' };

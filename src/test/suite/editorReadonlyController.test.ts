@@ -171,8 +171,10 @@ suite('EditorReadonlyController — issue #1: readonly-переходы уже �
 
       try {
         // Событие относится к СОВСЕМ ДРУГОМУ configRoot (tmpDir), файл открыт из outsideDir.
+        // Планирование (planTransitions) синхронно: файл вне configRoot события не попадает
+        // в applyNow, поэтому очередь (enqueue) вообще не запускается — проверяем эффект
+        // сразу же, без ожидания по таймеру.
         listener?.({ target: { configRoot: tmpDir }, fullNames: ['Справочник.А'], allObjects: ['Справочник.А'] });
-        await new Promise((resolve) => setTimeout(resolve, 100));
         assert.strictEqual(anyReadonlyCommandCalls, 0);
       } finally {
         disposable.dispose();
