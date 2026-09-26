@@ -331,9 +331,12 @@ async function acquireRootIncrementalDump(
   }
   const toFullName = (owner: string): string | null => {
     const fullName = dumpInfoOwnerToRepositoryFullName(owner, target);
+    /* c8 ignore start -- страховка от вида метаданных новой версии платформы, которого нет в
+       ONE_C_TYPE_NAMES: все префиксы реальных выгрузок 2.20/2.21 распознаются. */
     if (!fullName) {
       log(`владелец "${owner}" не распознан — пропущен.`);
     }
+    /* c8 ignore stop */
     return fullName;
   };
   // Неизвестный вид подчинённого сводится к единице-родителю — возможны повторы.
