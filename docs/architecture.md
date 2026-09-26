@@ -29,6 +29,13 @@ src/
 ├── Container.ts                      # composition root
 ├── domain/                           # чистый домен без vscode/fs/path
 ├── infra/                            # файловая система, XML, окружение, хранилище, git/, mcp/
+│   ├── repository/                   # RepositoryService (фасад) + RepositoryLockState (state.json),
+│   │                                  # RepositoryLockSnapshotStore (снимки/манифест корня),
+│   │                                  # RepositoryObjectNames/RepositoryObjectScope (единицы хранилища,
+│   │                                  # области файлов), RepositoryDumpPlan/RepositoryDumpRounds (план и
+│   │                                  # раунды выгрузки), RepositoryMergePlanner/Applier (трёхстороннее
+│   │                                  # слияние), ConfigDumpInfoDiff, ConfigurationChildObjectsSync,
+│   │                                  # RepositoryBindingStore — см. docs/repository-file-sync.md
 │   ├── mcp/                          # McpServerIdentity/McpStartDecision/McpPortProbe/
 │   │                                  # McpConflictPrompt/McpHost — чистая логика жизненного цикла
 │   │                                  # встроенного MCP-сервера (без vscode), см.
@@ -348,15 +355,18 @@ outputChannel) и в `bootstrap()` подписывается на `onDidChangeB
   `updateMainConfiguration`/`updateExtension`/`pickImportTargets`/`pickChangedConfigurations`,
   значение по умолчанию — `DEFAULT_EXTENSION_COMMANDS_DEPS`; необязательный параметр `deps` у
   `registerExtensionCommands`).
+- `ui/commands/repository/RepositoryLockSync.ts`/`RepositoryUnlockSync.ts` (issue #1) — `repository.lock`/
+  `update`/`unlock`/`commit`: занятость проверяется `ensureRepositoryGuardFree` до первого QuickPick, затем
+  ОДНА аренда `runExclusive` на CLI хранилища, изменение состояния захватов и выгрузку во временный каталог
+  (все раунды); слияние с проектом, модальные диалоги конфликтов/отката и диффы — строго после аренды.
+  Процесс 1С, выгрузка и диалоги внедряются через `RepositoryFileSyncDeps`. Подробно —
+  [repository-file-sync.md](./repository-file-sync.md).
 
 Известные ограничения:
 - Guard действует в пределах одного окна VS Code — второе окно и отдельный процесс CLI (`onec-tools`) им
   не сериализуются.
-- `repository.commit`/`update`/`lock`/`unlock` сами по себе (без последующего полного
-  импорта/обновления/применения конфигурации к базе) под guard не попадают — заведено отдельно, issue #40
-  форка.
-- Ветка `feature/repository-lock-unlock-file-sync` (issue #1) при слиянии должна обернуть свой полный
-  импорт в `guard.runExclusive`, держа модальные диалоги подтверждения вне аренды.
+- `repository.bind`/`create`/`unbind`/`report`/`dump`/`users`/`label` под guard не попадают — issue #40
+  форка (`lock`/`unlock`/`update`/`commit` сериализуются с issue #1, см. ниже).
 
 ### Режим поддержки поставщика (`ParentConfigurations.bin`)
 
@@ -514,6 +524,8 @@ extension.ts
 | Данные из базы (не из XML-выгрузки) передаются CLI → UI через `-ResultFile`, гейт разбора — `exitCode`, а не текст лога | Построчный перекодировщик вывода процесса (`LineBufferedDecoder`) не гарантирует целостность произвольных данных внутри marker-блока; `/Out`-файл — уже устоявшийся канал `*Configuration`-команд (см. «Паттерн: чтение данных из базы через пакетный Конфигуратор» выше) |
 | `ConfigurationCleanWindow`: окно тишины по корню конфигурации после импорта/обновления БД, единственный авторитетный пересчёт по его истечении | События watcher по файлам, записанным импортом, приходят уже после операции; даже облегчённый (по stat-индексу) `ConfigurationChangeDetector.detect` нельзя гонять на каждое из тысяч запоздавших событий, а без индекса полный пересчёт стоит ~7 с на 59 503 файлах (см. «Два механизма подавления собственных файловых событий» выше) |
 | `FileStatIndex` рядом со снапшотом хешей: переиспользование хеша по size+mtime+ctime вместо чтения содержимого файла | Повторная активация без правок выгрузки не должна перечитывать и хешировать все поддерживаемые файлы заново — `ctime` в критерии закрывает подмену `mtime` через `utimes`, racy-окно 2 с закрывает гранулярность отметок времени (см. «Stat-индекс рабочего дерева» выше) |
+| Файлы проекта — форк хранилища: выгрузка во временный каталог + трёхстороннее слияние (хранилище/локальный/хеш-кэш) вместо частичного импорта поверх проекта | Частичный импорт поверх проекта молча затирал локальные правки и не восстанавливал файлы при отмене захвата; слияние заменяет неизменённое молча, а при конфликте даёт один диалог с бэкапом (см. [repository-file-sync.md](./repository-file-sync.md)) |
+| Единица хранилища (подчинённые с собственным XML — формы, макеты, перерасчёты, таблицы/кубы, вложенные подсистемы) как отдельный объект выгрузки, захвата и снимка | Платформа не включает их в частичную выгрузку владельца и захватывает отдельно; без этого формы не обновлялись из хранилища, а перерасчёты/таблицы удалялись как «сироты» (§10.12 плана) |
 | `ConfigurationOperationGuard`: единый guard вместо модульного флага под каждым путём импорта/обновления/применения конфигурации к базе, аренда по токену, событие только на переходах | Прежний флаг `isUpdatingConfigurations` жил только в `ExtensionCommands` и не видел синхронизацию с хранилищем — параллельный post-sync и ручной импорт могли одновременно писать в одну базу (см. «Сериализация операций Конфигуратора с базой» выше) |
 
 ## Подробная документация
@@ -523,4 +535,5 @@ extension.ts
 - [Парсинг XML конфигурации](./metadata-parser.md) — алгоритмы разбора Configuration.xml и объектных XML.
 - [Изменения метаданных](./git-metadata-changes.md) — семантический git по объектам 1С, представление `v8vsceditChanges`.
 - [История изменений](./git-history-graph.md) — граф git-коммитов по объектам 1С, сворачиваемый блок панели `v8vsceditChanges`.
+- [Синхронизация с хранилищем](./repository-file-sync.md) — файлы проекта при захвате/получении/отмене захвата/помещении, единицы хранилища, слияние, снимки, readonly.
 - [Жизненный цикл MCP-сервера](./mcp-server-lifecycle.md) — старт/остановка, освобождение порта, обнаружение и разрешение конфликта порта; канон путей MCP-инструментов — отдельно, в [mcp-paths.md](./mcp-paths.md).

@@ -163,7 +163,11 @@ src/
 │   ├── cache/                        # MetadataCache, hashCache (CLI), FileStatIndex — stat-индекс
 │   │                                  # рабочего дерева (ускоритель ConfigurationChangeDetector, не
 │   │                                  # источник правды), см. docs/architecture.md
-│   ├── repository/                   # хранилище 1С, локальные захваты
+│   ├── repository/                   # хранилище 1С: RepositoryService (фасад), RepositoryLockState
+│   │                                  # (state.json), RepositoryLockSnapshotStore (снимки), единицы
+│   │                                  # хранилища и области (RepositoryObjectNames/Scope), раунды
+│   │                                  # выгрузки (RepositoryDumpPlan/Rounds), трёхстороннее слияние
+│   │                                  # (RepositoryMergePlanner/Applier) — см. docs/repository-file-sync.md
 │   ├── git/                          # статус Git для узлов метаданных (GitMetadataStatusService,
 │   │                                  # декорации) + представление «Изменения метаданных»
 │   │                                  # (GitPorcelainReader, MetadataChangeResolver,
@@ -339,6 +343,16 @@ Vue-приложения (сборка `vite.webview.config.ts`, проверк�
   переключения на ручной ввод значения пользователем. Подробности и обоснование —
   [architecture.md](./docs/architecture.md#паттерн-чтение-данных-из-базы-через-пакетный-конфигуратор-file-handoff).
 - **Открытие BSL-модулей:** только реальные `file://` документы (виртуальная схема `onec://` удалена). Readonly — через `ui/readonly/BslReadonlyGuard.ts`.
+- **Новая операция хранилища, меняющая файлы проекта** (аналог `repository.lock`/`update`/`unlock`/`commit`,
+  см. [repository-file-sync.md](./docs/repository-file-sync.md)): поток в `ui/commands/repository/*Sync.ts`
+  с внешними точками через `RepositoryFileSyncDeps` → занятость guard'а проверяется
+  (`ensureRepositoryGuardFree`) до первого диалога → ОДНА аренда `runExclusive` только на CLI хранилища,
+  `applyLock`/`applyUnlock` и выгрузку во временный каталог (`runDumpRounds`) → слияние
+  (`RepositoryMergePlanner`/`Applier`), модальные диалоги и диффы — после аренды → выгрузка никогда не пишется
+  прямо в проект, имена подчинённых объектов в `-listFile` берутся только из источника, соответствующего базе
+  (несуществующее имя роняет всю выгрузку) → новый вид подчинённого объекта с собственным XML — запись в
+  `REPOSITORY_SUBORDINATE_LAYOUT` (`RepositoryObjectNames.ts`), а не новый словарь → тест на копии реальной
+  фикстуры с имитацией платформы `src/test/suite/support/partialDumpFixture.ts`.
 - **Новая операция, запускающая Конфигуратор для полного импорта/обновления/применения конфигурации к
   базе** (аналог `importConfigurations`/`updateChangedConfigurations`/`runPostRepositorySync`): захват —
   через `services.configurationOperationGuard` (`runExclusive(title, op)` для одной атомарной цепочки
@@ -493,6 +507,13 @@ Vue-приложения (сборка `vite.webview.config.ts`, проверк�
    `git log --max-count` на каждый `historyLoadMore` (без курсора/`--skip`, осознанно ради детерминизма
    дорожек); резолвинг принадлежности файлов коммита объектам идёт по ТЕКУЩЕМУ списку `configRoots`, а не
    по структуре выгрузки на момент коммита — см. [git-history-graph.md](./docs/git-history-graph.md#известные-ограничения).
+10. Хранилище (`infra/repository/`): `ONE_C_TYPE_NAMES` (русские имена типов для `-listFile`/`Objects.xml`) и
+    `REPOSITORY_SUBORDINATE_LAYOUT` (каталоги и имена подчинённых объектов с собственным XML — перерасчёты,
+    таблицы, кубы, таблицы измерения не являются `MetaKind`) живут вне `META_TYPES`; при появлении этих видов в
+    навигаторе данные переезжают в реестр. `SupportInfoService.CHILD_FOLDERS_WITH_OWN_XML` дублирует часть
+    таблицы (issue #47). Команды `repository.bind`/`create`/`unbind`/`report`/`dump`/`users`/`label` идут мимо
+    `ConfigurationOperationGuard` (issue #40). См.
+    [repository-file-sync.md](./docs/repository-file-sync.md#известные-ограничения).
 
 ## `.cursor/`, `.codex/`, `.claude/skills/` — это доменные 1С-скилы, а не разработка расширения
 
