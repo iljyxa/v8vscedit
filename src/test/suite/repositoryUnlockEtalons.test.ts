@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import { acquireUnlockEtalons } from '../../ui/commands/repository/RepositoryUnlockEtalons';
 import type { RepositoryFileSyncDeps, RepositoryFileSyncServices, RepositorySubject } from '../../ui/commands/repository/RepositoryFileSyncShared';
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
+import { subordinateUnitFullName } from '../../infra/repository/RepositoryObjectNames';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOperationGuard';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
@@ -282,6 +283,120 @@ suite('RepositoryUnlockEtalons — acquireUnlockEtalons: dumpEtalons без сн
       result.dispose();
     } finally {
       fs.rmSync(ownerDumpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+function buildSubsystemXml(name: string, refs: string[], childSubsystems: string[]): string {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<MetaDataObject>
+  <Subsystem>
+    <Properties>
+      <Name>${name}</Name>
+      ${refs.length > 0
+        ? `<Content>${refs.map((ref) => `<xr:Item xsi:type="xr:MDObjectRef">${ref}</xr:Item>`).join('')}</Content>`
+        : '<Content/>'}
+    </Properties>
+    ${childSubsystems.length > 0
+      ? `<ChildObjects>${childSubsystems.map((child) => `<Subsystem>${child}</Subsystem>`).join('')}</ChildObjects>`
+      : '<ChildObjects/>'}
+  </Subsystem>
+</MetaDataObject>`;
+}
+
+suite('RepositoryUnlockEtalons — decideSnapshotEtalons: сортировка byDepth (issue #1, раздел 10, Р8)', () => {
+  test('при равной глубине предков (0) единицы упорядочиваются по имени (fallback localeCompare)', async () => {
+    const harness = createHarness();
+    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
+    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Б.xml'), '<MetaDataObject><Catalog><Properties><Name>Б</Name></Properties></Catalog></MetaDataObject>', 'utf-8');
+    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'А.xml'), '<MetaDataObject><Catalog><Properties><Name>А</Name></Properties></Catalog></MetaDataObject>', 'utf-8');
+
+    const subject = buildSubject(harness, 'Справочник.Б', ['Справочник.Б', 'Справочник.А']);
+    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-unlock-etalons-sort-dump-'));
+    try {
+      fs.mkdirSync(path.join(dumpDir, 'Catalogs'), { recursive: true });
+      fs.writeFileSync(path.join(dumpDir, 'Catalogs', 'Б.xml'), '<MetaDataObject/>', 'utf-8');
+      fs.writeFileSync(path.join(dumpDir, 'Catalogs', 'А.xml'), '<MetaDataObject/>', 'utf-8');
+      const deps = baseDeps({ dumpToTemp: () => Promise.resolve({ ok: true, dir: dumpDir, dispose: () => undefined }) });
+
+      // Оба переданы в порядке "Б", "А" (обратном алфавитному) — оба верхнеуровневые
+      // (ancestors.length===0 у обоих, разница глубин 0 — только тай-брейк по имени
+      // решает порядок обработки, а не порядок в исходном массиве released).
+      const result = await acquireUnlockEtalons(subject, ['Справочник.Б', 'Справочник.А'], true, {}, harness.services, deps);
+
+      assert.strictEqual(result.status, 'ready');
+      assert.deepStrictEqual(result.objects.map((o) => o.fullName), ['Справочник.А', 'Справочник.Б'], 'Порядок обработки обязан быть алфавитным (localeCompare), а не порядком исходного массива.');
+      result.dispose();
+    } finally {
+      fs.rmSync(dumpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+suite('RepositoryUnlockEtalons — isAbsentInDumpedParent: непосредственный родитель тоже не найден (issue #1, раздел 10, Р8)', () => {
+  test('раунд довыгрузки родителя провалился — потомок родителя тоже не получает эталон (ветка !parent)', async () => {
+    const harness = createHarness();
+    fs.mkdirSync(path.join(harness.configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница', 'Subsystems'), { recursive: true });
+    fs.writeFileSync(
+      path.join(harness.configRoot, 'Subsystems', 'Продажи.xml'),
+      buildSubsystemXml('Продажи', [], ['Розница']),
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(harness.configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница', 'Розница.xml'),
+      buildSubsystemXml('Розница', [], ['Интернет']),
+      'utf-8'
+    );
+    fs.mkdirSync(path.join(harness.configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница', 'Subsystems', 'Интернет'), { recursive: true });
+    fs.writeFileSync(
+      path.join(harness.configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница', 'Subsystems', 'Интернет', 'Интернет.xml'),
+      buildSubsystemXml('Интернет', [], []),
+      'utf-8'
+    );
+
+    const rozница = subordinateUnitFullName('Подсистема.Продажи', 'Subsystem', 'Розница');
+    const internet = subordinateUnitFullName(rozница, 'Subsystem', 'Интернет');
+
+    const dumpDirLevel0 = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-unlock-etalons-chain-level0-'));
+    try {
+      // Раунд 0 (анкер "Продажи") успешен и ссылается на "Розница".
+      fs.mkdirSync(path.join(dumpDirLevel0, 'Subsystems'), { recursive: true });
+      fs.writeFileSync(path.join(dumpDirLevel0, 'Subsystems', 'Продажи.xml'), buildSubsystemXml('Продажи', [], ['Розница']), 'utf-8');
+
+      let calls = 0;
+      const deps = baseDeps({
+        dumpToTemp: () => {
+          calls += 1;
+          if (calls === 1) {
+            return Promise.resolve({ ok: true, dir: dumpDirLevel0, dispose: () => undefined });
+          }
+          // Раунд довыгрузки "Розница" (обнаружена через закрытие "Продажи") проваливается —
+          // "Интернет" (вложенная под "Розница") так и не будет даже запрошена.
+          return Promise.resolve({ ok: false, reason: 'сеть недоступна' });
+        },
+      });
+
+      const subject = buildSubject(harness, 'Подсистема.Продажи', ['Подсистема.Продажи']);
+      const result = await acquireUnlockEtalons(
+        subject,
+        ['Подсистема.Продажи', rozница, internet],
+        true,
+        {},
+        harness.services,
+        deps
+      );
+
+      assert.strictEqual(result.status, 'ready');
+      assert.strictEqual(calls, 2, 'основной раунд ("Продажи") + провалившийся раунд довыгрузки ("Розница"); "Интернет" не запрашивается вовсе.');
+      assert.strictEqual(result.objects.length, 1, 'эталон есть только у "Продажи" — ни "Розница", ни "Интернет" эталона не получают.');
+      assert.strictEqual(result.objects[0].fullName, 'Подсистема.Продажи');
+      assert.ok(
+        harness.outputLines.some((line) => line.includes('версия хранилища не получена') && line.includes(internet)),
+        '"Интернет" (её непосредственный родитель тоже не найден) должна быть залогирована как непереданный эталон, а не упасть с ошибкой.'
+      );
+      result.dispose();
+    } finally {
+      fs.rmSync(dumpDirLevel0, { recursive: true, force: true });
     }
   });
 });

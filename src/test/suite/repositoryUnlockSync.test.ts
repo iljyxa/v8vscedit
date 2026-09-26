@@ -683,6 +683,43 @@ suite('RepositoryUnlockSync — commit keepLocked с рекурсивным ко
     assert.strictEqual(harness.repositoryService.isRootLocked(harness.target), true);
     assert.strictEqual(harness.repositoryService.snapshots.readRootManifestHashes(harness.target), undefined, 'Хеш-манифест здесь не создаётся — снимок обычный, по scope "root".');
   });
+
+  test('keepLocked=true, recursive=true, но владелец захвачен НЕрекурсивно (mode:"object") — подчинённая единица НЕ locked, снимок для неё не снимается (ветка "locked=false")', async () => {
+    const harness = createHarness();
+    // Владелец ссылается на форму в ChildObjects — buildRepositoryDumpPlan(recursive:true)
+    // раскроет её через expandSubordinateUnits и включит в subject.members, но на СЕРВЕРЕ
+    // (state.json) захвачен явно ТОЛЬКО владелец, причём с mode:"object" — правило старых
+    // записей не применяется, поэтому isLocked(форма)===false.
+    const ownerXmlPath = path.join(harness.configRoot, 'Catalogs', 'Товары.xml');
+    fs.mkdirSync(path.dirname(ownerXmlPath), { recursive: true });
+    fs.writeFileSync(
+      ownerXmlPath,
+      '<MetaDataObject><Catalog><Properties><Name>Товары</Name></Properties><ChildObjects><Form>Форма1</Form></ChildObjects></Catalog></MetaDataObject>',
+      'utf-8'
+    );
+    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs', 'Товары', 'Forms'), { recursive: true });
+    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Товары', 'Forms', 'Форма1.xml'), '<MetaDataObject/>', 'utf-8');
+
+    harness.repositoryService.lockState.applyLock(harness.target, {
+      anchor: 'Справочник.Товары',
+      members: ['Справочник.Товары'],
+      mode: 'object',
+    });
+    const formFullName = 'Справочник.Товары.Форма.Форма1';
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, formFullName), false, 'предпосылка: форма не должна считаться захваченной.');
+
+    const deps = baseDeps({ runRepositoryCli: () => Promise.resolve({ status: 'done' }) });
+    const outcome = await runRepositoryCommitFlow(
+      { nodeKind: 'Catalog', label: 'Товары', xmlPath: ownerXmlPath },
+      formData({ recursive: true, keepLocked: true }),
+      harness.services,
+      deps
+    );
+
+    assert.strictEqual(outcome, 'done');
+    assert.ok(harness.repositoryService.snapshots.readSnapshotInfo(harness.target, 'Справочник.Товары'), 'У владельца (он locked) снимок обязан быть снят.');
+    assert.strictEqual(harness.repositoryService.snapshots.readSnapshotInfo(harness.target, formFullName), undefined, 'У формы (locked=false) снимок сниматься не должен.');
+  });
 });
 
 suite('RepositoryUnlockSync — корень рекурсивно без манифеста, но с непустым хеш-кэшем', () => {
