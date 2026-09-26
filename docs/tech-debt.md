@@ -30,6 +30,5 @@
     источник `infra/fs/SubordinateObjectLayout.ts` (`SUBORDINATE_OBJECT_FOLDERS`), из которого его берут и
     `REPOSITORY_SUBORDINATE_LAYOUT`, и `SupportInfoService` (issue #47 закрыл дублирование
     `CHILD_FOLDERS_WITH_OWN_XML`); литералы папок для видов, не являющихся `MetaKind`, остаются техдолгом
-    внутри этого реестра. Команды `repository.bind`/`create`/`unbind`/`report`/`dump`/`users`/`label` идут мимо
-    `ConfigurationOperationGuard` (issue #40). См.
+    внутри этого реестра. См.
     [repository-file-sync.md](./repository-file-sync.md#известные-ограничения).
