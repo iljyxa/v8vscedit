@@ -71,9 +71,11 @@ export class RepositoryLockSnapshotStore {
 
   /**
    * Снимок из каталога выгрузки (версия хранилища, полученная при захвате).
-   * `keepFromProject` — файлы проекта (пути проекта), которых нет в неполной выгрузке:
-   * версия хранилища для них неизвестна, и без них откат при отмене захвата удалил бы
-   * их как «лишние». `subordinates` — подчинённые единицы версии хранилища: единица,
+   * `keepFromProject` — файлы проекта (пути проекта), добавляемые в снимок, если их нет
+   * в каталоге выгрузки. Производственные потоки его не передают: снимок описывает
+   * только версию хранилища, а подмешанный файл проекта откат считал бы эталоном.
+   * Параметр оставлен ради закреплённой сигнатуры (§10.13.6 плана) и тестов, которые
+   * проверяют его поведение. `subordinates` — подчинённые единицы версии хранилища: единица,
    * которой среди них нет, при отмене захвата считается созданной локально.
    * Возвращает хеши снятых файлов.
    */
@@ -230,10 +232,21 @@ export class RepositoryLockSnapshotStore {
   /**
    * Хеш-манифест всех файлов цели (без копий) — точка отсчёта рекурсивного захвата корня.
    * `overrides` — хеши версии хранилища для файлов, оставленных локальными при слиянии:
-   * манифест описывает хранилище, а не текущий проект.
+   * манифест описывает хранилище, а не текущий проект. `excludeRels` — локальные файлы,
+   * оставленные при слиянии, но отсутствующие в версии хранилища: их нельзя вносить в
+   * манифест, иначе расхождение с хранилищем «прощается» и владелец не попадёт в
+   * помещение/откат.
    */
-  captureRootManifest(target: RepositoryTarget, overrides: Readonly<Record<string, string>> = {}): void {
-    const manifest: RootManifest = { version: 1, hashes: { ...hashScopeFiles(target.configRoot, ALL_SCOPE), ...overrides } };
+  captureRootManifest(
+    target: RepositoryTarget,
+    overrides: Readonly<Record<string, string>> = {},
+    excludeRels: readonly string[] = []
+  ): void {
+    const excluded = new Set(excludeRels);
+    const hashes = Object.fromEntries(
+      Object.entries({ ...hashScopeFiles(target.configRoot, ALL_SCOPE), ...overrides }).filter(([rel]) => !excluded.has(rel))
+    );
+    const manifest: RootManifest = { version: 1, hashes };
     const filePath = path.join(this.getScopeDir(target), ROOT_MANIFEST_FILE);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, `${JSON.stringify(manifest)}\n`, 'utf-8');

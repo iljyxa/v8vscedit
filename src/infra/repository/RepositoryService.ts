@@ -7,7 +7,7 @@ import { escapeXmlAttribute as escapeXml, parseConfigXml, parseObjectXml } from 
 import { RepositoryBindingStore } from './RepositoryBindingStore';
 import { buildRepositoryScopeKey, RepositoryLockState } from './RepositoryLockState';
 import { RepositoryLockSnapshotStore } from './RepositoryLockSnapshotStore';
-import { getRootLockName, ONE_C_TYPE_NAMES, subordinateUnitFullName } from './RepositoryObjectNames';
+import { getRootLockName, ONE_C_TYPE_NAMES, parseRepositoryUnit, subordinateUnitFullName } from './RepositoryObjectNames';
 import { resolveUnitSuffixByRelativePath } from './RepositoryObjectScope';
 
 export interface RepositoryBinding {
@@ -281,7 +281,16 @@ export class RepositoryService {
     if (!ownerFullName) {
       return this.isMetadataEditRestricted(target, ownerObjectXmlPath);
     }
-    const unit = suffix.reduce((parent, segment) => subordinateUnitFullName(parent, segment.tag, segment.name), ownerFullName);
+    let unit = ownerFullName;
+    for (const segment of suffix) {
+      // Каталог с точкой в имени даёт нераспознанного родителя единицы: захват такой
+      // единицы проверить нельзя, а бросать отсюда нельзя — вызывается из guard'а
+      // редактора на каждом открытии документа. Безопасный дефолт — «ограничено».
+      if (!parseRepositoryUnit(unit)) {
+        return true;
+      }
+      unit = subordinateUnitFullName(unit, segment.tag, segment.name);
+    }
     return !this.isLocked(target, unit);
   }
 

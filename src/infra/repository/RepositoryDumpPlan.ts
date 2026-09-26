@@ -10,10 +10,13 @@ import {
   convertContentRefToRepositoryFullName,
   isRootLockName,
   ONE_C_TYPE_NAMES,
+  REPOSITORY_SUBORDINATE_LAYOUT,
   subordinateUnitFullName,
 } from './RepositoryObjectNames';
 import { resolveUnitXmlRel } from './RepositoryObjectScope';
 import type { RepositoryNodeRef } from './RepositoryService';
+
+const SUBSYSTEMS_FOLDER = REPOSITORY_SUBORDINATE_LAYOUT.Subsystem.folder;
 
 /**
  * Стратегия раскрытия единиц при выгрузке (см. RepositoryDumpRounds):
@@ -116,8 +119,8 @@ export function resolveSubsystemMemberFullNames(
       return;
     }
     for (const child of subsystem.childSubsystems) {
-      const nested = path.join(subsystem.homeDir, 'Subsystems', child, `${child}.xml`);
-      const flat = path.join(subsystem.homeDir, 'Subsystems', `${child}.xml`);
+      const nested = path.join(subsystem.homeDir, SUBSYSTEMS_FOLDER, child, `${child}.xml`);
+      const flat = path.join(subsystem.homeDir, SUBSYSTEMS_FOLDER, `${child}.xml`);
       visit(fs.existsSync(nested) ? nested : flat, subordinateUnitFullName(subsystemFullName, 'Subsystem', child));
     }
   };
