@@ -94,8 +94,35 @@ interface Harness {
   suppressCalls: string[][];
 }
 
+/** Корень реальной выгрузки-эталона (см. CLAUDE.md TDD п.3 — только реальные фикстуры). */
+const EXAMPLE_CF = path.resolve(__dirname, '../../../example/2.21/src/cf');
+
+/**
+ * Рабочая область — РЕАЛЬНАЯ копия `example/2.21/src/cf` (displayName в
+ * Configuration.xml — «ТорговыйУчет»). Тесты используют реальный `Справочник.Валюты`
+ * (плоский XML, `Ext/ObjectModule.bsl`, без подчинённых с собственным XML) как
+ * простой объект для happy-path/конфликтных сценариев, не завязанных на состав
+ * подчинённых единиц.
+ */
 function createHarness(): Harness {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lock-sync-'));
+  const configRoot = path.join(workspaceRoot, 'src', 'cf');
+  fs.cpSync(EXAMPLE_CF, configRoot, { recursive: true });
+  return buildHarnessAround(workspaceRoot, configRoot, 'ТорговыйУчет');
+}
+
+/**
+ * ВРЕМЕННАЯ СИНТЕТИКА (issue #1, раздел 10.7, фикстура F1 — issue #48 форка):
+ * реальной фикстуры вложенных подсистем (`Подсистема.A.Подсистема.B`) в `example/`
+ * ещё нет — её должен добавить пользователь через Конфигуратор. До появления F1
+ * механика раундов довыгрузки рекурсивной подсистемы (участники `<Content>`,
+ * вложенные `<ChildObjects>`, предел `MAX_DUMP_ROUNDS`, D3-имя вложенной
+ * подсистемы) проверяется на минимальном синтетическом дереве
+ * подсистем/справочников — единственное узкое место, где правило «только
+ * реальные фикстуры» временно не соблюдается (см. отчёт test-writer).
+ */
+function createSyntheticSubsystemHarness(): Harness {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lock-sync-synthetic-'));
   const configRoot = path.join(workspaceRoot, 'src', 'cf');
   fs.mkdirSync(configRoot, { recursive: true });
   // <Name> обязателен: resolveTargetByConfigRoot() читает реальное имя из
@@ -103,9 +130,12 @@ function createHarness(): Harness {
   // отдельно только для isLocked/isRootLocked-проверок) — без тега displayName
   // при резолве узла становится именем каталога ("cf"), а не "Тест".
   fs.writeFileSync(path.join(configRoot, 'Configuration.xml'), '<MetaDataObject><Name>Тест</Name></MetaDataObject>', 'utf-8');
+  return buildHarnessAround(workspaceRoot, configRoot, 'Тест');
+}
 
+function buildHarnessAround(workspaceRoot: string, configRoot: string, displayName: string): Harness {
   const repositoryService = new RepositoryService(workspaceRoot, new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot));
-  const target: RepositoryTarget = { configRoot, configKind: 'cf', displayName: 'Тест' };
+  const target: RepositoryTarget = { configRoot, configKind: 'cf', displayName };
   const guard = new ConfigurationOperationGuard();
   const outputLines: string[] = [];
   const refreshCacheForFilesCalls: string[][] = [];
@@ -160,12 +190,10 @@ function baseDeps(overrides: Partial<RepositoryFileSyncDeps> = {}): RepositoryFi
   };
 }
 
+/** Узел РЕАЛЬНОГО справочника фикстуры (по умолчанию — 'Валюты', см. createHarness). */
 function catalogNode(harness: Harness, objectName: string): RepositoryNodeRef {
   const xmlPath = path.join(harness.configRoot, 'Catalogs', `${objectName}.xml`);
-  fs.mkdirSync(path.dirname(xmlPath), { recursive: true });
-  if (!fs.existsSync(xmlPath)) {
-    fs.writeFileSync(xmlPath, '<MetaDataObject/>', 'utf-8');
-  }
+  assert.ok(fs.existsSync(xmlPath), `ожидался реальный объект фикстуры Catalogs/${objectName}.xml`);
   return { nodeKind: 'Catalog', label: objectName, xmlPath };
 }
 
@@ -207,14 +235,14 @@ suite('RepositoryLockSync — ensureRepositoryGuardFree', () => {
 suite('RepositoryLockSync — runRepositoryLockFlow: guard/busy семантика', () => {
   test('guard занят ДО показа диалогов — busy, CLI не вызывается, state не меняется', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
+    const node = catalogNode(harness, 'Валюты');
     const lease = harness.guard.tryAcquire('Синхронизация с хранилищем');
     const deps = baseDeps();
 
     const outcome = await runRepositoryLockFlow(node, false, harness.services, deps);
 
     assert.strictEqual(outcome, 'busy');
-    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Товары'), false);
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Валюты'), false);
     lease?.release();
   });
 
@@ -232,7 +260,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: guard/busy семантик
 suite('RepositoryLockSync — runRepositoryLockFlow: CLI failed/interrupted', () => {
   test('CLI status:"failed" → outcome "failed", notifyError вызван, guard освобождён, state не изменён', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
+    const node = catalogNode(harness, 'Валюты');
     let notifyErrorCalls = 0;
     const deps = baseDeps({
       runRepositoryCli: () => {
@@ -247,12 +275,12 @@ suite('RepositoryLockSync — runRepositoryLockFlow: CLI failed/interrupted', ()
     assert.strictEqual(outcome, 'failed');
     assert.strictEqual(notifyErrorCalls, 1);
     assert.strictEqual(harness.guard.isBusy, false);
-    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Товары'), false);
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Валюты'), false);
   });
 
   test('CLI status:"interrupted" → outcome "interrupted", state не изменён', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
+    const node = catalogNode(harness, 'Валюты');
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'interrupted', message: 'отменено пользователем' }),
       notifyWarning: () => undefined,
@@ -262,15 +290,15 @@ suite('RepositoryLockSync — runRepositoryLockFlow: CLI failed/interrupted', ()
     const outcome = await runRepositoryLockFlow(node, false, harness.services, deps);
 
     assert.strictEqual(outcome, 'interrupted');
-    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Товары'), false);
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Валюты'), false);
   });
 });
 
 suite('RepositoryLockSync — runRepositoryLockFlow: happy path без конфликтов', () => {
   test('без локальных изменений — молчаливое применение, снимок из temp, suppress до и после записи, refreshCacheForFiles, markChanged НЕ вызван', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
-    const objectModulePath = path.join(harness.configRoot, 'Catalogs', 'Товары', 'Ext', 'ObjectModule.bsl');
+    const node = catalogNode(harness, 'Валюты');
+    const objectModulePath = path.join(harness.configRoot, 'Catalogs', 'Валюты', 'Ext', 'ObjectModule.bsl');
     fs.mkdirSync(path.dirname(objectModulePath), { recursive: true });
     fs.writeFileSync(objectModulePath, 'старое содержимое', 'utf-8');
 
@@ -278,10 +306,10 @@ suite('RepositoryLockSync — runRepositoryLockFlow: happy path без конф�
     const scopeKey = buildScopeKey('cf', harness.configRoot, '');
     saveHashCache(harness.workspaceRoot, {
       schemaVersion: 1, scopeKey, generatedAt: '',
-      files: { 'Catalogs/Товары/Ext/ObjectModule.bsl': computeFileHash(objectModulePath) },
+      files: { 'Catalogs/Валюты/Ext/ObjectModule.bsl': computeFileHash(objectModulePath) },
     });
 
-    const dump = makeTempDump({ 'Catalogs/Товары/Ext/ObjectModule.bsl': 'новое содержимое из хранилища' });
+    const dump = makeTempDump({ 'Catalogs/Валюты/Ext/ObjectModule.bsl': 'новое содержимое из хранилища' });
     const dumpToTempCalls: unknown[] = [];
     const deps = baseDeps({
       runRepositoryCli: () => {
@@ -300,7 +328,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: happy path без конф�
     assert.strictEqual(outcome, 'done');
     assert.strictEqual(dumpToTempCalls.length, 1);
     assert.strictEqual(fs.readFileSync(objectModulePath, 'utf-8'), 'новое содержимое из хранилища');
-    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Товары'), true);
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Валюты'), true);
     assert.ok(harness.markChangedCalls.length === 0, 'Без расхождения от базы markChangedConfigurationByFiles не должен вызываться.');
     assert.ok(harness.suppressCalls.length >= 1, 'suppressConfigurationReloadForFiles должен вызываться до записи файлов.');
     assert.ok(harness.refreshCacheForFilesCalls.length >= 1 || harness.treeRefreshCalls >= 1);
@@ -308,12 +336,12 @@ suite('RepositoryLockSync — runRepositoryLockFlow: happy path без конф�
     assert.strictEqual(harness.guard.isBusy, false);
 
     const cache = loadHashCache(harness.workspaceRoot, scopeKey);
-    assert.strictEqual(cache.files['Catalogs/Товары/Ext/ObjectModule.bsl'], computeFileHash(objectModulePath));
+    assert.strictEqual(cache.files['Catalogs/Валюты/Ext/ObjectModule.bsl'], computeFileHash(objectModulePath));
   });
 
   test('настройка синхронизации выключена — CLI и state применяются, но выгрузка/слияние не выполняются', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
+    const node = catalogNode(harness, 'Валюты');
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
       isFileSyncEnabled: () => false,
@@ -322,28 +350,15 @@ suite('RepositoryLockSync — runRepositoryLockFlow: happy path без конф�
     const outcome = await runRepositoryLockFlow(node, false, harness.services, deps);
 
     assert.strictEqual(outcome, 'done');
-    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Товары'), true);
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Валюты'), true);
   });
 });
 
+// `setupConflict` — общая функция уровня модуля, объявлена ниже (hoisting).
 suite('RepositoryLockSync — runRepositoryLockFlow: конфликт × {compare, replace, keep-local}', () => {
-  function setupConflict(harness: Harness) {
-    const objectModulePath = path.join(harness.configRoot, 'Catalogs', 'Товары', 'Ext', 'ObjectModule.bsl');
-    fs.mkdirSync(path.dirname(objectModulePath), { recursive: true });
-    fs.writeFileSync(objectModulePath, 'локальная правка', 'utf-8');
-    // База (последний известный хеш) отличается от текущего локального — конфликт.
-    const scopeKey = buildScopeKey('cf', harness.configRoot, '');
-    saveHashCache(harness.workspaceRoot, {
-      schemaVersion: 1, scopeKey, generatedAt: '',
-      files: { 'Catalogs/Товары/Ext/ObjectModule.bsl': 'какой-то-другой-хеш-базы' },
-    });
-    const dump = makeTempDump({ 'Catalogs/Товары/Ext/ObjectModule.bsl': 'версия хранилища' });
-    return { objectModulePath, dump };
-  }
-
   test('choice="replace" — файл перезаписывается версией хранилища, диалог показан ВНЕ аренды (guard.isBusy=false)', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
+    const node = catalogNode(harness, 'Валюты');
     const { objectModulePath, dump } = setupConflict(harness);
 
     let observedBusyDuringDialog: boolean | undefined;
@@ -365,7 +380,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: конфликт × {compar
 
   test('choice="compare" — файл перезаписывается версией хранилища, openDiffs вызван с текстовой парой', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
+    const node = catalogNode(harness, 'Валюты');
     const { objectModulePath, dump } = setupConflict(harness);
 
     let openDiffsCalls = 0;
@@ -385,12 +400,12 @@ suite('RepositoryLockSync — runRepositoryLockFlow: конфликт × {compar
 
   test('choice="keep-local" — файл НЕ перезаписывается, помечается изменённым, хеш-кэш = хеш хранилища', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
+    const node = catalogNode(harness, 'Валюты');
     const { objectModulePath, dump } = setupConflict(harness);
     // Хеш версии хранилища снимается ДО прогона потока: `runRepositoryLockFlow`
     // обязан удалить временный каталог выгрузки (`dispose()`) в finally, поэтому
     // после await-а каталога уже не существует.
-    const repositoryHash = computeFileHash(path.join(dump.dir, 'Catalogs/Товары/Ext/ObjectModule.bsl'));
+    const repositoryHash = computeFileHash(path.join(dump.dir, 'Catalogs/Валюты/Ext/ObjectModule.bsl'));
 
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
@@ -406,21 +421,21 @@ suite('RepositoryLockSync — runRepositoryLockFlow: конфликт × {compar
 
     const scopeKey = buildScopeKey('cf', harness.configRoot, '');
     const cache = loadHashCache(harness.workspaceRoot, scopeKey);
-    assert.strictEqual(cache.files['Catalogs/Товары/Ext/ObjectModule.bsl'], repositoryHash);
+    assert.strictEqual(cache.files['Catalogs/Валюты/Ext/ObjectModule.bsl'], repositoryHash);
   });
 
   test('несохранённый редактор (getDirtyFilePaths) принудительно даёт конфликт даже при отсутствии расхождения по хешу', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
-    const objectModulePath = path.join(harness.configRoot, 'Catalogs', 'Товары', 'Ext', 'ObjectModule.bsl');
+    const node = catalogNode(harness, 'Валюты');
+    const objectModulePath = path.join(harness.configRoot, 'Catalogs', 'Валюты', 'Ext', 'ObjectModule.bsl');
     fs.mkdirSync(path.dirname(objectModulePath), { recursive: true });
     fs.writeFileSync(objectModulePath, 'содержимое', 'utf-8');
     const scopeKey = buildScopeKey('cf', harness.configRoot, '');
     saveHashCache(harness.workspaceRoot, {
       schemaVersion: 1, scopeKey, generatedAt: '',
-      files: { 'Catalogs/Товары/Ext/ObjectModule.bsl': computeFileHash(objectModulePath) },
+      files: { 'Catalogs/Валюты/Ext/ObjectModule.bsl': computeFileHash(objectModulePath) },
     });
-    const dump = makeTempDump({ 'Catalogs/Товары/Ext/ObjectModule.bsl': 'содержимое' });
+    const dump = makeTempDump({ 'Catalogs/Валюты/Ext/ObjectModule.bsl': 'содержимое' });
 
     let conflictShown = false;
     const deps = baseDeps({
@@ -507,11 +522,11 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень конфигу
 suite('RepositoryLockSync — runRepositoryUpdateFlow', () => {
   test('force/version передаются в CLI, снимок пересоздаётся ТОЛЬКО если объект был захвачен (isLocked)', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
-    harness.repositoryService.lockState.applyLock(harness.target, { anchor: 'Справочник.Товары', members: ['Справочник.Товары'] });
+    const node = catalogNode(harness, 'Валюты');
+    harness.repositoryService.lockState.applyLock(harness.target, { anchor: 'Справочник.Валюты', members: ['Справочник.Валюты'] });
 
     let observedExtraArgs: string[] | undefined;
-    const dump = makeTempDump({ 'Catalogs/Товары/Ext/ObjectModule.bsl': 'из хранилища v125' });
+    const dump = makeTempDump({ 'Catalogs/Валюты/Ext/ObjectModule.bsl': 'из хранилища v125' });
     const deps = baseDeps({
       runRepositoryCli: (options: { command: string; target: RepositoryTarget; extraArgs: string[] }) => {
         observedExtraArgs = options.extraArgs;
@@ -529,8 +544,8 @@ suite('RepositoryLockSync — runRepositoryUpdateFlow', () => {
 
   test('незахваченный объект: update без снимка (пересъём не выполняется, но выгрузка/слияние всё равно происходят)', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
-    const dump = makeTempDump({ 'Catalogs/Товары/Ext/ObjectModule.bsl': 'из хранилища' });
+    const node = catalogNode(harness, 'Валюты');
+    const dump = makeTempDump({ 'Catalogs/Валюты/Ext/ObjectModule.bsl': 'из хранилища' });
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
       dumpToTemp: () => Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose }),
@@ -539,12 +554,12 @@ suite('RepositoryLockSync — runRepositoryUpdateFlow', () => {
     const outcome = await runRepositoryUpdateFlow(node, { recursive: false, force: false }, harness.services, deps);
 
     assert.strictEqual(outcome, 'done');
-    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Товары'), false, 'update не должен сам захватывать объект.');
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Валюты'), false, 'update не должен сам захватывать объект.');
   });
 
   test('выгрузка после update провалилась (dumpToTemp вернул ok:false) — CLI/state уже применены, ошибка выгрузки не откатывает update', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
+    const node = catalogNode(harness, 'Валюты');
     let notifyErrorCalls = 0;
     const deps = baseDeps({
       runRepositoryCli: () => Promise.resolve({ status: 'done' }),
@@ -565,8 +580,8 @@ suite('RepositoryLockSync — runRepositoryLockFlow: узел без валид�
     const harness = createHarness();
     const node: RepositoryNodeRef = {
       nodeKind: 'Catalog',
-      label: 'Товары',
-      xmlPath: path.join(harness.workspaceRoot, 'нет-такого-каталога', 'Товары.xml'),
+      label: 'Валюты',
+      xmlPath: path.join(harness.workspaceRoot, 'нет-такого-каталога', 'Валюты.xml'),
     };
     let notifyErrorCalls = 0;
     const deps = baseDeps({ notifyError: () => { notifyErrorCalls += 1; } });
@@ -582,23 +597,21 @@ suite('RepositoryLockSync — runRepositoryLockFlow: узел без label и с
   test('node.label не задан — fullName резолвится из <Name> XML объекта, метка операции берётся из target.displayName', async () => {
     const harness = createHarness();
     // Без node.label resolveFullName() падает обратно на <Name> из самого XML объекта
-    // (RepositoryService.buildRootObjectFullName) — простая заглушка '<MetaDataObject/>'
-    // без <Name> для этого сценария не годится.
-    const xmlPath = path.join(harness.configRoot, 'Catalogs', 'Товары.xml');
-    fs.mkdirSync(path.dirname(xmlPath), { recursive: true });
-    fs.writeFileSync(xmlPath, '<MetaDataObject><Catalog><Properties><Name>Товары</Name></Properties></Catalog></MetaDataObject>', 'utf-8');
+    // (RepositoryService.buildRootObjectFullName) — реальный Catalogs/Валюты.xml фикстуры
+    // содержит настоящий <Catalog><Properties><Name>Валюты</Name>, синтетический XML не нужен.
+    const xmlPath = path.join(harness.configRoot, 'Catalogs', 'Валюты.xml');
     const node: RepositoryNodeRef = { nodeKind: 'Catalog', xmlPath };
     const deps = baseDeps({ runRepositoryCli: () => Promise.resolve({ status: 'done' }), isFileSyncEnabled: () => false });
 
     const outcome = await runRepositoryLockFlow(node, false, harness.services, deps);
 
     assert.strictEqual(outcome, 'done');
-    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Товары'), true);
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Валюты'), true);
   });
 
   test('runRepositoryCli бросает исключение внутри аренды — reportFlowError, outcome "failed", guard освобождён', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
+    const node = catalogNode(harness, 'Валюты');
     let notifyErrorCalls = 0;
     const deps = baseDeps({
       runRepositoryCli: () => { throw new Error('сбой процесса'); },
@@ -615,7 +628,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: узел без label и с
 
   test('completeFetchSync бросает исключение (chooseConflictResolution упал) — outcome всё равно "done" (захват уже состоялся)', async () => {
     const harness = createHarness();
-    const node = catalogNode(harness, 'Товары');
+    const node = catalogNode(harness, 'Валюты');
     const { objectModulePath, dump } = setupConflict(harness);
     let notifyErrorCalls = 0;
     const deps = baseDeps({
@@ -635,15 +648,15 @@ suite('RepositoryLockSync — runRepositoryLockFlow: узел без label и с
 });
 
 function setupConflict(harness: Harness) {
-  const objectModulePath = path.join(harness.configRoot, 'Catalogs', 'Товары', 'Ext', 'ObjectModule.bsl');
+  const objectModulePath = path.join(harness.configRoot, 'Catalogs', 'Валюты', 'Ext', 'ObjectModule.bsl');
   fs.mkdirSync(path.dirname(objectModulePath), { recursive: true });
   fs.writeFileSync(objectModulePath, 'локальная правка', 'utf-8');
   const scopeKey = buildScopeKey('cf', harness.configRoot, '');
   saveHashCache(harness.workspaceRoot, {
     schemaVersion: 1, scopeKey, generatedAt: '',
-    files: { 'Catalogs/Товары/Ext/ObjectModule.bsl': 'какой-то-другой-хеш-базы' },
+    files: { 'Catalogs/Валюты/Ext/ObjectModule.bsl': 'какой-то-другой-хеш-базы' },
   });
-  const dump = makeTempDump({ 'Catalogs/Товары/Ext/ObjectModule.bsl': 'версия хранилища' });
+  const dump = makeTempDump({ 'Catalogs/Валюты/Ext/ObjectModule.bsl': 'версия хранилища' });
   return { objectModulePath, dump };
 }
 
@@ -670,9 +683,10 @@ function subsystemNode(harness: Harness, name: string): RepositoryNodeRef {
   return { nodeKind: 'Subsystem', label: name, xmlPath };
 }
 
-suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная подсистема — довыгрузка недостающих участников', () => {
+// временно синтетика: ждёт фикстуру F1 (issue #48) — заменить на реальную вложенную подсистему
+suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная подсистема — довыгрузка недостающих участников (временно синтетика: ждёт фикстуру F1, issue #48)', () => {
   test('несколько раундов довыгрузки до неподвижной точки: новый объект найден в раунде 1, раунд 2 ничего не находит — 2 вызова dumpToTemp', async () => {
-    const harness = createHarness();
+    const harness = createSyntheticSubsystemHarness();
     fs.mkdirSync(path.join(harness.configRoot, 'Subsystems'), { recursive: true });
     fs.writeFileSync(
       path.join(harness.configRoot, 'Subsystems', 'Продажи.xml'),
@@ -729,7 +743,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная по
   }
 
   test(`лимит ${String(MAX_DUMP_ROUNDS)} раундов: цепочка вложенных подсистем длиннее лимита — довыгрузка останавливается на границе`, async () => {
-    const harness = createHarness();
+    const harness = createSyntheticSubsystemHarness();
     fs.mkdirSync(path.join(harness.configRoot, 'Subsystems'), { recursive: true });
     fs.writeFileSync(
       path.join(harness.configRoot, 'Subsystems', 'Продажи.xml'),
@@ -788,7 +802,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная по
   });
 
   test('раунд довыгрузки провалился — цикл останавливается с предупреждением в журнале, ранее найденное сохраняется', async () => {
-    const harness = createHarness();
+    const harness = createSyntheticSubsystemHarness();
     fs.mkdirSync(path.join(harness.configRoot, 'Subsystems'), { recursive: true });
     fs.writeFileSync(
       path.join(harness.configRoot, 'Subsystems', 'Продажи.xml'),
@@ -845,7 +859,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: рекурсивная по
   });
 
   test('вложенная дочерняя подсистема: единица с каноничным D3-именем находится и захватывается отдельно от корневой', async () => {
-    const harness = createHarness();
+    const harness = createSyntheticSubsystemHarness();
     fs.mkdirSync(path.join(harness.configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница'), { recursive: true });
     fs.writeFileSync(
       path.join(harness.configRoot, 'Subsystems', 'Продажи.xml'),
@@ -895,7 +909,7 @@ suite('RepositoryLockSync — runRepositoryLockFlow: область объект
     const harness = createHarness();
     // xmlPath указывает на РЕАЛЬНЫЙ существующий файл (чтобы резолвился корень конфигурации),
     // но label подставлен так, что итоговый fullName не соответствует никакому реальному объекту.
-    const real = catalogNode(harness, 'РеальныйОбъект');
+    const real = catalogNode(harness, 'Валюты');
     const node: RepositoryNodeRef = { nodeKind: 'Catalog', label: 'НесуществующийОбъект', xmlPath: real.xmlPath };
     const dump = makeTempDump({});
     const deps = baseDeps({
@@ -1203,6 +1217,71 @@ suite('RepositoryLockSync — runRepositoryLockFlow: корень рекурси
       manifestHashes['Catalogs/Изменяемый.xml'],
       repositoryHash,
       'Эталон отмены обязан отражать версию ХРАНИЛИЩА для keep-local файла, а не оставленную локальную (иначе изменения будут потеряны при следующем сравнении с базой).'
+    );
+  });
+
+  /**
+   * Reviewer #4 (issue #1, раздел 10): keep-local на "conflict-delete" — локальный файл,
+   * которого НЕТ в версии хранилища (repositoryHash===null). Такой файл не должен
+   * попадать в манифест корня вовсе: если его хеш просто зафиксировать как "эталон",
+   * следующая отмена захвата (unlock) навсегда "простит" файл, которого хранилище
+   * никогда не содержало, и не предложит его удалить при откате.
+   */
+  test('Р4: keep-local на conflict-delete — локальный файл без версии хранилища исключается из манифеста корня', async () => {
+    const harness = createHarness();
+    const projectInfo = configDumpInfoXml([
+      { name: 'Catalog.Изменяемый.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий1.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий2.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий3.ObjectModule', version: '1' },
+    ]);
+    fs.writeFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), projectInfo, 'utf-8');
+    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
+    // Собственный XML владельца совпадает с версией хранилища — единственный конфликт
+    // в сценарии обязан быть только из-за "осиротевшего" локального файла ниже.
+    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Изменяемый.xml'), '<MetaDataObject>версия хранилища v2</MetaDataObject>', 'utf-8');
+    // Локальный файл, которого НИКОГДА не было и нет в версии хранилища (нет хеш-кэша,
+    // поэтому localHash !== baseHash===null) — законный "conflict-delete".
+    const orphanPath = path.join(harness.configRoot, 'Catalogs', 'Изменяемый', 'Ext', 'ЧерновыеЗаметки.txt');
+    fs.mkdirSync(path.dirname(orphanPath), { recursive: true });
+    fs.writeFileSync(orphanPath, 'локальный черновик, которого никогда не было в хранилище', 'utf-8');
+
+    const nextInfo = configDumpInfoXml([
+      { name: 'Catalog.Изменяемый.ObjectModule', version: '2' },
+      { name: 'Catalog.Тихий1.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий2.ObjectModule', version: '1' },
+      { name: 'Catalog.Тихий3.ObjectModule', version: '1' },
+    ]);
+    const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextInfo });
+    const partialDump = makeTempDump({ 'Catalogs/Изменяемый.xml': '<MetaDataObject>версия хранилища v2</MetaDataObject>' });
+    let conflictCount = -1;
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      chooseConflictResolution: (summary) => {
+        conflictCount = summary.conflictCount;
+        return Promise.resolve('keep-local');
+      },
+      dumpToTemp: (_target, request) => Promise.resolve(request.mode === 'update-info'
+        ? { ok: true, dir: infoDump.dir, dispose: infoDump.dispose }
+        : { ok: true, dir: partialDump.dir, dispose: partialDump.dispose }),
+    });
+
+    const outcome = await runRepositoryLockFlow(
+      { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(harness.configRoot, 'Configuration.xml') },
+      true,
+      harness.services,
+      deps
+    );
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(conflictCount, 1, 'предпосылка: единственный конфликт в сценарии — осиротевший локальный файл (главный XML совпадает с хранилищем).');
+    assert.strictEqual(fs.existsSync(orphanPath), true, 'keep-local не должен удалять локальный файл.');
+
+    const diff = harness.repositoryService.snapshots.diffRootManifest(harness.target);
+    assert.ok(diff.hasManifest);
+    assert.ok(
+      diff.owners.includes('Справочник.Изменяемый'),
+      `владелец локального файла без версии хранилища обязан считаться расхождением сразу после захвата, иначе он «прощён» навсегда (получено owners=${JSON.stringify(diff.owners)}).`
     );
   });
 });

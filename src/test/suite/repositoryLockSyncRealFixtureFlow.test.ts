@@ -4,10 +4,12 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { runRepositoryLockFlow } from '../../ui/commands/repository/RepositoryLockSync';
+import { runRepositoryUnlockFlow } from '../../ui/commands/repository/RepositoryUnlockSync';
 import type { RepositoryFileSyncDeps, RepositoryFileSyncServices } from '../../ui/commands/repository/RepositoryFileSyncShared';
 import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOperationGuard';
 import { RepositoryService, type RepositoryNodeRef, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
+import { buildScopeKey, computeFileHash, saveHashCache } from '../../infra/cache/HashCache';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import type { MetadataTreeProvider } from '../../ui/tree/MetadataTreeProvider';
 import { createPartialDumpFixture, KNOWN_FIXTURE_UNITS } from './support/partialDumpFixture';
@@ -44,9 +46,19 @@ interface Harness {
   outputLines: string[];
 }
 
+// N6: copии всей example/2.21/src/cf занимают заметное место на диске — teardown
+// каждой suite ниже удаляет всё, что накопилось за её тесты (см. cleanupRealFixtureHarnesses).
+const createdWorkspaceRoots: string[] = [];
+
+/** Удаляет временные рабочие области, созданные createRealFixtureHarness() с прошлого вызова. */
+function cleanupRealFixtureHarnesses(): void {
+  createdWorkspaceRoots.splice(0).forEach((dir) => fs.rmSync(dir, { recursive: true, force: true }));
+}
+
 /** Рабочая область с РЕАЛЬНОЙ копией example/2.21/src/cf (не синтетическим стабом). */
 function createRealFixtureHarness(): Harness {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lock-sync-real-'));
+  createdWorkspaceRoots.push(workspaceRoot);
   const configRoot = path.join(workspaceRoot, 'src', 'cf');
   fs.cpSync(EXAMPLE_CF, configRoot, { recursive: true });
 
@@ -95,6 +107,8 @@ function catalogNode(harness: Harness, folder: string, name: string): Repository
 }
 
 suite('RepositoryLockSync — реальная фикстура: рекурсивный захват объекта (issue #1, раздел 10, критерий 10.1.2)', () => {
+  teardown(cleanupRealFixtureHarnesses);
+
   test('Справочник.Контрагенты рекурсивно: 1 вызов dumpToTemp, 4 единицы захвачены (mode:"recursive"), 4 снимка depth:"unit"', async () => {
     const harness = createRealFixtureHarness();
     const fixture = createPartialDumpFixture(EXAMPLE_CF, harness.target.displayName);
@@ -189,6 +203,121 @@ suite('RepositoryLockSync — реальная фикстура: рекурси�
   });
 });
 
+suite('RepositoryLockSync — реальная фикстура: нерекурсивный захват объекта с подчинёнными (issue #1, раздел 10, критерий 10.1.3)', () => {
+  teardown(cleanupRealFixtureHarnesses);
+
+  test('Справочник.Контрагенты нерекурсивно: 1 вызов dumpToTemp только по владельцу, Forms/Templates побайтово не тронуты, isEditRestricted по единицам', async () => {
+    const harness = createRealFixtureHarness();
+    const fixture = createPartialDumpFixture(EXAMPLE_CF, harness.target.displayName);
+    fixture.probeBusy = () => harness.guard.isBusy;
+    // Хеш-кэш "врёт" о состоянии формы — нерекурсивный захват НЕ обязан даже
+    // заглядывать в файлы подчинённых: они вне области владельца (unit).
+    const scopeKey = buildScopeKey('cf', harness.configRoot, '');
+    saveHashCache(harness.workspaceRoot, {
+      schemaVersion: 1, scopeKey, generatedAt: '',
+      files: { 'Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/Form.xml': 'заведомо неверный хеш' },
+    });
+    const deps = baseDeps(fixture);
+    // isEditRestricted ограничивает редактирование только при АКТИВНОМ подключении
+    // к хранилищу (привязка + connected) — так же, как в repositoryService.test.ts.
+    // Привязка обязана быть установлена ДО lock-потока: saveBinding сбрасывает
+    // состояние захватов ("новая привязка начинается с чистого состояния").
+    await harness.repositoryService.saveBinding(harness.target, { repoPath: '\\\\repo\\storage', repoUser: 'tester', repoPassword: 'secret' });
+    harness.repositoryService.setConnected(harness.target, true);
+
+    const outcome = await runRepositoryLockFlow(catalogNode(harness, 'Catalogs', 'Контрагенты'), false, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(fixture.calls.length, 1, 'нерекурсивный захват — ровно один вызов dumpToTemp.');
+    assert.deepStrictEqual(fixture.calls[0].names, [KNOWN_FIXTURE_UNITS.kontragenty]);
+    assert.strictEqual(fixture.calls[0].busy, true);
+
+    for (const rel of [
+      'Catalogs/Контрагенты/Forms/ФормаЭлемента.xml',
+      'Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/Form.xml',
+      'Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/Form/Module.bsl',
+      'Catalogs/Контрагенты/Forms/ФормаСписка.xml',
+      'Catalogs/Контрагенты/Templates/ЗагрузкаИзФайла.xml',
+    ]) {
+      assert.strictEqual(
+        fs.readFileSync(path.join(harness.configRoot, rel)).equals(fs.readFileSync(path.join(EXAMPLE_CF, rel))),
+        true,
+        `"${rel}" вне области нерекурсивного захвата владельца — обязан остаться побайтово нетронутым (даже с "неверным" хешем в кэше).`
+      );
+    }
+
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, KNOWN_FIXTURE_UNITS.kontragenty), true);
+    assert.strictEqual(
+      harness.repositoryService.isEditRestricted(path.join(harness.configRoot, 'Catalogs', 'Контрагенты', 'Forms', 'ФормаЭлемента.xml')),
+      true,
+      'форма НЕ захвачена нерекурсивной операцией — редактирование должно быть ограничено.'
+    );
+    assert.strictEqual(
+      harness.repositoryService.isEditRestricted(path.join(harness.configRoot, 'Catalogs', 'Контрагенты', 'Forms', 'ФормаЭлемента', 'Ext', 'Form', 'Module.bsl')),
+      true
+    );
+    assert.strictEqual(
+      harness.repositoryService.isEditRestricted(path.join(harness.configRoot, 'Catalogs', 'Контрагенты.xml')),
+      false,
+      'сам владелец захвачен — его собственный XML редактируем.'
+    );
+    assert.strictEqual(
+      harness.repositoryService.isEditRestricted(path.join(harness.configRoot, 'Catalogs', 'Контрагенты', 'Ext', 'ObjectModule.bsl')),
+      false
+    );
+    fixture.disposeAll();
+  });
+});
+
+suite('RepositoryLockSync — реальная фикстура: раздельная довыгрузка подчинённых при пустом составе в хеш-кэше (issue #1, раздел 10, критерий 10.1.5)', () => {
+  teardown(cleanupRealFixtureHarnesses);
+
+  test('ВнешнийИсточникДанных.ИнтернетМагазин рекурсивно, хеш-кэш непуст, но БЕЗ подчинённых источника — 3 вызова dumpToTemp (владелец; таблица+куб; таблицы измерения)', async () => {
+    const harness = createRealFixtureHarness();
+    // Хеш-кэш НЕПУСТ (иначе фильтр по кэшу не применяется вовсе — ветка "хеш-кэш
+    // пуст" уже покрыта соседним сценарием), но НЕ содержит ни одной единицы
+    // ИнтернетМагазин — раунд 0 обязан ограничиться только якорем.
+    const scopeKey = buildScopeKey('cf', harness.configRoot, '');
+    saveHashCache(harness.workspaceRoot, {
+      schemaVersion: 1, scopeKey, generatedAt: '',
+      files: { 'Catalogs/Валюты.xml': computeFileHash(path.join(harness.configRoot, 'Catalogs', 'Валюты.xml')) },
+    });
+    const fixture = createPartialDumpFixture(EXAMPLE_CF, harness.target.displayName);
+    fixture.probeBusy = () => harness.guard.isBusy;
+    const deps = baseDeps(fixture);
+
+    const node: RepositoryNodeRef = { nodeKind: 'ExternalDataSource', label: 'ИнтернетМагазин', xmlPath: path.join(harness.configRoot, 'ExternalDataSources', 'ИнтернетМагазин.xml') };
+    const outcome = await runRepositoryLockFlow(node, true, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(
+      fixture.calls.length,
+      3,
+      `хеш-кэш без подчинённых источника обязан вести к 3 раундам выгрузки (получено: ${JSON.stringify(fixture.calls.map((call) => call.names))}).`
+    );
+    assert.ok(fixture.calls.every((call) => call.busy));
+    assert.deepStrictEqual(fixture.calls[0].names, [KNOWN_FIXTURE_UNITS.internetMagazin]);
+    assert.deepStrictEqual(
+      [...fixture.calls[1].names].sort(),
+      [KNOWN_FIXTURE_UNITS.internetMagazinProdazhi, KNOWN_FIXTURE_UNITS.internetMagazinZakazy].sort()
+    );
+    assert.deepStrictEqual(
+      [...fixture.calls[2].names].sort(),
+      [KNOWN_FIXTURE_UNITS.internetMagazinRegiony, KNOWN_FIXTURE_UNITS.internetMagazinTovary].sort()
+    );
+    for (const unit of [
+      KNOWN_FIXTURE_UNITS.internetMagazin,
+      KNOWN_FIXTURE_UNITS.internetMagazinZakazy,
+      KNOWN_FIXTURE_UNITS.internetMagazinProdazhi,
+      KNOWN_FIXTURE_UNITS.internetMagazinTovary,
+      KNOWN_FIXTURE_UNITS.internetMagazinRegiony,
+    ]) {
+      assert.strictEqual(harness.repositoryService.isLocked(harness.target, unit), true, `"${unit}" должна быть захвачена.`);
+    }
+    fixture.disposeAll();
+  });
+});
+
 /**
  * Р4: подчинённые, исчезнувшие из хранилища. Реальную фикстуру-«хранилище» с
  * удалённой формой синтетически не построить без изменения самого XML владельца
@@ -199,6 +328,8 @@ suite('RepositoryLockSync — реальная фикстура: рекурси�
  * альтернативы без доступа к живому хранилищу — см. отчёт test-writer).
  */
 suite('RepositoryLockSync — реальная фикстура: подчинённая единица удалена из хранилища (issue #1, раздел 10, Р4)', () => {
+  teardown(cleanupRealFixtureHarnesses);
+
   function buildRepositoryStateWithoutFormaSpiska(): { root: string; dispose(): void } {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lock-sync-repo-state-'));
     fs.cpSync(EXAMPLE_CF, root, { recursive: true });
@@ -264,5 +395,184 @@ suite('RepositoryLockSync — реальная фикстура: подчинё�
     } finally {
       repoState.dispose();
     }
+  });
+});
+
+/** Экранирование fullName для использования в regex ниже. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Точечная текстовая правка значения атрибута `configVersion` в КОПИИ реального ConfigDumpInfo.xml. */
+function bumpConfigDumpInfoVersion(xml: string, metadataName: string, newVersion: string): string {
+  const pattern = new RegExp(`(<Metadata name="${escapeRegExp(metadataName)}"[^>]*configVersion=")[^"]*(")`);
+  const replaced = xml.replace(pattern, `$1${newVersion}$2`);
+  assert.notStrictEqual(replaced, xml, `запись "${metadataName}" обязана существовать в исходном ConfigDumpInfo.xml фикстуры.`);
+  return replaced;
+}
+
+/** Точечное удаление ЦЕЛОЙ строки `<Metadata .../>` (единица исчезла из версии хранилища). */
+function removeConfigDumpInfoEntry(xml: string, metadataName: string): string {
+  const pattern = new RegExp(`[ \\t]*<Metadata name="${escapeRegExp(metadataName)}"[^/]*/>\\r?\\n?`);
+  const replaced = xml.replace(pattern, '');
+  assert.notStrictEqual(replaced, xml, `запись "${metadataName}" обязана существовать в исходном ConfigDumpInfo.xml фикстуры.`);
+  return replaced;
+}
+
+function makeTempDump(seedFiles: Record<string, string>): { dir: string; dispose: () => void } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-lock-sync-real-dump-'));
+  for (const [rel, content] of Object.entries(seedFiles)) {
+    const full = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, content, 'utf-8');
+  }
+  return { dir, dispose: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
+
+function rootNode(harness: Harness): RepositoryNodeRef {
+  return { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(harness.configRoot, 'Configuration.xml') };
+}
+
+suite('RepositoryLockSync — реальная фикстура: root-incremental по единицам (issue #1, раздел 10, критерий 10.1.7)', () => {
+  teardown(cleanupRealFixtureHarnesses);
+
+  test('изменена только форма Контрагенты.ФормаЭлемента, удалена ФормаСписка — частичная выгрузка ровно по изменённой единице, удалённая стирается', async () => {
+    const harness = createRealFixtureHarness();
+    const originalConfigDumpInfo = fs.readFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), 'utf-8');
+
+    // «Новый» ConfigDumpInfo.xml — копия реального файла фикстуры с ТОЧЕЧНОЙ текстовой
+    // правкой значений configVersion (не сборка XML): единица ФормаЭлемента изменена,
+    // единица ФормаСписка исчезла из версии хранилища целиком.
+    let nextConfigDumpInfo = originalConfigDumpInfo;
+    nextConfigDumpInfo = bumpConfigDumpInfoVersion(nextConfigDumpInfo, 'Catalog.Контрагенты.Form.ФормаЭлемента', '0000000000000000000000000000000000000a');
+    nextConfigDumpInfo = bumpConfigDumpInfoVersion(nextConfigDumpInfo, 'Catalog.Контрагенты.Form.ФормаЭлемента.Form', '0000000000000000000000000000000000000b');
+    nextConfigDumpInfo = removeConfigDumpInfoEntry(nextConfigDumpInfo, 'Catalog.Контрагенты.Form.ФормаСписка');
+    nextConfigDumpInfo = removeConfigDumpInfoEntry(nextConfigDumpInfo, 'Catalog.Контрагенты.Form.ФормаСписка.Form');
+
+    const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextConfigDumpInfo });
+    const partialFixture = createPartialDumpFixture(EXAMPLE_CF, harness.target.displayName);
+    const partialRequests: string[][] = [];
+    const deps = baseDeps(partialFixture, {
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      chooseConflictResolution: () => Promise.resolve('replace'),
+      dumpToTemp: (target, request, services) => {
+        if (request.mode === 'update-info') {
+          return Promise.resolve({ ok: true, dir: infoDump.dir, dispose: infoDump.dispose });
+        }
+        assert.strictEqual(request.mode, 'partial', 'root-incremental не должен запрашивать полную выгрузку в этом сценарии.');
+        partialRequests.push([...request.fullNames]);
+        return partialFixture.dumpToTemp(target, request, services);
+      },
+    });
+
+    const outcome = await runRepositoryLockFlow(rootNode(harness), true, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.deepStrictEqual(
+      partialRequests,
+      [[KNOWN_FIXTURE_UNITS.kontragentyFormaElementa]],
+      'частичная выгрузка root-incremental обязана запросить РОВНО изменённую единицу, без владельца и без удалённой единицы.'
+    );
+    assert.strictEqual(
+      fs.existsSync(path.join(harness.configRoot, 'Catalogs', 'Контрагенты', 'Forms', 'ФормаСписка.xml')),
+      false,
+      'единица, исчезнувшая из ConfigDumpInfo.xml версии хранилища, обязана быть удалена из проекта.'
+    );
+    assert.strictEqual(
+      fs.existsSync(path.join(harness.configRoot, 'Catalogs', 'Контрагенты', 'Forms', 'ФормаСписка')),
+      false,
+      'каталог удалённой единицы тоже обязан быть удалён.'
+    );
+    assert.strictEqual(
+      fs.existsSync(path.join(harness.configRoot, 'Catalogs', 'Контрагенты', 'Forms', 'ФормаЭлемента.xml')),
+      true,
+      'изменённая (но не удалённая) единица должна остаться на месте.'
+    );
+    assert.strictEqual(
+      fs.readFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), 'utf-8'),
+      nextConfigDumpInfo,
+      'после применения всех владельцев проектный ConfigDumpInfo.xml обязан замениться версией из выгрузки.'
+    );
+    partialFixture.disposeAll();
+  });
+});
+
+suite('RepositoryLockSync/UnlockSync — реальная фикстура: отмена рекурсивного захвата корня по хеш-манифесту (issue #1, раздел 10, критерий 10.1.8)', () => {
+  teardown(cleanupRealFixtureHarnesses);
+
+  async function lockRootRecursivelyWithoutChanges(harness: Harness): Promise<void> {
+    const configDumpInfo = fs.readFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), 'utf-8');
+    const dump = makeTempDump({ 'ConfigDumpInfo.xml': configDumpInfo });
+    // Единственный запрос в этом сценарии — update-info; partialDumpFixture не нужен,
+    // но baseDeps() этого файла требует передавать инстанс для типовой совместимости.
+    const deps = baseDeps(createPartialDumpFixture(EXAMPLE_CF, harness.target.displayName), {
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      dumpToTemp: () => Promise.resolve({ ok: true, dir: dump.dir, dispose: dump.dispose }),
+    });
+    const outcome = await runRepositoryLockFlow(rootNode(harness), true, harness.services, deps);
+    assert.strictEqual(outcome, 'done');
+    assert.ok(harness.repositoryService.snapshots.readRootManifestHashes(harness.target), 'предпосылка: хеш-манифест корня обязан быть снят при захвате.');
+  }
+
+  const formModuleRel = path.join('Catalogs', 'Контрагенты', 'Forms', 'ФормаЭлемента', 'Ext', 'Form', 'Module.bsl');
+
+  test('изменён только модуль формы — частичная выгрузка ровно по единице формы, откат восстанавливает версию хранилища', async () => {
+    const harness = createRealFixtureHarness();
+    await lockRootRecursivelyWithoutChanges(harness);
+
+    const modulePath = path.join(harness.configRoot, formModuleRel);
+    const originalModuleContent = fs.readFileSync(modulePath, 'utf-8');
+    fs.writeFileSync(modulePath, `${originalModuleContent}\n// локальная правка после захвата`, 'utf-8');
+
+    const partialFixture = createPartialDumpFixture(EXAMPLE_CF, harness.target.displayName);
+    const partialRequests: string[][] = [];
+    let confirmRollbackCalls = 0;
+    const deps = baseDeps(partialFixture, {
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      confirmRollback: () => { confirmRollbackCalls += 1; return Promise.resolve(true); },
+      dumpToTemp: (target, request, services) => {
+        assert.strictEqual(request.mode, 'partial', 'отмена захвата корня по манифесту запрашивает только частичную выгрузку изменённых единиц.');
+        partialRequests.push([...request.fullNames]);
+        return partialFixture.dumpToTemp(target, request, services);
+      },
+    });
+
+    const outcome = await runRepositoryUnlockFlow(rootNode(harness), { recursive: true, force: false }, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.deepStrictEqual(
+      partialRequests,
+      [[KNOWN_FIXTURE_UNITS.kontragentyFormaElementa]],
+      'отмена захвата рекурсивного корня обязана выгружать РОВНО единицу с изменившимся файлом.'
+    );
+    assert.strictEqual(confirmRollbackCalls, 1);
+    assert.strictEqual(
+      fs.readFileSync(modulePath, 'utf-8'),
+      originalModuleContent,
+      'после отката модуль формы обязан вернуться к версии хранилища.'
+    );
+    partialFixture.disposeAll();
+  });
+
+  test('ничего не изменено — Конфигуратор для частичной выгрузки не запускается, диалог отката не показывается', async () => {
+    const harness = createRealFixtureHarness();
+    await lockRootRecursivelyWithoutChanges(harness);
+
+    let dumpToTempCalls = 0;
+    let confirmRollbackCalls = 0;
+    const deps = baseDeps(createPartialDumpFixture(EXAMPLE_CF, harness.target.displayName), {
+      runRepositoryCli: () => Promise.resolve({ status: 'done' }),
+      confirmRollback: () => { confirmRollbackCalls += 1; return Promise.resolve(true); },
+      dumpToTemp: () => {
+        dumpToTempCalls += 1;
+        return Promise.reject(new Error('dumpToTemp не должен вызываться — файлы не менялись.'));
+      },
+    });
+
+    const outcome = await runRepositoryUnlockFlow(rootNode(harness), { recursive: true, force: false }, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(dumpToTempCalls, 0, 'без расхождений с манифестом Конфигуратор для файлов запускаться не должен.');
+    assert.strictEqual(confirmRollbackCalls, 0, 'без расхождений диалог отката не показывается.');
   });
 });
