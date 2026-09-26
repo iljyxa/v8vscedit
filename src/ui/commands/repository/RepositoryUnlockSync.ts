@@ -9,6 +9,7 @@ import {
   detectScopeLayout,
   isPathInScope,
   mapDumpPathToProject,
+  toPosixRel,
   type ObjectScope,
 } from '../../../infra/repository/RepositoryObjectScope';
 import type { RepositoryNodeRef, RepositoryTarget } from '../../../infra/repository/RepositoryService';
@@ -341,8 +342,9 @@ async function rollbackToEtalons(
     await finishPostMutation(services, {
       changedFiles,
       keptDivergentFiles,
-      structural: structural || changedFiles.some((filePath) => path.basename(filePath) === 'Configuration.xml'
-        && path.resolve(path.dirname(filePath)) === path.resolve(target.configRoot)),
+      // Сравнение относительного пути, а не имени файла: объект с именем Configuration
+      // (форма, общий макет) даёт Configuration.xml и вне корня.
+      structural: structural || changedFiles.some((filePath) => toPosixRel(path.relative(target.configRoot, filePath)) === 'Configuration.xml'),
     });
   }
 }
