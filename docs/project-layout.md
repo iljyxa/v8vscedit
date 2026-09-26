@@ -98,7 +98,11 @@ src/
 │   │                                  # эндпоинты /identity+/shutdown — не MCP-инструменты,
 │   │                                  # см. docs/mcp-server-lifecycle.md), McpNodeRegistry,
 │   │                                  # McpPropertyService
-│   └── readonly/                     # BslReadonlyGuard
+│   └── readonly/                     # BslReadonlyGuard, EditorReadonlyController (readonly открытых
+│                                      # вкладок по захвату), sessionReadonly.ts + readonlyTabSelection.ts
+│                                      # (readonly-команда VS Code действует только на правую сторону
+│                                      # активного редактора — выбор маршрута для левой file:-стороны
+│                                      # diff), readonlyTransitionPlan.ts (чистый план, без vscode)
 │
 ├── lsp/                              # LspManager + analyzer/ (внешний bsl-analyzer; встроенного сервера нет)
 ├── cli/                             # Node entry onec-tools.ts + commands/ + core/ (адаптеры)
