@@ -1919,3 +1919,18 @@ function isRawAgentCommandMessage(message: string): boolean {
     /^выполнено:\s*(common|config|options|infobase-tools)\s+/.test(normalized) ||
     /^the operation is completed:\s*(common|config|options|infobase-tools)\s+/.test(normalized);
 }
+
+/**
+ * Порт запуска процессов конфигурации для соседних модулей (`ConfigurationDumpRunner`):
+ * они переиспользуют общий запуск CLI/агента, прогресс и разбор подключения, не
+ * дублируя их и не раздувая этот файл новыми сценариями.
+ */
+export const configurationProcessPort = {
+  runInternalCliCommand,
+  runAgentConfigurationOperation,
+  resolveSettingsPath,
+  resolveConnectionFromSettings,
+  buildConnectionCliArgs,
+  createWorkspaceTempDir,
+  removeTempDir,
+};

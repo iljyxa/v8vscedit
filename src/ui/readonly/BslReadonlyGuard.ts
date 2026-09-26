@@ -68,6 +68,18 @@ export class BslReadonlyGuard {
     });
   }
 
+  /**
+   * Забывает, что readonly уже применён к документу: после захвата файл стал
+   * редактируемым, и после отмены захвата его нужно снова пометить readonly.
+   */
+  forget(uri: vscode.Uri): void {
+    const key = uri.toString();
+    const document = vscode.workspace.textDocuments.find((item) => item.uri.toString() === key);
+    if (document) {
+      this.appliedTo.delete(document);
+    }
+  }
+
   /** Делает указанный видимый редактор readonly в текущей сессии. */
   private async applyReadonly(editor: vscode.TextEditor): Promise<void> {
     if (this.appliedTo.has(editor.document)) {

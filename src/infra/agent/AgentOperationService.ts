@@ -20,6 +20,7 @@ import { saveMetadataCacheForEntry } from '../cache/MetadataCache';
 import { AgentWorkspaceService } from './AgentWorkspaceService';
 import { collectConfigFilesForLoad, detectPotentialRename } from './ConfigLoadFileCollector';
 import {
+  collectAllRelativeFiles,
   collectSnapshotProjectFiles,
   mirrorDirectorySnapshot,
   syncSelectedSnapshotFiles,
@@ -44,6 +45,23 @@ export interface AgentOperationHooks {
   readonly onQuestion?: (message: AgentMessage) => Promise<string | undefined>;
 }
 
+/**
+ * Что выгрузить из базы во временный каталог: объекты по списку fullName, только
+ * `ConfigDumpInfo.xml` (версии объектов для инкрементального сравнения) или всё.
+ */
+export type ConfigurationDumpRequest =
+  | { readonly mode: 'partial'; readonly fullNames: readonly string[] }
+  | { readonly mode: 'update-info' }
+  | { readonly mode: 'full' };
+
+/** Выгрузка во временный каталог; `dispose()` удаляет каталог. */
+export interface ConfigurationDumpHandle {
+  readonly dir: string;
+  /** Файлы выгрузки относительно `dir`. */
+  readonly relativeFiles: string[];
+  dispose(): void;
+}
+
 export interface AgentOperationResult {
   readonly changedProjectFiles: string[];
   readonly skipped?: boolean;
@@ -54,6 +72,9 @@ export interface DesignerAgentInfoBaseSession {
   disconnectInfoBase(hooks?: AgentOperationHooks, options?: { readonly force?: boolean }): Promise<boolean>;
   reconnectInfoBase(hooks?: AgentOperationHooks): Promise<void>;
 }
+
+/** Счётчик одноразовых выгрузок: два вызова в одну миллисекунду не должны делить каталог. */
+let dumpSequence = 0;
 
 export class AgentOperationService {
   private readonly workspaceService: AgentWorkspaceService;
@@ -119,6 +140,51 @@ export class AgentOperationService {
       hooks?.onProjectFilesWillChange?.(changedProjectFiles);
       this.refreshCaches(target);
       return { changedProjectFiles };
+    });
+  }
+
+  /**
+   * Выгрузка из базы в одноразовый каталог без изменения проекта: слияние с проектом —
+   * забота вызывающей стороны. Каталог отдельный от персистентного зеркала
+   * `ensureWorkspace(buildSessionKey(target))`, которое поддерживается для частичных
+   * ЗАГРУЗОК: смешивание с ним подсунуло бы в результат весь ранее накопленный снимок.
+   */
+  async dumpToDirectory(
+    target: AgentConfigurationOperationTarget,
+    request: ConfigurationDumpRequest,
+    hooks?: AgentOperationHooks
+  ): Promise<ConfigurationDumpHandle> {
+    return this.runInfoBaseOperation(hooks, async () => {
+      dumpSequence += 1;
+      const sessionId = `${buildSessionKey(target)}-dump-${String(Date.now())}-${String(dumpSequence)}`;
+      const workspace = this.workspaceService.ensureWorkspace(sessionId, target);
+      const listFile = request.mode === 'partial'
+        ? this.workspaceService.writeObjectNamesFile(sessionId, request.fullNames)
+        : undefined;
+      const dispose = (): void => {
+        fs.rmSync(workspace.workspaceRoot, { recursive: true, force: true });
+        if (listFile) {
+          fs.rmSync(listFile, { force: true });
+        }
+      };
+      try {
+        await this.executeAgentCommand(
+          buildDumpConfigToFilesCommand(workspace.targetAgentDir, {
+            // resolveWorkspace уже отверг cfe без extensionName; `?? target.name` — общий для
+            // сервиса запасной вариант, здесь недостижимый.
+            /* c8 ignore next */
+            extensionName: target.kind === 'cfe' ? target.extensionName ?? target.name : undefined,
+            format: 'hierarchical',
+            listFile: listFile ? this.workspaceService.toAgentPath(listFile) : undefined,
+            configDumpInfoOnly: request.mode === 'update-info',
+          }),
+          hooks
+        );
+        return { dir: workspace.targetDir, relativeFiles: collectAllRelativeFiles(workspace.targetDir), dispose };
+      } catch (error) {
+        dispose();
+        throw error;
+      }
     });
   }
 

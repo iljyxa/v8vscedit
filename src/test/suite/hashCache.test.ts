@@ -5,9 +5,12 @@ import * as path from 'path';
 import {
   buildHashSnapshot,
   buildScopeKey,
+  computeFileHash,
   createHashSnapshot,
   diffHashSnapshots,
   loadHashCache,
+  patchHashCacheEntries,
+  patchHashCacheForFiles,
   resolveHashCacheFileStem,
   saveHashCache,
 } from '../../infra/cache/HashCache';
@@ -95,6 +98,151 @@ suite('HashCache', () => {
       assert.ok(snapshot.files['DataProcessors/Обработка/Templates/Текст/Ext/Template.bin']);
       assert.ok(snapshot.files['CommonTemplates/Описание/Ext/Template/ru.html']);
       assert.ok(!snapshot.files['README.txt']);
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('patchHashCacheForFiles точечно обновляет только переданные поддерживаемые файлы, не трогая остальной кэш', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-hash-patch-'));
+    try {
+      fs.mkdirSync(path.join(tempRoot, 'Catalogs'), { recursive: true });
+      fs.writeFileSync(path.join(tempRoot, 'Catalogs', 'Тест.xml'), '<xml v="1"/>', 'utf-8');
+      fs.writeFileSync(path.join(tempRoot, 'ConfigDumpInfo.xml'), '<skip/>', 'utf-8');
+
+      const scopeKey = buildScopeKey('cf', tempRoot);
+      saveHashCache(tempRoot, {
+        schemaVersion: 1,
+        scopeKey,
+        generatedAt: '',
+        files: {
+          'Catalogs/Тест.xml': 'устаревший-хеш',
+          'Documents/НеЗатронутый.xml': 'хеш-остаётся',
+        },
+      });
+
+      // ConfigDumpInfo.xml — неподдерживаемый файл (isSupportedConfigFile), должен
+      // быть отфильтрован и не попасть в кэш, несмотря на явную передачу в списке.
+      patchHashCacheForFiles(tempRoot, 'cf', tempRoot, '', ['Catalogs/Тест.xml', 'ConfigDumpInfo.xml']);
+
+      const patched = loadHashCache(tempRoot, scopeKey);
+      assert.notStrictEqual(patched.files['Catalogs/Тест.xml'], 'устаревший-хеш', 'Хеш изменённого файла должен обновиться.');
+      assert.strictEqual(patched.files['Documents/НеЗатронутый.xml'], 'хеш-остаётся', 'Файлы вне списка не трогаются.');
+      assert.ok(!patched.files['ConfigDumpInfo.xml'], 'Неподдерживаемый файл не должен попасть в кэш.');
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('patchHashCacheForFiles с deletedFiles удаляет записи из кэша, не пересчитывая остальные', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-hash-patch-deleted-'));
+    try {
+      fs.mkdirSync(path.join(tempRoot, 'Catalogs'), { recursive: true });
+      fs.writeFileSync(path.join(tempRoot, 'Catalogs', 'Остаётся.xml'), '<xml/>', 'utf-8');
+
+      const scopeKey = buildScopeKey('cf', tempRoot);
+      saveHashCache(tempRoot, {
+        schemaVersion: 1,
+        scopeKey,
+        generatedAt: '',
+        files: {
+          'Catalogs/Остаётся.xml': 'хеш-остаётся',
+          'Catalogs/Удалён.xml': 'хеш-удалённого',
+        },
+      });
+
+      // Файл реально удалён с диска — patchHashCacheForFiles должен убрать его из
+      // кэша через параметр deletedFiles, а не оставить устаревшую запись.
+      patchHashCacheForFiles(tempRoot, 'cf', tempRoot, '', [], ['Catalogs/Удалён.xml']);
+
+      const patched = loadHashCache(tempRoot, scopeKey);
+      assert.strictEqual(patched.files['Catalogs/Остаётся.xml'], 'хеш-остаётся', 'Не затронутые файлы должны остаться.');
+      assert.ok(!patched.files['Catalogs/Удалён.xml'], 'Удалённый файл должен исчезнуть из кэша.');
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('patchHashCacheForFiles без deletedFiles (значение по умолчанию — пустой список) не удаляет ничего', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-hash-patch-default-'));
+    try {
+      fs.mkdirSync(path.join(tempRoot, 'Catalogs'), { recursive: true });
+      fs.writeFileSync(path.join(tempRoot, 'Catalogs', 'А.xml'), '<xml/>', 'utf-8');
+      const scopeKey = buildScopeKey('cf', tempRoot);
+      saveHashCache(tempRoot, { schemaVersion: 1, scopeKey, generatedAt: '', files: { 'Catalogs/Б.xml': 'хеш-б' } });
+
+      patchHashCacheForFiles(tempRoot, 'cf', tempRoot, '', ['Catalogs/А.xml']);
+
+      const patched = loadHashCache(tempRoot, scopeKey);
+      assert.ok(patched.files['Catalogs/А.xml']);
+      assert.strictEqual(patched.files['Catalogs/Б.xml'], 'хеш-б', 'Без deletedFiles ничего не должно удаляться.');
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('computeFileHash — детерминированный sha1 от содержимого файла, экспортирован для внешних вызовов (RepositoryMergeApplier)', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-hash-compute-'));
+    try {
+      const filePath = path.join(tempRoot, 'файл.txt');
+      fs.writeFileSync(filePath, 'содержимое', 'utf-8');
+      const first = computeFileHash(filePath);
+      const second = computeFileHash(filePath);
+      assert.strictEqual(first, second);
+      assert.match(first, /^[0-9a-f]{40}$/, 'sha1 в hex должен быть 40 символами.');
+
+      fs.writeFileSync(filePath, 'другое содержимое', 'utf-8');
+      assert.notStrictEqual(computeFileHash(filePath), first);
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('patchHashCacheEntries — пишет готовые хеши без чтения файлов с диска, фильтрует неподдерживаемые и удаляет deletedFiles', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-hash-entries-'));
+    try {
+      const scopeKey = buildScopeKey('cf', tempRoot);
+      saveHashCache(tempRoot, {
+        schemaVersion: 1,
+        scopeKey,
+        generatedAt: '',
+        files: { 'Catalogs/Старый.xml': 'старый-хеш', 'Catalogs/БудетУдалён.xml': 'хеш-к-удалению' },
+      });
+
+      // Хеши переданы напрямую (например, уже посчитанные в RepositoryMergeApplier
+      // при копировании файла) — файлы на диске может не существовать вовсе, важно,
+      // что patchHashCacheEntries не пытается их читать сам.
+      patchHashCacheEntries(
+        tempRoot,
+        'cf',
+        tempRoot,
+        '',
+        {
+          'Catalogs/Старый.xml': 'новый-хеш-без-чтения-файла',
+          'ConfigDumpInfo.xml': 'должен-быть-отфильтрован',
+        },
+        ['Catalogs/БудетУдалён.xml']
+      );
+
+      const patched = loadHashCache(tempRoot, scopeKey);
+      assert.strictEqual(patched.files['Catalogs/Старый.xml'], 'новый-хеш-без-чтения-файла');
+      assert.ok(!patched.files['ConfigDumpInfo.xml'], 'ConfigDumpInfo.xml не должен попадать в кэш даже при явной передаче.');
+      assert.ok(!patched.files['Catalogs/БудетУдалён.xml']);
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('patchHashCacheEntries для расширения использует scope cfe::extensionName::configDir', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-hash-entries-cfe-'));
+    try {
+      const configDir = path.join(tempRoot, 'src', 'cfe', 'EVOLC');
+      const scopeKey = buildScopeKey('cfe', configDir, 'EVOLC');
+
+      patchHashCacheEntries(tempRoot, 'cfe', configDir, 'EVOLC', { 'Catalogs/Товары.xml': 'хеш-1' }, []);
+
+      const patched = loadHashCache(tempRoot, scopeKey);
+      assert.strictEqual(patched.files['Catalogs/Товары.xml'], 'хеш-1');
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }

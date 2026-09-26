@@ -1,0 +1,201 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import { computeFileHash } from '../cache/HashCache';
+import {
+  collectScopeFiles,
+  detectScopeLayout,
+  mapDumpPathToProject,
+  toPosixRel,
+  type ObjectScope,
+} from './RepositoryObjectScope';
+
+/**
+ * Трёхстороннее сравнение файла при получении версии хранилища:
+ * R — версия хранилища (временная выгрузка), L — локальный файл проекта,
+ * B — последняя известная версия базы (хеш-кэш, при его отсутствии — снимок захвата).
+ * `null` — файла на соответствующей стороне нет.
+ */
+export interface MergeFileState {
+  /** Путь в проекте относительно корня конфигурации (POSIX). */
+  rel: string;
+  repositoryHash: string | null;
+  localHash: string | null;
+  baseHash: string | null;
+  /** Путь в выгрузке, если раскладка XML объекта там другая. */
+  dumpRel?: string;
+  /** Область файла — чтобы применение убирало опустевшие каталоги только внутри неё. */
+  scope?: ObjectScope;
+  /** Выгрузка области неполна (нет главного файла) — локальные файлы не трогать. */
+  incomplete?: boolean;
+  /** Несохранённый редактор: молча перезаписывать/удалять файл нельзя. */
+  forceConflict?: boolean;
+}
+
+export type MergeAction = 'noop' | 'write' | 'delete' | 'conflict-write' | 'conflict-delete' | 'skip-incomplete';
+
+export interface MergePlanEntry extends MergeFileState {
+  action: MergeAction;
+}
+
+export interface MergePlan {
+  entries: MergePlanEntry[];
+  conflicts: MergePlanEntry[];
+  silent: MergePlanEntry[];
+  skipped: MergePlanEntry[];
+  hasConflicts: boolean;
+}
+
+export interface CollectMergeFileStatesOptions {
+  configRoot: string;
+  dumpDir: string;
+  scopes: readonly ObjectScope[];
+  baseHashes: Readonly<Record<string, string>>;
+  snapshotHashes?: Readonly<Record<string, string>>;
+  dirtyRelativePaths: readonly string[];
+  /**
+   * Области объектов, удалённых из хранилища (рекурсивное получение корня по
+   * ConfigDumpInfo): их файлов в выгрузке нет по определению, поэтому защита от
+   * неполной выгрузки к ним не применяется — все локальные файлы идут на удаление.
+   */
+  removedScopes?: readonly ObjectScope[];
+  /**
+   * Область без главного файла в выгрузке (XML объекта, Configuration.xml) считается
+   * выгруженной не полностью: так ведёт себя захват/получение существующих объектов,
+   * где пустая выгрузка — сбой списка объектов, а не удаление объекта из хранилища.
+   */
+  requirePrimaryFile?: boolean;
+}
+
+const CONFIGURATION_XML_FILE = 'Configuration.xml';
+
+const TEXT_MERGE_EXTENSIONS: ReadonlySet<string> = new Set(['.bsl', '.xml', '.txt', '.html', '.json']);
+
+function decideAction(state: MergeFileState): MergeAction {
+  if (state.incomplete) {
+    return 'skip-incomplete';
+  }
+  const { repositoryHash, localHash, baseHash } = state;
+  if (repositoryHash !== null) {
+    if (state.forceConflict) {
+      return 'conflict-write';
+    }
+    if (localHash === repositoryHash) {
+      return 'noop';
+    }
+    const untouchedLocally = localHash === null ? baseHash === null : localHash === baseHash;
+    return untouchedLocally ? 'write' : 'conflict-write';
+  }
+  if (localHash === null) {
+    return 'noop';
+  }
+  return !state.forceConflict && localHash === baseHash ? 'delete' : 'conflict-delete';
+}
+
+/** Чистая функция: решение по каждому файлу и раскладка по группам для диалога. */
+export function planRepositoryMerge(states: readonly MergeFileState[]): MergePlan {
+  const entries = states.map((state): MergePlanEntry => ({ ...state, action: decideAction(state) }));
+  const conflicts = entries.filter((entry) => entry.action === 'conflict-write' || entry.action === 'conflict-delete');
+  return {
+    entries,
+    conflicts,
+    silent: entries.filter((entry) => entry.action === 'write' || entry.action === 'delete'),
+    skipped: entries.filter((entry) => entry.action === 'skip-incomplete'),
+    hasConflicts: conflicts.length > 0,
+  };
+}
+
+/** Файл, который имеет смысл показывать в текстовом диффе. */
+export function isTextMergeFile(rel: string): boolean {
+  return TEXT_MERGE_EXTENSIONS.has(path.extname(rel).toLowerCase());
+}
+
+/** Сравнение текущих хешей области с эталоном (снимок или выгрузка). */
+export function diffScopeAgainstEtalon(
+  etalon: Readonly<Record<string, string>>,
+  current: Readonly<Record<string, string>>
+): { changed: string[]; missing: string[]; extra: string[] } {
+  const byName = (left: string, right: string): number => left.localeCompare(right);
+  return {
+    changed: Object.keys(etalon).filter((rel) => rel in current && current[rel] !== etalon[rel]).sort(byName),
+    missing: Object.keys(etalon).filter((rel) => !(rel in current)).sort(byName),
+    extra: Object.keys(current).filter((rel) => !(rel in etalon)).sort(byName),
+  };
+}
+
+/** Состояния R/L/B для всех файлов областей в проекте и выгрузке. */
+export function collectMergeFileStates(options: CollectMergeFileStatesOptions): MergeFileState[] {
+  const dirty = new Set(options.dirtyRelativePaths.map(toPosixRel));
+  const states = new Map<string, MergeFileState>();
+  for (const scope of options.scopes) {
+    const projectLayout = detectScopeLayout(options.configRoot, scope);
+    const dumpFiles = collectScopeFiles(options.dumpDir, scope);
+    const dumpByProjectRel = new Map<string, string>();
+    for (const dumpRel of dumpFiles) {
+      dumpByProjectRel.set(toPosixRel(mapDumpPathToProject(dumpRel, scope, projectLayout)), dumpRel);
+    }
+    const projectFiles = collectScopeFiles(options.configRoot, scope);
+    const scopeIncomplete = options.requirePrimaryFile === true && !hasPrimaryDumpFile(scope, dumpFiles);
+    for (const rel of new Set([...dumpByProjectRel.keys(), ...projectFiles])) {
+      if (states.has(rel)) {
+        continue;
+      }
+      const dumpRel = dumpByProjectRel.get(rel);
+      const state: MergeFileState = {
+        rel,
+        repositoryHash: dumpRel ? computeFileHash(path.join(options.dumpDir, dumpRel)) : null,
+        localHash: hashIfExists(path.join(options.configRoot, rel)),
+        baseHash: lookupHash(options.baseHashes, rel) ?? lookupHash(options.snapshotHashes, rel),
+        scope,
+      };
+      if (dumpRel && dumpRel !== rel) {
+        state.dumpRel = dumpRel;
+      }
+      if (!dumpRel && scopeIncomplete) {
+        state.incomplete = true;
+      }
+      if (dirty.has(rel)) {
+        state.forceConflict = true;
+      }
+      states.set(rel, state);
+    }
+  }
+  for (const scope of options.removedScopes ?? []) {
+    for (const rel of collectScopeFiles(options.configRoot, scope)) {
+      if (states.has(rel)) {
+        continue;
+      }
+      const state: MergeFileState = {
+        rel,
+        repositoryHash: null,
+        localHash: hashIfExists(path.join(options.configRoot, rel)),
+        baseHash: lookupHash(options.baseHashes, rel) ?? lookupHash(options.snapshotHashes, rel),
+        scope,
+      };
+      if (dirty.has(rel)) {
+        state.forceConflict = true;
+      }
+      states.set(rel, state);
+    }
+  }
+  return [...states.values()];
+}
+
+function hasPrimaryDumpFile(scope: ObjectScope, dumpFiles: readonly string[]): boolean {
+  if (scope.kind === 'object') {
+    return dumpFiles.some((rel) => isObjectXmlRel(rel, scope));
+  }
+  return dumpFiles.includes(CONFIGURATION_XML_FILE);
+}
+
+function isObjectXmlRel(rel: string, scope: Extract<ObjectScope, { kind: 'object' }>): boolean {
+  const name = path.posix.basename(scope.dirRel);
+  return rel === `${scope.dirRel}/${name}.xml` || rel === `${path.posix.dirname(scope.dirRel)}/${name}.xml`;
+}
+
+function lookupHash(hashes: Readonly<Record<string, string>> | undefined, rel: string): string | null {
+  return hashes && Object.prototype.hasOwnProperty.call(hashes, rel) ? hashes[rel] : null;
+}
+
+function hashIfExists(filePath: string): string | null {
+  return fs.existsSync(filePath) ? computeFileHash(filePath) : null;
+}

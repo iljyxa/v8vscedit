@@ -54,6 +54,7 @@ import { StandaloneServerService } from './infra/standalone';
 import { GitMetadataDecorationProvider } from './ui/tree/decorations/GitMetadataDecorationProvider';
 import { LspManager } from './lsp/LspManager';
 import { BslReadonlyGuard } from './ui/readonly/BslReadonlyGuard';
+import { EditorReadonlyController } from './ui/readonly/EditorReadonlyController';
 import { registerSupportWatcher } from './ui/support/SupportWatcher';
 import { RepositoryCommitViewProvider } from './ui/views/RepositoryCommitViewProvider';
 import { RepositoryConnectionViewProvider } from './ui/views/RepositoryConnectionViewProvider';
@@ -956,7 +957,10 @@ export class Container {
 
   private wireReadonlyGuard(): void {
     const guard = new BslReadonlyGuard(this.supportService, this.repositoryService, this.outputChannel);
-    this.context.subscriptions.push(guard.register());
+    // Контроллер снимает/ставит readonly уже открытым вкладкам при смене захватов:
+    // сам guard реагирует только на открытие документа.
+    const controller = new EditorReadonlyController(this.repositoryService, this.supportService, guard, this.outputChannel);
+    this.context.subscriptions.push(guard.register(), controller.register());
   }
 
   private wireLsp(): void {

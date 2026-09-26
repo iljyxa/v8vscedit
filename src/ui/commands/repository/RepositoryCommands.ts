@@ -1,4 +1,4 @@
-﻿import * as path from 'path';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import type { RepositoryBinding, RepositoryNodeRef, RepositoryService, RepositoryTarget } from '../../../infra/repository/RepositoryService';
 import type { CommandServices, NodeArg } from '../_shared';
@@ -7,14 +7,14 @@ import {
   refreshRepositoryUi,
   runPostRepositorySync,
 } from './RepositoryDatabaseSync';
+import { type RepositoryCliServices, runRepositoryCliCommand } from './RepositoryCommandRunner';
 import {
-  type RepositoryCliServices,
-  runRepositoryCliCommand,
-  runRepositoryCommitAction,
-  runRepositoryLockAction,
-  runRepositoryUnlockAction,
-  runRepositoryUpdateAction,
-} from './RepositoryCommandRunner';
+  DEFAULT_REPOSITORY_FILE_SYNC_DEPS,
+  ensureRepositoryGuardFree,
+  type RepositoryFileSyncDeps,
+} from './RepositoryFileSyncShared';
+import { runRepositoryLockFlow, runRepositoryUpdateFlow } from './RepositoryLockSync';
+import { runRepositoryCommitFlow, runRepositoryUnlockFlow } from './RepositoryUnlockSync';
 
 interface BooleanPickItem extends vscode.QuickPickItem {
   value: boolean;
@@ -40,7 +40,8 @@ type RepositoryCommandNode = NodeArg & RepositoryNodeRef;
  */
 export function registerRepositoryCommands(
   context: vscode.ExtensionContext,
-  services: CommandServices
+  services: CommandServices,
+  deps: RepositoryFileSyncDeps = DEFAULT_REPOSITORY_FILE_SYNC_DEPS
 ): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('v8vscedit.repository.connect', async (node: NodeArg) => {
@@ -178,14 +179,19 @@ export function registerRepositoryCommands(
       if (!repositoryNode) {
         return;
       }
+      const label = repositoryNode.label ?? 'выбранный узел';
+      // Занятость проверяется до вопросов пользователю: иначе он отвечал бы на них
+      // ради операции, которая всё равно не стартует.
+      if (!ensureRepositoryGuardFree(services, deps, `Захват «${label}»`)) {
+        return;
+      }
 
-      const recursive = await askRecursiveMode('Захват объектов', repositoryNode.label ?? 'выбранный узел');
+      const recursive = await askRecursiveMode('Захват объектов', label);
       if (recursive === undefined) {
         return;
       }
 
-      const ok = await runRepositoryLockAction(toCliServices(services), repositoryNode, recursive);
-      if (ok) {
+      if (await runRepositoryLockFlow(repositoryNode, recursive, services, deps) === 'done') {
         refreshRepositoryUi(services);
       }
     }),
@@ -195,8 +201,12 @@ export function registerRepositoryCommands(
       if (!repositoryNode) {
         return;
       }
+      const label = repositoryNode.label ?? 'выбранный узел';
+      if (!ensureRepositoryGuardFree(services, deps, `Освобождение «${label}»`)) {
+        return;
+      }
 
-      const recursive = await askRecursiveMode('Освобождение объектов', repositoryNode.label ?? 'выбранный узел');
+      const recursive = await askRecursiveMode('Освобождение объектов', label);
       if (recursive === undefined) {
         return;
       }
@@ -210,8 +220,7 @@ export function registerRepositoryCommands(
         return;
       }
 
-      const ok = await runRepositoryUnlockAction(toCliServices(services), repositoryNode, recursive, force);
-      if (ok) {
+      if (await runRepositoryUnlockFlow(repositoryNode, { recursive, force }, services, deps) === 'done') {
         refreshRepositoryUi(services);
       }
     }),
@@ -219,6 +228,9 @@ export function registerRepositoryCommands(
     vscode.commands.registerCommand('v8vscedit.repository.commit', async (node: NodeArg) => {
       const repositoryNode = requireRepositoryNode(services, node);
       if (!repositoryNode) {
+        return;
+      }
+      if (!ensureRepositoryGuardFree(services, deps, `Помещение «${repositoryNode.label ?? 'выбранный узел'}»`)) {
         return;
       }
 
@@ -246,8 +258,7 @@ export function registerRepositoryCommands(
         return;
       }
 
-      const ok = await runRepositoryCommitAction(toCliServices(services), repositoryNode, formData);
-      if (ok) {
+      if (await runRepositoryCommitFlow(repositoryNode, formData, services, deps) === 'done') {
         refreshRepositoryUi(services);
       }
     }),
@@ -257,8 +268,12 @@ export function registerRepositoryCommands(
       if (!repositoryNode) {
         return;
       }
+      const label = repositoryNode.label ?? 'выбранный узел';
+      if (!ensureRepositoryGuardFree(services, deps, `Получение «${label}»`)) {
+        return;
+      }
 
-      const recursive = await askRecursiveMode('Получение из хранилища', repositoryNode.label ?? 'выбранный узел');
+      const recursive = await askRecursiveMode('Получение из хранилища', label);
       if (recursive === undefined) {
         return;
       }
@@ -281,12 +296,13 @@ export function registerRepositoryCommands(
         return;
       }
 
-      const ok = await runRepositoryUpdateAction(toCliServices(services), repositoryNode, {
-        recursive,
-        force,
-        version: version.trim() || undefined,
-      });
-      if (ok) {
+      const outcome = await runRepositoryUpdateFlow(
+        repositoryNode,
+        { recursive, force, version: version.trim() || undefined },
+        services,
+        deps
+      );
+      if (outcome === 'done') {
         refreshRepositoryUi(services);
       }
     }),

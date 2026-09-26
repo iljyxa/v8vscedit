@@ -1,10 +1,14 @@
-import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { MetaKind } from '../../domain/MetaTypes';
 import type { ProjectSecretStorage } from '../environment/ProjectSecretStorage';
 import { findObjectXmlInFolder } from '../fs/ObjectLocation';
 import { escapeXmlAttribute as escapeXml, parseConfigXml, parseObjectXml } from '../xml';
+import { RepositoryBindingStore } from './RepositoryBindingStore';
+import { buildRepositoryScopeKey, RepositoryLockState } from './RepositoryLockState';
+import { RepositoryLockSnapshotStore } from './RepositoryLockSnapshotStore';
+import { getRootLockName, ONE_C_TYPE_NAMES, parseRepositoryUnit, subordinateUnitFullName } from './RepositoryObjectNames';
+import { resolveUnitSuffixByRelativePath } from './RepositoryObjectScope';
 
 export interface RepositoryBinding {
   repoPath: string;
@@ -40,14 +44,14 @@ export interface RepositoryNodeRef {
   };
 }
 
-interface RepositoryScopeState {
-  connected?: boolean;
-  lockedFullNames: string[];
-}
-
-interface RepositoryStateFile {
-  version: 2;
-  scopes: Record<string, RepositoryScopeState>;
+/**
+ * Событие изменения захватов в том виде, в каком его получают подписчики фасада:
+ * им (например, контроллеру readonly редакторов) нужен только корень цели.
+ */
+export interface RepositoryLocksChangedNotice {
+  readonly target: { readonly configRoot: string };
+  readonly fullNames: readonly string[];
+  readonly allObjects: readonly string[];
 }
 
 interface CachedFileValue<T> {
@@ -60,67 +64,7 @@ interface CachedTarget {
   target: RepositoryTarget | null;
 }
 
-const REPOSITORY_STATE_VERSION = 2;
 const REPOSITORY_NAMESPACE = 'http://v8.1c.ru/8.3/config/objects';
-const CONFIGURATION_ROOT_LOCK_NAME = '__configuration_root__';
-const EXTENSION_ROOT_LOCK_NAME = '__extension_root__';
-
-/**
- * Внутренние имена типов объектов 1С, используемые для формирования полного имени
- * при захвате/освобождении в хранилище. Это НЕ человекочитаемые метки (label из META_TYPES),
- * а технические идентификаторы платформы 1С (например, «БизнесПроцесс» без дефиса).
- */
-const ONE_C_TYPE_NAMES: Partial<Record<MetaKind, string>> = {
-  Subsystem: 'Подсистема',
-  CommonModule: 'ОбщийМодуль',
-  SessionParameter: 'ПараметрСеанса',
-  CommonAttribute: 'ОбщийРеквизит',
-  Role: 'Роль',
-  CommonForm: 'ОбщаяФорма',
-  CommonCommand: 'ОбщаяКоманда',
-  CommandGroup: 'ГруппаКоманд',
-  CommonPicture: 'ОбщаяКартинка',
-  CommonTemplate: 'ОбщийМакет',
-  XDTOPackage: 'XDTOPackage',
-  StyleItem: 'ЭлементСтиля',
-  DefinedType: 'ОпределяемыйТип',
-  FunctionalOption: 'ФункциональнаяОпция',
-  FunctionalOptionsParameter: 'ПараметрФункциональнойОпции',
-  SettingsStorage: 'ХранилищеНастроек',
-  Style: 'Стиль',
-  WSReference: 'WSСсылка',
-  WebSocketClient: 'WebSocketКлиент',
-  IntegrationService: 'СервисИнтеграции',
-  Bot: 'Бот',
-  Interface: 'Интерфейс',
-  PaletteColor: 'ЦветПалитры',
-  Language: 'Язык',
-  HTTPService: 'HTTPСервис',
-  WebService: 'WebСервис',
-  Constant: 'Константа',
-  Catalog: 'Справочник',
-  Document: 'Документ',
-  DocumentNumerator: 'НумераторДокументов',
-  Enum: 'Перечисление',
-  InformationRegister: 'РегистрСведений',
-  AccumulationRegister: 'РегистрНакопления',
-  AccountingRegister: 'РегистрБухгалтерии',
-  CalculationRegister: 'РегистрРасчета',
-  Report: 'Отчет',
-  DataProcessor: 'Обработка',
-  BusinessProcess: 'БизнесПроцесс',
-  Task: 'Задача',
-  ExchangePlan: 'ПланОбмена',
-  ChartOfCharacteristicTypes: 'ПланВидовХарактеристик',
-  ChartOfAccounts: 'ПланСчетов',
-  ChartOfCalculationTypes: 'ПланВидовРасчета',
-  DocumentJournal: 'ЖурналДокументов',
-  ScheduledJob: 'РегламентноеЗадание',
-  EventSubscription: 'ПодпискаНаСобытие',
-  FilterCriterion: 'КритерийОтбора',
-  Sequence: 'Последовательность',
-  ExternalDataSource: 'ВнешнийИсточникДанных',
-};
 
 /**
  * Виды дочерних узлов (ChildTag + Column), для которых захват идёт
@@ -142,8 +86,23 @@ const CHILD_LIKE_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Инфраструктурный сервис хранилища: хранит настройки в `env.json`,
- * локальный кэш захваченных объектов и генерирует `Objects.xml`.
+ * Виды узлов, у которых нет собственного XML-файла объекта: корень конфигурации/расширения
+ * и узлы группировки дерева. У них не бывает полного имени объекта (`resolveFullName`).
+ */
+const ROOT_OR_GROUP_KINDS_WITHOUT_OWN_XML: ReadonlySet<string> = new Set([
+  'configuration',
+  'extension',
+  'extensions-root',
+  'group-common',
+  'group-type',
+  'NumeratorsBranch',
+  'SequencesBranch',
+]);
+
+/**
+ * Фасад хранилища для команд и UI: резолвинг цели по файлам выгрузки, привязка
+ * (`RepositoryBindingStore`), состояние захватов (`RepositoryLockState`), снимки
+ * захвата (`RepositoryLockSnapshotStore`) и генерация `Objects.xml`.
  */
 export class RepositoryService {
   private readonly targetCache = new Map<string, CachedTarget>();
@@ -157,13 +116,26 @@ export class RepositoryService {
    * выполняется через `invalidateConfigRootCache()` из reloadEntries.
    */
   private readonly configRootByDirCache = new Map<string, string | null>();
-  private envCache: CachedFileValue<Record<string, unknown>> | undefined;
-  private stateCache: CachedFileValue<RepositoryStateFile> | undefined;
+  private readonly bindings: RepositoryBindingStore;
+  private readonly lockStateStore: RepositoryLockState;
+  private readonly snapshotStore: RepositoryLockSnapshotStore;
 
   constructor(
     private readonly workspaceRoot: string,
-    private readonly secrets: ProjectSecretStorage
-  ) {}
+    secrets: ProjectSecretStorage
+  ) {
+    this.bindings = new RepositoryBindingStore(workspaceRoot, secrets);
+    this.lockStateStore = new RepositoryLockState(workspaceRoot);
+    this.snapshotStore = new RepositoryLockSnapshotStore(workspaceRoot);
+  }
+
+  get lockState(): RepositoryLockState {
+    return this.lockStateStore;
+  }
+
+  get snapshots(): RepositoryLockSnapshotStore {
+    return this.snapshotStore;
+  }
 
   /**
    * Сбрасывает кэш `findConfigRoot`. Вызывается при изменении набора
@@ -183,7 +155,7 @@ export class RepositoryService {
   }
 
   getEnvJsonPath(): string {
-    return path.join(this.workspaceRoot, 'env.json');
+    return this.bindings.getEnvJsonPath();
   }
 
   resolveTargetByXmlPath(xmlPath: string): RepositoryTarget | null {
@@ -224,184 +196,51 @@ export class RepositoryService {
   }
 
   /**
-   * Читает привязку хранилища для отдачи наружу (webview) и, если в `env.json`
-   * остался legacy-пароль (`--repo-pwd`/`repo-pwd`), мигрирует его в
-   * `ProjectSecretStorage` и затирает в файле. Пароль в результат не попадает.
+   * Читает привязку хранилища для отдачи наружу (webview); legacy-пароль из `env.json`
+   * при этом мигрирует в `ProjectSecretStorage`. Пароль в результат не попадает.
    */
-  async loadBinding(target: RepositoryTarget): Promise<StoredRepositoryBinding | null> {
-    const raw = this.readBindingRaw(target);
-    if (!raw) {
-      return null;
-    }
-
-    if (raw.legacyPassword.trim()) {
-      await this.secrets.setRepoPassword(this.buildScopeKey(target), raw.legacyPassword);
-      this.eraseLegacyRepoPassword(target);
-    }
-
-    return { repoPath: raw.repoPath, repoUser: raw.repoUser };
+  loadBinding(target: RepositoryTarget): Promise<StoredRepositoryBinding | null> {
+    return this.bindings.loadBinding(target);
   }
 
+  /** Новая привязка начинается с чистого состояния захватов и подключения. */
   async saveBinding(target: RepositoryTarget, binding: RepositoryBinding): Promise<void> {
-    const env = this.readEnvFile();
-    const defaults = this.getDefaultSection(env);
-    if (target.configKind === 'cfe') {
-      const extensionName = target.extensionName ?? '';
-      const extensionSection = this.getExtensionSection(defaults);
-      extensionSection[extensionName] = {
-        'repo-path': binding.repoPath,
-        'repo-user': binding.repoUser,
-      };
-      defaults.extension = extensionSection;
-    } else {
-    defaults['--repo-path'] = binding.repoPath;
-    defaults['--repo-user'] = binding.repoUser;
-    delete defaults['--repo-pwd'];
-    }
-
-    env.default = defaults;
-    this.writeEnvFile(env);
-    // Пароль хранилища уходит в SecretStorage; непустой ввод обновляет секрет,
-    // пустой — трактуется как удаление (внутри setRepoPassword).
-    if (binding.repoPassword.trim()) {
-      await this.secrets.setRepoPassword(this.buildScopeKey(target), binding.repoPassword);
-    }
-    this.saveScopeState(target, {
-      connected: true,
-      lockedFullNames: [],
-    });
+    await this.bindings.saveBinding(target, binding);
+    this.lockStateStore.resetScope(target, true);
   }
 
   async clearBinding(target: RepositoryTarget): Promise<void> {
-    const env = this.readEnvFile();
-    const defaults = this.getDefaultSection(env);
-    if (target.configKind === 'cfe') {
-      const extensionName = target.extensionName ?? '';
-      const extensionSection = this.getExtensionSection(defaults);
-      defaults.extension = Object.fromEntries(
-        Object.entries(extensionSection).filter(([name]) => name !== extensionName)
-      );
-    } else {
-      delete defaults['--repo-path'];
-      delete defaults['--repo-user'];
-      delete defaults['--repo-pwd'];
-    }
-    env.default = defaults;
-    this.writeEnvFile(env);
-    await this.secrets.setRepoPassword(this.buildScopeKey(target), '');
-    this.clearScopeState(target);
+    await this.bindings.clearBinding(target);
+    this.lockStateStore.clearScope(target);
   }
 
-  /**
-   * Возвращает `true`, если для цели сохранён пароль хранилища в SecretStorage.
-   */
-  async hasStoredRepoPassword(target: RepositoryTarget): Promise<boolean> {
-    return this.secrets.hasRepoPassword(this.buildScopeKey(target));
+  /** Возвращает `true`, если для цели сохранён пароль хранилища в SecretStorage. */
+  hasStoredRepoPassword(target: RepositoryTarget): Promise<boolean> {
+    return this.bindings.hasStoredRepoPassword(target);
   }
 
   /**
    * Полная привязка (с паролем из SecretStorage) для запуска команды 1С.
    * Пароль остаётся только в памяти процесса и в `env.json` не пишется.
    */
-  async resolveBindingForCommand(target: RepositoryTarget): Promise<RepositoryBinding | null> {
-    const stored = await this.loadBinding(target);
-    if (!stored) {
-      return null;
-    }
-    const repoPassword = await this.secrets.getRepoPassword(this.buildScopeKey(target));
-    return {
-      repoPath: stored.repoPath,
-      repoUser: stored.repoUser,
-      repoPassword: repoPassword ?? '',
-    };
+  resolveBindingForCommand(target: RepositoryTarget): Promise<RepositoryBinding | null> {
+    return this.bindings.resolveBindingForCommand(target);
   }
 
   hasBinding(target: RepositoryTarget): boolean {
-    return this.readBindingRaw(target) !== null;
-  }
-
-  /**
-   * Синхронное чтение привязки из `env.json` без обращения к SecretStorage.
-   * Отдаёт repoPath/repoUser и оставшийся legacy-пароль (если есть) — нужен для
-   * проверок наличия привязки (hot path) и последующей асинхронной миграции.
-   */
-  private readBindingRaw(
-    target: RepositoryTarget
-  ): { repoPath: string; repoUser: string; legacyPassword: string } | null {
-    const env = this.readEnvFile();
-    const defaults = this.getDefaultSection(env);
-    if (target.configKind === 'cfe') {
-      const extensionSection = this.getRawExtensionSection(defaults);
-      const extensionName = target.extensionName ?? '';
-      const item = extensionSection[extensionName] as Record<string, unknown> | undefined;
-      const repoPath = this.readString(item?.['repo-path']);
-      if (!repoPath) {
-        return null;
-      }
-
-      return {
-        repoPath,
-        repoUser: this.readString(item?.['repo-user']) ?? '',
-        legacyPassword: this.readString(item?.['repo-pwd']) ?? '',
-      };
-    }
-
-    const repoPath = this.readString(defaults['--repo-path']);
-    if (!repoPath) {
-      return null;
-    }
-
-    return {
-      repoPath,
-      repoUser: this.readString(defaults['--repo-user']) ?? '',
-      legacyPassword: this.readString(defaults['--repo-pwd']) ?? '',
-    };
-  }
-
-  private eraseLegacyRepoPassword(target: RepositoryTarget): void {
-    const env = this.readEnvFile();
-    const defaults = this.getDefaultSection(env);
-    if (target.configKind === 'cfe') {
-      const extensionName = target.extensionName ?? '';
-      const rawSection = defaults.extension;
-      if (rawSection && typeof rawSection === 'object' && !Array.isArray(rawSection)) {
-        const item = (rawSection as Record<string, unknown>)[extensionName];
-        if (item && typeof item === 'object' && !Array.isArray(item)) {
-          delete (item as Record<string, unknown>)['repo-pwd'];
-        }
-      }
-    } else {
-      delete defaults['--repo-pwd'];
-    }
-    env.default = defaults;
-    this.writeEnvFile(env);
+    return this.bindings.hasBinding(target);
   }
 
   isConnected(target: RepositoryTarget): boolean {
-    if (!this.hasBinding(target)) {
-      return false;
-    }
-
-    const state = this.loadStateFile();
-    const scope = state.scopes[this.buildScopeKey(target)] as RepositoryScopeState | undefined;
-    return scope?.connected ?? true;
+    return this.hasBinding(target) && this.lockStateStore.isConnected(target);
   }
 
   setConnected(target: RepositoryTarget, connected: boolean): void {
-    const state = this.loadStateFile();
-    const scopeKey = this.buildScopeKey(target);
-    const scope = state.scopes[scopeKey] ?? { lockedFullNames: [] };
-    state.scopes[scopeKey] = {
-      ...scope,
-      connected,
-    };
-    this.saveStateFile(state);
+    this.lockStateStore.setConnected(target, connected);
   }
 
   isLocked(target: RepositoryTarget, fullName: string): boolean {
-    const state = this.loadStateFile();
-    const scope = state.scopes[this.buildScopeKey(target)] as RepositoryScopeState | undefined;
-    return scope?.lockedFullNames.includes(fullName) ?? false;
+    return this.lockStateStore.isLocked(target, fullName);
   }
 
   /**
@@ -409,34 +248,22 @@ export class RepositoryService {
    * расширения. Это нужно для операций создания новых корневых объектов.
    */
   isRootLocked(target: RepositoryTarget): boolean {
-    return this.isLocked(target, this.getRootLockName(target));
+    return this.lockStateStore.isRootLocked(target);
   }
 
   setLocked(target: RepositoryTarget, fullNames: string[], locked: boolean): void {
-    if (fullNames.length === 0) {
-      return;
-    }
+    this.lockStateStore.setLocked(target, fullNames, locked);
+  }
 
-    const state = this.loadStateFile();
-    const scopeKey = this.buildScopeKey(target);
-    const scope = state.scopes[scopeKey] ?? { lockedFullNames: [] };
-    const items = new Set(scope.lockedFullNames);
-    for (const fullName of fullNames) {
-      if (locked) {
-        items.add(fullName);
-      } else {
-        items.delete(fullName);
-      }
-    }
-    state.scopes[scopeKey] = {
-      lockedFullNames: [...items].sort((left, right) => left.localeCompare(right, 'ru')),
-    };
-    this.saveStateFile(state);
+  onDidChangeLocks(listener: (event: RepositoryLocksChangedNotice) => void): { dispose(): void } {
+    return this.lockStateStore.onDidChangeLocks(listener);
   }
 
   /**
    * Возвращает `true`, если редактирование файла должно быть запрещено из-за
-   * активного подключения к хранилищу без локального захвата объекта.
+   * активного подключения к хранилищу без локального захвата объекта. Файлы
+   * подчинённых единиц (форм, макетов и т.п.) проверяются по захвату самой единицы:
+   * нерекурсивный захват владельца их не захватывает.
    */
   isEditRestricted(filePath: string): boolean {
     const ownerObjectXmlPath = this.resolveOwnerObjectXmlPath(filePath);
@@ -445,45 +272,45 @@ export class RepositoryService {
     }
 
     const target = this.resolveTargetByXmlPath(ownerObjectXmlPath);
-    if (!target || !this.hasBinding(target) || !this.isConnected(target)) {
+    if (!target || !this.isConnected(target)) {
       return false;
     }
 
-    return this.isMetadataEditRestricted(target, ownerObjectXmlPath);
+    const suffix = resolveUnitSuffixByRelativePath(path.relative(target.configRoot, filePath));
+    const ownerFullName = suffix.length > 0 ? this.resolveRootObjectFullName(ownerObjectXmlPath) : null;
+    if (!ownerFullName) {
+      return this.isMetadataEditRestricted(target, ownerObjectXmlPath);
+    }
+    let unit = ownerFullName;
+    for (const segment of suffix) {
+      // Каталог с точкой в имени даёт нераспознанного родителя единицы: захват такой
+      // единицы проверить нельзя, а бросать отсюда нельзя — вызывается из guard'а
+      // редактора на каждом открытии документа. Безопасный дефолт — «ограничено».
+      if (!parseRepositoryUnit(unit)) {
+        return true;
+      }
+      unit = subordinateUnitFullName(unit, segment.tag, segment.name);
+    }
+    return !this.isLocked(target, unit);
   }
 
   /**
    * Проверяет, можно ли менять метаданные внутри цели хранилища.
-   * Для существующих объектов используется их локальный захват, а для
-   * операций создания корневых объектов — захват корня конфигурации.
+   * Для существующих объектов используется их локальный захват (в том числе через
+   * рекурсивный захват подсистемы или корня), а для операций создания корневых
+   * объектов — явный захват корня конфигурации.
    */
   isMetadataEditRestricted(target: RepositoryTarget, ownerObjectXmlPath?: string): boolean {
-    if (!this.hasBinding(target) || !this.isConnected(target)) {
+    if (!this.isConnected(target)) {
       return false;
     }
 
-    if (!ownerObjectXmlPath) {
-      return !this.isRootLocked(target);
-    }
-
-    const fullName = this.resolveRootObjectFullName(ownerObjectXmlPath);
+    const fullName = ownerObjectXmlPath ? this.resolveRootObjectFullName(ownerObjectXmlPath) : null;
     if (!fullName) {
       return !this.isRootLocked(target);
     }
 
     return !this.isLocked(target, fullName);
-  }
-
-  clearLocks(target: RepositoryTarget): void {
-    const state = this.loadStateFile();
-    const scopeKey = this.buildScopeKey(target);
-    const scope = state.scopes[scopeKey] as RepositoryScopeState | undefined;
-    if (!scope) {
-      return;
-    }
-    scope.lockedFullNames = [];
-    state.scopes[scopeKey] = scope;
-    this.saveStateFile(state);
   }
 
   resolveFullName(node: RepositoryNodeRef): string | null {
@@ -492,8 +319,7 @@ export class RepositoryService {
       return null;
     }
 
-    if (kind === 'configuration' || kind === 'extension' || kind === 'extensions-root' ||
-      kind === 'group-common' || kind === 'group-type' || kind === 'NumeratorsBranch' || kind === 'SequencesBranch') {
+    if (ROOT_OR_GROUP_KINDS_WITHOUT_OWN_XML.has(kind)) {
       return null;
     }
 
@@ -528,7 +354,7 @@ export class RepositoryService {
       ].join('\n');
       return {
         filePath: this.writeObjectsFile(target, xml),
-        fullNames: [this.getRootLockName(target)],
+        fullNames: [getRootLockName(target)],
       };
     }
 
@@ -613,106 +439,6 @@ export class RepositoryService {
     return findObjectXmlInFolder(configRoot, folderName, objectSegment);
   }
 
-  private readEnvFile(): Record<string, unknown> {
-    const envPath = this.getEnvJsonPath();
-    const mtimeMs = getFileMtimeMs(envPath) ?? -1;
-    if (this.envCache?.mtimeMs === mtimeMs) {
-      return this.envCache.value;
-    }
-
-    if (mtimeMs < 0) {
-      const empty = { default: {} };
-      this.envCache = { mtimeMs, value: empty };
-      return empty;
-    }
-
-    const raw = fs.readFileSync(envPath, 'utf-8');
-    // Пустой env.json — легитимное состояние (создан инициализацией, но ещё не
-    // заполнен / очищен). Не должен ронять навигатор через JSON.parse('').
-    if (raw.trim().length === 0) {
-      const empty = { default: {} };
-      this.envCache = { mtimeMs, value: empty };
-      return empty;
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(`env.json повреждён (${envPath}): ${reason}`, { cause: error });
-    }
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error(`env.json повреждён (${envPath}): ожидался объект`);
-    }
-
-    const value = parsed as Record<string, unknown>;
-    this.envCache = { mtimeMs, value };
-    return value;
-  }
-
-  private writeEnvFile(env: Record<string, unknown>): void {
-    const envPath = this.getEnvJsonPath();
-    fs.mkdirSync(path.dirname(envPath), { recursive: true });
-    fs.writeFileSync(envPath, `${JSON.stringify(env, null, 2)}\n`, 'utf-8');
-    this.envCache = {
-      mtimeMs: getFileMtimeMs(envPath) ?? Date.now(),
-      value: env,
-    };
-  }
-
-  private getDefaultSection(env: Record<string, unknown>): Record<string, unknown> {
-    const defaults = env.default;
-    if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults)) {
-      return {};
-    }
-    return { ...(defaults as Record<string, unknown>) };
-  }
-
-  private getExtensionSection(defaults: Record<string, unknown>): Record<string, Record<string, string>> {
-    const raw = defaults.extension;
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      return {};
-    }
-
-    const result: Record<string, Record<string, string>> = {};
-    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-      if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        continue;
-      }
-      const item = value as Record<string, unknown>;
-      result[key] = {
-        'repo-path': this.readString(item['repo-path']) ?? '',
-        'repo-user': this.readString(item['repo-user']) ?? '',
-      };
-    }
-    return result;
-  }
-
-  /**
-   * Сырое чтение секции расширений с сохранением `repo-pwd` — нужно для
-   * миграции legacy-пароля (обычный `getExtensionSection` пароль отбрасывает).
-   */
-  private getRawExtensionSection(
-    defaults: Record<string, unknown>
-  ): Record<string, Record<string, unknown>> {
-    const raw = defaults.extension;
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      return {};
-    }
-    const result: Record<string, Record<string, unknown>> = {};
-    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-      if (value && typeof value === 'object' && !Array.isArray(value)) {
-        result[key] = value as Record<string, unknown>;
-      }
-    }
-    return result;
-  }
-
-  private readString(value: unknown): string | undefined {
-    return typeof value === 'string' ? value : undefined;
-  }
-
   private findConfigRoot(startPath: string): string | null {
     let current: string;
     try {
@@ -758,84 +484,8 @@ export class RepositoryService {
     return resolved;
   }
 
-  private loadStateFile(): RepositoryStateFile {
-    const filePath = this.getStateFilePath();
-    const mtimeMs = getFileMtimeMs(filePath) ?? -1;
-    if (this.stateCache?.mtimeMs === mtimeMs) {
-      return this.stateCache.value;
-    }
-
-    if (mtimeMs < 0) {
-      const empty: RepositoryStateFile = {
-        version: REPOSITORY_STATE_VERSION,
-        scopes: {},
-      };
-      this.stateCache = { mtimeMs, value: empty };
-      return empty;
-    }
-
-    try {
-      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Partial<RepositoryStateFile>;
-      if (parsed.version !== REPOSITORY_STATE_VERSION || !parsed.scopes) {
-        const empty: RepositoryStateFile = {
-          version: REPOSITORY_STATE_VERSION,
-          scopes: {},
-        };
-        this.stateCache = { mtimeMs, value: empty };
-        return empty;
-      }
-      const state: RepositoryStateFile = {
-        version: REPOSITORY_STATE_VERSION,
-        scopes: parsed.scopes,
-      };
-      this.stateCache = { mtimeMs, value: state };
-      return state;
-    } catch {
-      const empty: RepositoryStateFile = {
-        version: REPOSITORY_STATE_VERSION,
-        scopes: {},
-      };
-      this.stateCache = { mtimeMs, value: empty };
-      return empty;
-    }
-  }
-
-  private saveStateFile(state: RepositoryStateFile): void {
-    const filePath = this.getStateFilePath();
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
-    this.stateCache = {
-      mtimeMs: getFileMtimeMs(filePath) ?? Date.now(),
-      value: state,
-    };
-  }
-
-  private saveScopeState(target: RepositoryTarget, scope: RepositoryScopeState): void {
-    const state = this.loadStateFile();
-    state.scopes[this.buildScopeKey(target)] = scope;
-    this.saveStateFile(state);
-  }
-
-  private clearScopeState(target: RepositoryTarget): void {
-    const state = this.loadStateFile();
-    const scopeKey = this.buildScopeKey(target);
-    state.scopes = Object.fromEntries(
-      Object.entries(state.scopes).filter(([key]) => key !== scopeKey)
-    );
-    this.saveStateFile(state);
-  }
-
-  private getStateFilePath(): string {
-    return path.join(this.workspaceRoot, '.v8vscedit', 'repository', 'state.json');
-  }
-
-  private buildScopeKey(target: RepositoryTarget): string {
-    const raw = `${target.configKind}|${path.resolve(target.configRoot)}|${target.extensionName ?? ''}`;
-    return crypto.createHash('sha1').update(raw).digest('hex');
-  }
-
   private writeObjectsFile(target: RepositoryTarget, xml: string): string {
-    const scopeKey = this.buildScopeKey(target);
+    const scopeKey = buildRepositoryScopeKey(target);
     const filePath = path.join(
       this.workspaceRoot,
       '.v8vscedit',
@@ -846,10 +496,6 @@ export class RepositoryService {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, `${xml}\n`, 'utf-8');
     return filePath;
-  }
-
-  private getRootLockName(target: RepositoryTarget): string {
-    return target.configKind === 'cfe' ? EXTENSION_ROOT_LOCK_NAME : CONFIGURATION_ROOT_LOCK_NAME;
   }
 }
 

@@ -12,6 +12,8 @@ export interface AgentCommandOptions {
   readonly update?: boolean;
   readonly force?: boolean;
   readonly listFile?: string;
+  /** Выгрузить только ConfigDumpInfo.xml — версии объектов без их содержимого. */
+  readonly configDumpInfoOnly?: boolean;
   readonly partial?: boolean;
   readonly updateConfigDumpInfo?: boolean;
   readonly noCheck?: boolean;
@@ -42,6 +44,7 @@ export function buildDumpConfigToFilesCommand(dirPath: string, options: AgentCom
     update: options.update,
     force: options.force,
     'list-file': options.listFile,
+    'config-dump-info-only': options.configDumpInfoOnly,
   });
 }
 

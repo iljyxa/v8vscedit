@@ -145,6 +145,59 @@ export function patchHashSnapshot(
   };
 }
 
+/**
+ * Точечно обновляет хеш-кэш конфигурации/расширения по конкретным изменённым файлам —
+ * в отличие от полного пересчёта всего `configDir` не трогает файлы вне `relativeFiles`.
+ * Хеши читаются с диска; удалённые файлы передаются явно, т.к. по отсутствию файла
+ * нельзя отличить «удалён» от «не выгружался».
+ */
+export function patchHashCacheForFiles(
+  projectRoot: string,
+  target: 'cf' | 'cfe',
+  configDir: string,
+  extensionName: string,
+  relativeFiles: readonly string[],
+  deletedFiles: readonly string[] = []
+): void {
+  const supportedFiles = relativeFiles
+    .map((relativeFile) => relativeFile.replace(/\\/g, '/'))
+    .filter((relativeFile) => isSupportedConfigFile(relativeFile));
+  patchHashCacheEntries(
+    projectRoot,
+    target,
+    configDir,
+    extensionName,
+    collectCurrentHashes(configDir, supportedFiles),
+    deletedFiles
+  );
+}
+
+/**
+ * Вариант {@link patchHashCacheForFiles} с готовыми хешами: слияние с хранилищем
+ * фиксирует в кэше хеш версии хранилища (= состояния базы), даже если в проекте
+ * оставлен локальный вариант файла, поэтому хеш нельзя брать с диска.
+ */
+export function patchHashCacheEntries(
+  projectRoot: string,
+  target: 'cf' | 'cfe',
+  configDir: string,
+  extensionName: string,
+  entries: Readonly<Record<string, string>>,
+  deletedFiles: readonly string[]
+): void {
+  const scopeKey = buildScopeKey(target, configDir, extensionName);
+  const previous = loadHashCache(projectRoot, scopeKey);
+  const changedHashes: Record<string, string> = {};
+  for (const [relativeFile, hash] of Object.entries(entries)) {
+    const normalized = relativeFile.replace(/\\/g, '/');
+    if (isSupportedConfigFile(normalized)) {
+      changedHashes[normalized] = hash;
+    }
+  }
+  const deleted = deletedFiles.map((relativeFile) => relativeFile.replace(/\\/g, '/'));
+  saveHashCache(projectRoot, patchHashSnapshot(previous, changedHashes, deleted));
+}
+
 export function collectCurrentHashes(configDir: string, relativePaths: string[]): Record<string, string> {
   const result: Record<string, string> = {};
   for (const relativePath of relativePaths) {

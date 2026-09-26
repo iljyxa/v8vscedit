@@ -59,6 +59,23 @@ export class AgentWorkspaceService {
     return listPath;
   }
 
+  /**
+   * Пишет list-файл для частичного `dump-config-to-files --list-file` — в отличие
+   * от {@link writeListFile}, содержимое здесь не относительные пути файлов, а
+   * fullName объектов хранилища (например, `Справочник.Номенклатура`). Формат
+   * тот же (BOM + перевод строки), но валидация путей неприменима — просто
+   * отбрасываем пустые строки и переводы строк внутри значения.
+   */
+  writeObjectNamesFile(operationId: string, fullNames: readonly string[]): string {
+    const listPath = path.join(this.getAgentFileRoot(), 'lists', `${sanitizePathPart(operationId)}.txt`);
+    fs.mkdirSync(path.dirname(listPath), { recursive: true });
+    const normalized = fullNames
+      .map((name) => name.replace(/[\r\n]+/g, ' ').trim())
+      .filter(Boolean);
+    fs.writeFileSync(listPath, `\uFEFF${normalized.join('\n')}`, 'utf-8');
+    return listPath;
+  }
+
   getAgentRoot(): string {
     return path.join(this.projectRoot, '.v8vscedit', 'agent');
   }

@@ -54,7 +54,13 @@ import { McpMutationGate } from '../../ui/mcp/registration/McpMutationGate';
 import type { McpCommandServices, McpRegistrationDeps } from '../../ui/mcp/registration/McpRegistrationDeps';
 import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOperationGuard';
 import type { CommandServices, NodeArg } from '../../ui/commands/_shared';
-import type { RepositoryService, RepositoryTarget } from '../../infra/repository/RepositoryService';
+import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
+import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
+import {
+  DEFAULT_REPOSITORY_FILE_SYNC_DEPS,
+  type RepositoryFileSyncDeps,
+} from '../../ui/commands/repository/RepositoryFileSyncShared';
+import type { RepositoryCliRequest, RepositoryCliResult } from '../../ui/commands/repository/RepositoryCommandRunner';
 
 const EXAMPLE_CF = path.resolve(__dirname, '../../../example/2.21/src/cf');
 const EXAMPLE_CFE_EVOLC = path.resolve(__dirname, '../../../example/2.21/src/cfe/EVOLC');
@@ -173,6 +179,22 @@ const depsProxy: ExtensionCommandsDeps = {
 };
 
 /**
+ * Точки внешнего мира потоков хранилища (процесс 1С, выгрузка, диалоги) — тем же
+ * приёмом прокси: по умолчанию настоящие, конкретный тест подменяет на заглушки.
+ */
+const repositoryDepsBox: { current: RepositoryFileSyncDeps } = { current: DEFAULT_REPOSITORY_FILE_SYNC_DEPS };
+
+const repositoryDepsProxy = new Proxy(
+  {},
+  {
+    get(_target, prop: PropertyKey) {
+      const value: unknown = Reflect.get(repositoryDepsBox.current, prop);
+      return value;
+    },
+  }
+) as RepositoryFileSyncDeps;
+
+/**
  * Диалоги `vscode.window.show*Message` подменяются на весь suite (а не только
  * внутри вложенного issue #38), чтобы новые сценарии issue #39 могли
  * детерминированно проверить факт/количество уведомлений и — для no-targets —
@@ -196,7 +218,7 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
   suiteSetup(() => {
     context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
     registerExtensionCommands(context, createServicesProxy(), depsProxy);
-    registerRepositoryCommands(context, createServicesProxy());
+    registerRepositoryCommands(context, createServicesProxy(), repositoryDepsProxy);
     registerDbCommands(context, createServicesProxy());
 
     originalWindowMessageStubs = {
@@ -627,6 +649,242 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
     assert.strictEqual(guard.isBusy, true);
     assert.strictEqual(guard.heldBy, 'Хранилище: синхронизация');
     lease?.release();
+  });
+
+  /**
+   * Issue #1 — `RepositoryCommands.lock/unlock/update` теперь начинают с
+   * `ensureRepositoryGuardFree` (план архитектора, критерий приёмки №2):
+   * занятость guard'а проверяется ДО `askRecursiveMode`/`pickBoolean`
+   * (`vscode.window.showQuickPick`), поэтому при занятом guard'е диалог выбора
+   * режима не должен появляться вовсе, а чужая аренда — оставаться нетронутой.
+   */
+  suite('RepositoryCommands: repository.lock/unlock/update — guard занят до диалогов (issue #1)', () => {
+    let originalShowQuickPick: typeof vscode.window.showQuickPick;
+    let quickPickCalls: number;
+
+    setup(() => {
+      quickPickCalls = 0;
+      originalShowQuickPick = vscode.window.showQuickPick;
+      (vscode.window as Pick<typeof vscode.window, 'showQuickPick'>).showQuickPick = ((...args: unknown[]) => {
+        quickPickCalls += 1;
+        return (originalShowQuickPick as (...a: unknown[]) => Thenable<unknown>)(...args);
+      }) as typeof vscode.window.showQuickPick;
+    });
+
+    teardown(() => {
+      (vscode.window as Pick<typeof vscode.window, 'showQuickPick'>).showQuickPick = originalShowQuickPick;
+    });
+
+    function repositoryServiceStub(target: RepositoryTarget): RepositoryService {
+      return {
+        resolveTargetByXmlPath: () => target,
+        hasBinding: () => true,
+        isConnected: () => true,
+        resolveFullName: () => 'Справочник.Тест',
+        isLocked: () => false,
+      } as unknown as RepositoryService;
+    }
+
+    ['v8vscedit.repository.lock', 'v8vscedit.repository.unlock', 'v8vscedit.repository.update'].forEach((command) => {
+      test(`${command}: guard занят «Хранилище: синхронизация» — showQuickPick не вызывается, чужая аренда цела`, async () => {
+        const guard = new ConfigurationOperationGuard();
+        const lease = guard.tryAcquire('Хранилище: синхронизация');
+        const target: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'Основная конфигурация' };
+
+        servicesBox.current = createServices({
+          configurationOperationGuard: guard,
+          repositoryService: repositoryServiceStub(target),
+        });
+
+        await vscode.commands.executeCommand(command, CF_NODE);
+
+        assert.strictEqual(quickPickCalls, 0, `${command}: showQuickPick не должен вызываться при занятом guard'е.`);
+        assert.strictEqual(guard.isBusy, true);
+        assert.strictEqual(guard.heldBy, 'Хранилище: синхронизация');
+        lease?.release();
+      });
+    });
+  });
+
+  /**
+   * Issue #1: guard свободен, пользователь ответил на все вопросы — команда доходит
+   * до потока хранилища и при исходе `done` обновляет дерево и панель действий, при
+   * любом другом исходе — нет. Сервис хранилища настоящий (копия фикстуры с привязкой
+   * в env.json), процесс 1С — внедрённый `runRepositoryCli`; синхронизация файлов
+   * выключена, чтобы проверялась именно проводка команды, а не слияние (оно покрыто
+   * наборами RepositoryLockSync/RepositoryUnlockSync).
+   */
+  suite('RepositoryCommands: guard свободен — ответы на диалоги доходят до потока и обновления UI (issue #1)', () => {
+    type Stubs = Pick<typeof vscode.window, 'showQuickPick' | 'showInputBox'>;
+    const stubsRef = vscode.window as Stubs;
+    let originals: Stubs;
+    let workspaceRoot: string;
+    let repositoryService: RepositoryService;
+    /** Ответы QuickPick «да/нет» по порядку; `undefined` — пользователь закрыл выбор. */
+    let pickAnswers: (boolean | undefined)[];
+    let inputAnswer: string | undefined;
+    let cliRequests: RepositoryCliRequest[];
+    let cliResult: RepositoryCliResult;
+    let treeRefreshes: number;
+    let actionsRefreshes: number;
+
+    function catalogNode(withLabel: boolean): NodeArg {
+      return {
+        xmlPath: path.join(workspaceRoot, 'src', 'cf', 'Catalogs', 'Контрагенты.xml'),
+        nodeKind: 'Catalog',
+        ...(withLabel ? { label: 'Контрагенты' } : {}),
+      };
+    }
+
+    setup(() => {
+      workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-repo-commands-'));
+      fs.cpSync(EXAMPLE_CF, path.join(workspaceRoot, 'src', 'cf'), { recursive: true });
+      fs.writeFileSync(path.join(workspaceRoot, 'env.json'), JSON.stringify({
+        default: { '--ibconnection': '/F/tmp/база', '--repo-path': '/tmp/хранилище', '--repo-user': 'Admin' },
+      }), 'utf-8');
+      const secrets = new Map<string, string>();
+      const secretStore = {
+        get: (key: string) => Promise.resolve(secrets.get(key)),
+        store: (key: string, value: string) => { secrets.set(key, value); return Promise.resolve(); },
+        delete: (key: string) => { secrets.delete(key); return Promise.resolve(); },
+      };
+      repositoryService = new RepositoryService(workspaceRoot, new ProjectSecretStorage(secretStore, workspaceRoot));
+      pickAnswers = [];
+      inputAnswer = '';
+      cliRequests = [];
+      cliResult = { status: 'done' };
+      treeRefreshes = 0;
+      actionsRefreshes = 0;
+
+      originals = { showQuickPick: vscode.window.showQuickPick, showInputBox: vscode.window.showInputBox };
+      stubsRef.showQuickPick = ((items: readonly { value: boolean }[]) => {
+        const answer = pickAnswers.shift();
+        return Promise.resolve(answer === undefined ? undefined : items.find((item) => item.value === answer));
+      }) as unknown as typeof vscode.window.showQuickPick;
+      stubsRef.showInputBox = (() => Promise.resolve(inputAnswer));
+
+      repositoryDepsBox.current = {
+        ...DEFAULT_REPOSITORY_FILE_SYNC_DEPS,
+        runRepositoryCli: (request) => {
+          cliRequests.push(request);
+          return Promise.resolve(cliResult);
+        },
+        dumpToTemp: notCalled('dumpToTemp'),
+        chooseConflictResolution: notCalled('chooseConflictResolution'),
+        confirmRollback: notCalled('confirmRollback'),
+        openDiffs: notCalled('openDiffs'),
+        notifyBusy: () => undefined,
+        notifyInfo: () => undefined,
+        notifyWarning: () => undefined,
+        notifyError: () => undefined,
+        isFileSyncEnabled: () => false,
+        getDirtyFilePaths: () => [],
+      };
+      servicesBox.current = createServices({
+        workspaceFolder: { uri: vscode.Uri.file(workspaceRoot), name: 'repo', index: 0 },
+        repositoryService,
+        configurationOperationGuard: new ConfigurationOperationGuard(),
+        treeProvider: {
+          getEntries: notCalled('treeProvider.getEntries'),
+          refresh: () => { treeRefreshes += 1; },
+        } as unknown as CommandServices['treeProvider'],
+        refreshActionsView: () => { actionsRefreshes += 1; },
+        getChangedConfigurations: () => [],
+        repositoryCommitViewProvider: {
+          show: () => Promise.resolve({ comment: 'Правка контрагентов', recursive: false, keepLocked: false, force: false }),
+        } as unknown as CommandServices['repositoryCommitViewProvider'],
+      });
+    });
+
+    teardown(() => {
+      stubsRef.showQuickPick = originals.showQuickPick;
+      stubsRef.showInputBox = originals.showInputBox;
+      repositoryDepsBox.current = DEFAULT_REPOSITORY_FILE_SYNC_DEPS;
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    });
+
+    const cases: { command: string; cli: string; answers: boolean[]; input?: string }[] = [
+      { command: 'v8vscedit.repository.lock', cli: 'repository-lock', answers: [false] },
+      { command: 'v8vscedit.repository.unlock', cli: 'repository-unlock', answers: [false, true] },
+      { command: 'v8vscedit.repository.update', cli: 'repository-update', answers: [true, false], input: ' 125 ' },
+      { command: 'v8vscedit.repository.commit', cli: 'repository-commit', answers: [] },
+    ];
+
+    cases.forEach(({ command, cli, answers, input }) => {
+      [true, false].forEach((withLabel) => {
+        test(`${command} (метка узла ${withLabel ? 'есть' : 'нет'}): поток завершён → CLI «${cli}», дерево и панель действий обновлены`, async () => {
+          pickAnswers = [...answers];
+          inputAnswer = input ?? '';
+
+          await vscode.commands.executeCommand(command, catalogNode(withLabel));
+
+          assert.deepStrictEqual(cliRequests.map((request) => request.command), [cli]);
+          assert.strictEqual(treeRefreshes, 1);
+          assert.strictEqual(actionsRefreshes, 1);
+        });
+      });
+
+      test(`${command}: Конфигуратор вернул ошибку → UI не обновляется`, async () => {
+        pickAnswers = [...answers];
+        inputAnswer = input ?? '';
+        cliResult = { status: 'failed', message: 'Ошибка захвата объектов в хранилище' };
+
+        await vscode.commands.executeCommand(command, catalogNode(true));
+
+        assert.deepStrictEqual(cliRequests.map((request) => request.command), [cli]);
+        assert.strictEqual(treeRefreshes, 0);
+        assert.strictEqual(actionsRefreshes, 0);
+      });
+    });
+
+    test('repository.lock: захват без рекурсии записан в состояние, объект захвачен', async () => {
+      pickAnswers = [false];
+      const target = repositoryService.resolveTargetByXmlPath(path.join(workspaceRoot, 'src', 'cf', 'Configuration.xml'));
+      assert.ok(target);
+
+      await vscode.commands.executeCommand('v8vscedit.repository.lock', catalogNode(true));
+
+      assert.strictEqual(repositoryService.isLocked(target, 'Справочник.Контрагенты'), true);
+    });
+
+    test('repository.update: версия из поля ввода передаётся без пробелов', async () => {
+      pickAnswers = [false, false];
+      inputAnswer = ' 125 ';
+
+      await vscode.commands.executeCommand('v8vscedit.repository.update', catalogNode(true));
+
+      assert.strictEqual(cliRequests.length, 1);
+      assert.ok(cliRequests[0].extraArgs.includes('125'), cliRequests[0].extraArgs.join(' '));
+    });
+
+    test('repository.update: пустая строка в поле версии (Enter без ввода) — не отмена, версия не передаётся', async () => {
+      pickAnswers = [false, false];
+      inputAnswer = '';
+
+      await vscode.commands.executeCommand('v8vscedit.repository.update', catalogNode(true));
+
+      assert.strictEqual(cliRequests.length, 1);
+      assert.ok(!cliRequests[0].extraArgs.includes('-Version'), cliRequests[0].extraArgs.join(' '));
+    });
+
+    ([
+      { command: 'v8vscedit.repository.lock', answers: [undefined], input: '' },
+      { command: 'v8vscedit.repository.unlock', answers: [undefined], input: '' },
+      { command: 'v8vscedit.repository.unlock', answers: [false, undefined], input: '' },
+      { command: 'v8vscedit.repository.update', answers: [undefined], input: '' },
+      { command: 'v8vscedit.repository.update', answers: [false, undefined], input: '' },
+      { command: 'v8vscedit.repository.update', answers: [false, false], input: undefined },
+    ] as { command: string; answers: (boolean | undefined)[]; input: string | undefined }[]).forEach(({ command, answers, input }, index) => {
+      test(`${command}: пользователь отменил диалог (вариант ${String(index + 1)}) → Конфигуратор не запускается`, async () => {
+        pickAnswers = [...answers];
+        inputAnswer = input;
+
+        await vscode.commands.executeCommand(command, catalogNode(true));
+
+        assert.deepStrictEqual(cliRequests, []);
+        assert.strictEqual(treeRefreshes, 0);
+      });
+    });
   });
 
   test('RepositoryCommands: guard свободен и изменений для конфигурации нет — repository.commit доходит до show, событий guard нет', async () => {
