@@ -160,6 +160,8 @@ export class RepositoryBindingStore {
     try {
       parsed = JSON.parse(raw);
     } catch (error) {
+      // JSON.parse бросает только SyntaxError; ветка String(error) — страховка типа unknown.
+      /* c8 ignore next */
       const reason = error instanceof Error ? error.message : String(error);
       throw new Error(`env.json повреждён (${envPath}): ${reason}`, { cause: error });
     }
@@ -175,6 +177,8 @@ export class RepositoryBindingStore {
     const envPath = this.getEnvJsonPath();
     fs.mkdirSync(path.dirname(envPath), { recursive: true });
     fs.writeFileSync(envPath, `${JSON.stringify(env, null, 2)}\n`, 'utf-8');
+    // Файл только что записан; mtime отсутствует лишь при гонке с внешним удалением.
+    /* c8 ignore next */
     this.envCache = { mtimeMs: getFileMtimeMs(envPath) ?? Date.now(), value: env };
   }
 }

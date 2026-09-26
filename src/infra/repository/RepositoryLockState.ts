@@ -262,6 +262,8 @@ export class RepositoryLockState {
     const filePath = this.getStateFilePath();
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
+    // Файл только что записан; mtime отсутствует лишь при гонке с внешним удалением.
+    /* c8 ignore next */
     this.cache = { mtimeMs: getFileMtimeMs(filePath) ?? Date.now(), value: state };
   }
 }

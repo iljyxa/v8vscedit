@@ -170,6 +170,9 @@ export class AgentOperationService {
       try {
         await this.executeAgentCommand(
           buildDumpConfigToFilesCommand(workspace.targetAgentDir, {
+            // resolveWorkspace уже отверг cfe без extensionName; `?? target.name` — общий для
+            // сервиса запасной вариант, здесь недостижимый.
+            /* c8 ignore next */
             extensionName: target.kind === 'cfe' ? target.extensionName ?? target.name : undefined,
             format: 'hierarchical',
             listFile: listFile ? this.workspaceService.toAgentPath(listFile) : undefined,

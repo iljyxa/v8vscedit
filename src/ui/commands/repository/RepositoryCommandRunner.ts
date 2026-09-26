@@ -77,7 +77,8 @@ export interface RepositoryCliServices {
  */
 export async function executeRepositoryCli(
   request: RepositoryCliRequest,
-  services: RepositoryCliServices
+  services: RepositoryCliServices,
+  launch: RepositoryDesignerLauncher = runRepositoryDesigner
 ): Promise<RepositoryCliResult> {
   const title = request.progressTitle ?? request.command;
   let designerArgs: string[];
@@ -100,14 +101,28 @@ export async function executeRepositoryCli(
     if (request.target.extensionName) {
       designerArgs.push('-Extension', request.target.extensionName);
     }
+    // Без явного пути — автопоиск установленной платформы: исход зависит от машины,
+    // сам поиск покрыт тестами OnecPlatform.
+    /* c8 ignore next */
     v8Path = resolveV8ExecutablePath(connection.v8Path ?? '');
   } catch (error) {
+    // Подготовка бросает только Error; String(error) — страховка типа unknown.
+    /* c8 ignore next */
     const message = error instanceof Error ? error.message : String(error);
     services.outputChannel.appendLine(`[repository][error] ${message}`);
     return { status: 'failed', message };
   }
-  return runRepositoryDesigner(request, title, v8Path, designerArgs, services);
+  return launch(request, title, v8Path, designerArgs, services);
 }
+
+/** Запуск процесса Конфигуратора; внедряется, чтобы сборку аргументов проверять без 1С. */
+export type RepositoryDesignerLauncher = (
+  request: RepositoryCliRequest,
+  title: string,
+  v8Path: string,
+  designerArgs: string[],
+  services: RepositoryCliServices
+) => Promise<RepositoryCliResult>;
 
 /* c8 ignore start -- запуск процесса Конфигуратора: платформа 1С недоступна в тестовом окружении;
    аргументы покрыты тестами buildCommandDesignerArgs, ветки подготовки — тестами executeRepositoryCli. */

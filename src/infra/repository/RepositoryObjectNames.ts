@@ -217,6 +217,8 @@ export function toChildObjectRef(fullName: string): string | null {
   if (!parsed) {
     return null;
   }
+  // У всех видов ONE_C_TYPE_NAMES englishKind задан явно; `?? kind` — контракт MetaTypeDef.
+  /* c8 ignore next */
   return `${META_TYPES[parsed.kind].englishKind ?? parsed.kind}.${parsed.name}`;
 }
 
