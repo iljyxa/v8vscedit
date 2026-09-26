@@ -58,8 +58,10 @@
   (`RepositoryMergePlanner`/`Applier`), модальные диалоги и диффы — после аренды → выгрузка никогда не пишется
   прямо в проект, имена подчинённых объектов в `-listFile` берутся только из источника, соответствующего базе
   (несуществующее имя роняет всю выгрузку) → новый вид подчинённого объекта с собственным XML — запись в
-  `REPOSITORY_SUBORDINATE_LAYOUT` (`RepositoryObjectNames.ts`), а не новый словарь → тест на копии реальной
-  фикстуры с имитацией платформы `src/test/suite/support/partialDumpFixture.ts`.
+  `SUBORDINATE_OBJECT_FOLDERS` (`infra/fs/SubordinateObjectLayout.ts`, единственный источник подкаталогов
+  подчинённых, из него читают и `REPOSITORY_SUBORDINATE_LAYOUT` в `RepositoryObjectNames.ts`, и
+  `SupportInfoService`), а не новый словарь → тест на копии реальной фикстуры с имитацией платформы
+  `src/test/suite/support/partialDumpFixture.ts`.
 - **Новая операция, запускающая Конфигуратор для полного импорта/обновления/применения конфигурации к
   базе** (аналог `importConfigurations`/`updateChangedConfigurations`/`runPostRepositorySync`): захват —
   через `services.configurationOperationGuard` (`runExclusive(title, op)` для одной атомарной цепочки

@@ -26,7 +26,10 @@
 10. Хранилище (`infra/repository/`): `ONE_C_TYPE_NAMES` (русские имена типов для `-listFile`/`Objects.xml`) и
     `REPOSITORY_SUBORDINATE_LAYOUT` (каталоги и имена подчинённых объектов с собственным XML — перерасчёты,
     таблицы, кубы, таблицы измерения не являются `MetaKind`) живут вне `META_TYPES`; при появлении этих видов в
-    навигаторе данные переезжают в реестр. `SupportInfoService.CHILD_FOLDERS_WITH_OWN_XML` дублирует часть
-    таблицы (issue #47). Команды `repository.bind`/`create`/`unbind`/`report`/`dump`/`users`/`label` идут мимо
+    навигаторе данные переезжают в реестр. Список подкаталогов подчинённых со своим XML вынесен в единственный
+    источник `infra/fs/SubordinateObjectLayout.ts` (`SUBORDINATE_OBJECT_FOLDERS`), из которого его берут и
+    `REPOSITORY_SUBORDINATE_LAYOUT`, и `SupportInfoService` (issue #47 закрыл дублирование
+    `CHILD_FOLDERS_WITH_OWN_XML`); литералы папок для видов, не являющихся `MetaKind`, остаются техдолгом
+    внутри этого реестра. Команды `repository.bind`/`create`/`unbind`/`report`/`dump`/`users`/`label` идут мимо
     `ConfigurationOperationGuard` (issue #40). См.
     [repository-file-sync.md](./repository-file-sync.md#известные-ограничения).
