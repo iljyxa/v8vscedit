@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import type { ConfigEntry } from '../../infra/fs/ConfigLocator';
-import type { RepositoryService } from '../../infra/repository/RepositoryService';
+import { isSubordinateUnitNode, type RepositoryService } from '../../infra/repository/RepositoryService';
 import { parseConfigXml } from '../../infra/xml';
 import { getObjectLocationFromXml } from '../../infra/fs/MetaPathResolver';
 import type { SupportInfoService } from '../../infra/support/SupportInfoService';
@@ -356,6 +356,13 @@ export class MetadataTreeProvider implements vscode.TreeDataProvider<MetadataNod
       return { connected: false };
     }
 
+    const locked = this.resolveRepositoryLockState(element);
+    // Форма/макет объекта — отдельная единица хранилища: нерекурсивный захват владельца
+    // её не захватывает, а захват самой единицы разрешает правку без захвата владельца.
+    if (isSubordinateUnitNode(element)) {
+      return { connected: true, editRestricted: locked !== true, locked };
+    }
+
     const ownerObjectXmlPath = this.isRootRepositoryNode(element)
       ? undefined
       : (element.metaContext?.ownerObjectXmlPath ?? element.xmlPath);
@@ -363,7 +370,7 @@ export class MetadataTreeProvider implements vscode.TreeDataProvider<MetadataNod
     return {
       connected: true,
       editRestricted: this.repositoryService.isMetadataEditRestricted(target, ownerObjectXmlPath),
-      locked: this.resolveRepositoryLockState(element),
+      locked,
     };
   }
 

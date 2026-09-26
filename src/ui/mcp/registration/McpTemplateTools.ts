@@ -76,7 +76,7 @@ export function registerTemplateTools(server: McpServer, deps: McpRegistrationDe
       },
     },
     (args) => gate.wrap(() => {
-      gate.assertNodeEditable(paths.resolveNode(args.path, args.configuration));
+      gate.assertNodeContentEditable(paths.resolveNode(args.path, args.configuration));
       const outputPath = resolveTemplateXmlByCanonical(paths, args.path, args.configuration);
       // args.definition имеет тип any (z.any()); сервис нормализует данные внутри.
       const result = services.mxlTemplateService.compile({ ...args, outputPath });
@@ -168,7 +168,7 @@ export function registerTemplateTools(server: McpServer, deps: McpRegistrationDe
       },
     },
     (args) => gate.wrap(() => {
-      gate.assertNodeEditable(paths.resolveNode(args.path, args.configuration));
+      gate.assertNodeContentEditable(paths.resolveNode(args.path, args.configuration));
       const outputPath = resolveTemplateXmlByCanonical(paths, args.path, args.configuration);
       const result = services.dataCompositionSchemaService.compile({ ...args, outputPath });
       // Сервис бросает исключение при провале (перехват в wrap); дошли сюда — успех.
@@ -231,7 +231,7 @@ export function registerTemplateTools(server: McpServer, deps: McpRegistrationDe
       },
     },
     ({ path: canonical, configuration, ...rest }) => gate.wrap(() => {
-      gate.assertNodeEditable(paths.resolveNode(canonical, configuration));
+      gate.assertNodeContentEditable(paths.resolveNode(canonical, configuration));
       const templatePath = resolveTemplateXmlByCanonical(paths, canonical, configuration);
       const result = services.dataCompositionSchemaService.edit({ ...rest, templatePath });
       // Сервис бросает исключение при провале (перехват в wrap); дошли сюда — успех.
