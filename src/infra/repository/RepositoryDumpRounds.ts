@@ -6,7 +6,7 @@ import {
   convertContentRefToRepositoryFullName,
   getRepositoryUnitAncestors,
   parseRepositoryUnit,
-  REPOSITORY_SUBORDINATE_LAYOUT,
+  REPOSITORY_SUBORDINATE_TAGS,
   subordinateUnitFullName,
   type RepositorySubordinateTag,
 } from './RepositoryObjectNames';
@@ -27,8 +27,6 @@ export type UnitExpansion = (unit: string, unitXmlPath: string) => string[];
 
 /** Предел запусков выгрузки за одну операцию: защита от бесконечного раскрытия. */
 export const MAX_DUMP_ROUNDS = 5;
-
-const SUBORDINATE_TAGS: ReadonlySet<string> = new Set(Object.keys(REPOSITORY_SUBORDINATE_LAYOUT));
 
 export interface DumpRoundsTempDir {
   dir: string;
@@ -62,7 +60,7 @@ export type DumpRoundsResult =
   | { status: 'failed'; reason: string };
 
 export function expandSubordinateUnits(unit: string, unitXmlPath: string): string[] {
-  return (readChildObjectRefs(unitXmlPath, SUBORDINATE_TAGS) ?? [])
+  return (readChildObjectRefs(unitXmlPath, REPOSITORY_SUBORDINATE_TAGS) ?? [])
     .map((ref) => subordinateUnitFullName(unit, ref.tag as RepositorySubordinateTag, ref.name));
 }
 

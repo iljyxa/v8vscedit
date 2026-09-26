@@ -7,6 +7,13 @@ import {
   refreshRepositoryUi,
   runPostRepositorySync,
 } from './RepositoryDatabaseSync';
+import {
+  askRecursiveMode,
+  pickDisconnectForce,
+  pickUnlockForce,
+  pickUpdateForce,
+  promptRepositoryVersion,
+} from './RepositoryCommandDialogs';
 import { type RepositoryCliCommandServices, runRepositoryCliCommand } from './RepositoryCommandRunner';
 import {
   DEFAULT_REPOSITORY_FILE_SYNC_DEPS,
@@ -151,12 +158,7 @@ export function registerRepositoryCommands(
       }
       const { target, title } = resolved;
 
-      const force = await pickBoolean(
-        'Отключение от хранилища',
-        `Как отключить "${target.displayName}" от хранилища?`,
-        'Принудительно',
-        'Штатно'
-      );
+      const force = await pickDisconnectForce(target.displayName);
       if (force === undefined) {
         return;
       }
@@ -189,7 +191,11 @@ export function registerRepositoryCommands(
         return;
       }
 
-      const recursive = await askRecursiveMode('Захват объектов', label);
+      const recursive = await askRecursiveMode(
+        'Захват объектов',
+        label,
+        services.repositoryService.canApplyRecursively(repositoryNode)
+      );
       if (recursive === undefined) {
         return;
       }
@@ -209,16 +215,15 @@ export function registerRepositoryCommands(
         return;
       }
 
-      const recursive = await askRecursiveMode('Освобождение объектов', label);
+      const recursive = await askRecursiveMode(
+        'Освобождение объектов',
+        label,
+        services.repositoryService.canApplyRecursively(repositoryNode)
+      );
       if (recursive === undefined) {
         return;
       }
-      const force = await pickBoolean(
-        'Освобождение объектов',
-        'Выполнять принудительное освобождение?',
-        'С force',
-        'Без force'
-      );
+      const force = await pickUnlockForce(label);
       if (force === undefined) {
         return;
       }
@@ -266,49 +271,13 @@ export function registerRepositoryCommands(
       }
     }),
 
-    vscode.commands.registerCommand('v8vscedit.repository.update', async (node: NodeArg) => {
-      const repositoryNode = requireRepositoryNode(services, node);
-      if (!repositoryNode) {
-        return;
-      }
-      const label = repositoryNode.label ?? 'выбранный узел';
-      if (!ensureRepositoryGuardFree(services, deps, `Получение «${label}»`)) {
-        return;
-      }
+    vscode.commands.registerCommand('v8vscedit.repository.update', (node: NodeArg) =>
+      runRepositoryUpdateCommand(services, deps, node, false)
+    ),
 
-      const recursive = await askRecursiveMode('Получение из хранилища', label);
-      if (recursive === undefined) {
-        return;
-      }
-      const force = await pickBoolean(
-        'Получение из хранилища',
-        'Выполнять принудительное получение?',
-        'С force',
-        'Без force'
-      );
-      if (force === undefined) {
-        return;
-      }
-      const version = await vscode.window.showInputBox({
-        title: 'Получение из хранилища',
-        prompt: 'Версия хранилища для получения. Оставьте пустым для актуальной.',
-        placeHolder: 'Например: 125',
-        ignoreFocusOut: true,
-      });
-      if (version === undefined) {
-        return;
-      }
-
-      const outcome = await runRepositoryUpdateFlow(
-        repositoryNode,
-        { recursive, force, version: version.trim() || undefined },
-        services,
-        deps
-      );
-      if (outcome === 'done') {
-        refreshRepositoryUi(services);
-      }
-    }),
+    vscode.commands.registerCommand('v8vscedit.repository.updateToVersion', (node: NodeArg) =>
+      runRepositoryUpdateCommand(services, deps, node, true)
+    ),
 
     vscode.commands.registerCommand('v8vscedit.repository.addUser', async (node: NodeArg) => {
       const resolved = requireFreeRootTarget(services, deps, node, 'Пользователь хранилища', true);
@@ -566,6 +535,44 @@ export function registerRepositoryCommands(
   );
 }
 
+/**
+ * Получение из хранилища: актуальной версии или указанной (`withVersion`). Номер
+ * версии спрашивается раньше режимов — без него остальные ответы не нужны.
+ */
+async function runRepositoryUpdateCommand(
+  services: CommandServices,
+  deps: RepositoryFileSyncDeps,
+  node: NodeArg,
+  withVersion: boolean
+): Promise<void> {
+  const repositoryNode = requireRepositoryNode(services, node);
+  if (!repositoryNode) {
+    return;
+  }
+  const label = repositoryNode.label ?? 'выбранный узел';
+  if (!ensureRepositoryGuardFree(services, deps, `Получение «${label}»`)) {
+    return;
+  }
+
+  const title = withVersion ? 'Получение версии из хранилища' : 'Получение из хранилища';
+  const version = withVersion ? await promptRepositoryVersion(title) : undefined;
+  if (withVersion && version === undefined) {
+    return;
+  }
+  const recursive = await askRecursiveMode(title, label, services.repositoryService.canApplyRecursively(repositoryNode));
+  if (recursive === undefined) {
+    return;
+  }
+  const force = await pickUpdateForce(title, label);
+  if (force === undefined) {
+    return;
+  }
+
+  if (await runRepositoryUpdateFlow(repositoryNode, { recursive, force, version }, services, deps) === 'done') {
+    refreshRepositoryUi(services);
+  }
+}
+
 function toCliServices(services: CommandServices): RepositoryCliCommandServices {
   return {
     workspaceFolder: services.workspaceFolder,
@@ -661,15 +668,6 @@ function validateBindingForm(
       repoPassword: formData.repoPassword,
     },
   };
-}
-
-async function askRecursiveMode(title: string, nodeLabel: string): Promise<boolean | undefined> {
-  return pickBoolean(
-    title,
-    `Как выполнить операцию для "${nodeLabel}"?`,
-    'Рекурсивно',
-    'Только выбранный объект'
-  );
 }
 
 async function pickBoolean(
