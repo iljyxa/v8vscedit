@@ -857,6 +857,16 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
       assert.ok(cliRequests[0].extraArgs.includes('125'), cliRequests[0].extraArgs.join(' '));
     });
 
+    test('repository.update: пустая строка в поле версии (Enter без ввода) — не отмена, версия не передаётся', async () => {
+      pickAnswers = [false, false];
+      inputAnswer = '';
+
+      await vscode.commands.executeCommand('v8vscedit.repository.update', catalogNode(true));
+
+      assert.strictEqual(cliRequests.length, 1);
+      assert.ok(!cliRequests[0].extraArgs.includes('-Version'), cliRequests[0].extraArgs.join(' '));
+    });
+
     ([
       { command: 'v8vscedit.repository.lock', answers: [undefined], input: '' },
       { command: 'v8vscedit.repository.unlock', answers: [undefined], input: '' },
