@@ -356,11 +356,13 @@ outputChannel) и в `bootstrap()` подписывается на `onDidChangeB
   значение по умолчанию — `DEFAULT_EXTENSION_COMMANDS_DEPS`; необязательный параметр `deps` у
   `registerExtensionCommands`).
 - `ui/commands/repository/RepositoryLockSync.ts`/`RepositoryUnlockSync.ts` (issue #1) — `repository.lock`/
-  `update`/`unlock`/`commit`: занятость проверяется `ensureRepositoryGuardFree` до первого QuickPick, затем
-  ОДНА аренда `runExclusive` на CLI хранилища, изменение состояния захватов и выгрузку во временный каталог
-  (все раунды); слияние с проектом, модальные диалоги конфликтов/отката и диффы — строго после аренды.
-  Процесс 1С, выгрузка и диалоги внедряются через `RepositoryFileSyncDeps`. Подробно —
-  [repository-file-sync.md](./repository-file-sync.md).
+  `update`/`updateToVersion`/`unlock`/`commit`: занятость проверяется `ensureRepositoryGuardFree` до первого
+  QuickPick, затем ОДНА аренда `runExclusive` на CLI хранилища, изменение состояния захватов и выгрузку во
+  временный каталог (все раунды); слияние с проектом, модальные диалоги конфликтов/отката и диффы — строго
+  после аренды. Процесс 1С, выгрузка и диалоги внедряются через `RepositoryFileSyncDeps`; диалоги вопросов
+  о рекурсии/`-force`/номере версии — `ui/commands/repository/RepositoryCommandDialogs.ts` (issue #61),
+  рекурсия спрашивается только когда `RepositoryService.canApplyRecursively(node)` возвращает `true`.
+  Подробно — [repository-file-sync.md](./repository-file-sync.md).
 - `ui/commands/repository/RepositoryCommands.ts`/`RepositoryCommandRunner.ts` (issue #40) — `repository.connect`/
   `create`/`disconnect`/`addUser`/`copyUsers`/`dump`/`report`/`setLabel`: занятость проверяется
   `requireFreeRootTarget` до форм и диалогов, `runRepositoryCliCommand` держит аренду только на процесс

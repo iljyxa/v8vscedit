@@ -56,9 +56,14 @@
   (`collectOpenTabs`/`runWithResourceActive`) и выбор маршрута `ui/readonly/readonlyTabSelection.ts`
   (`selectReadonlyApplyRoute`) — readonly-команда VS Code действует только на правую (основную) сторону
   активного редактора, поэтому левая file:-сторона diff переключается через временную вкладку.
-- **Новая операция хранилища, меняющая файлы проекта** (аналог `repository.lock`/`update`/`unlock`/`commit`,
-  см. [repository-file-sync.md](./repository-file-sync.md)): поток в `ui/commands/repository/*Sync.ts`
-  с внешними точками через `RepositoryFileSyncDeps` → занятость guard'а проверяется
+- **Новая операция хранилища, меняющая файлы проекта** (аналог `repository.lock`/`update`/
+  `updateToVersion`/`unlock`/`commit`, см. [repository-file-sync.md](./repository-file-sync.md)): поток в
+  `ui/commands/repository/*Sync.ts` с внешними точками через `RepositoryFileSyncDeps` → диалоги (рекурсия,
+  `-force`, номер версии) — только через `RepositoryCommandDialogs.ts`, не инлайн в команде → вопрос о
+  рекурсии задаётся только когда `RepositoryService.canApplyRecursively(node)` вернул `true` (корень
+  конфигурации/расширения и подсистема — всегда, иначе по `<ChildObjects>` XML единицы на предмет тегов из
+  `REPOSITORY_SUBORDINATE_TAGS`); не спрошено → `recursive = false`, платформа всё равно довозит новые
+  подчинённые (стратегия `new-subordinates`) → занятость guard'а проверяется
   (`ensureRepositoryGuardFree`) до первого диалога → ОДНА аренда `runExclusive` только на CLI хранилища,
   `applyLock`/`applyUnlock` и выгрузку во временный каталог (`runDumpRounds`) → слияние
   (`RepositoryMergePlanner`/`Applier`), модальные диалоги и диффы — после аренды → выгрузка никогда не пишется

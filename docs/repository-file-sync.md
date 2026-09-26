@@ -1,7 +1,7 @@
 # Синхронизация файлов проекта с хранилищем конфигурации
 
-Issue #1 форка. Команды хранилища `v8vscedit.repository.lock` / `update` / `unlock` / `commit` меняют не только
-состояние объектов на сервере и в базе, но и файлы XML-выгрузки проекта. Полный план и решения —
+Issue #1 форка. Команды хранилища `v8vscedit.repository.lock` / `update` / `updateToVersion` / `unlock` / `commit`
+меняют не только состояние объектов на сервере и в базе, но и файлы XML-выгрузки проекта. Полный план и решения —
 [plans/repository-file-sync-plan.md](./plans/repository-file-sync-plan.md) (разделы 1–10), факты поведения
 платформы, на которых держится реализация, — там же, §10.12.
 
@@ -144,6 +144,38 @@ root-incremental.
   временный каталог и передачей владения им вызывающему. Хвосты после аварийного завершения самого
   процесса расширения (а не операции внутри него) не подметаются — «Известные ограничения», issue #76.
 
+### Диалоги команд
+
+`RepositoryCommandDialogs.ts` — единственный источник диалогов хранилища: `askRecursiveMode`,
+`pickUnlockForce`, `pickUpdateForce`, `pickDisconnectForce`, `promptRepositoryVersion`,
+`validateRepositoryVersion`. У пунктов QuickPick заполнены `description`/`detail`; первым идёт безопасный
+вариант (без `-force` / только выбранный объект / штатное отключение), второй — с побочными эффектами.
+
+- **Рекурсия** (`askRecursiveMode`) спрашивается только если `RepositoryService.canApplyRecursively(node)`
+  вернул `true`: для корня конфигурации/расширения и подсистемы — всегда (состав по `<Content>`/составу
+  конфигурации не определить статически), для прочих узлов — по `<ChildObjects>` XML единицы (для
+  подчинённой единицы — её собственный XML по полному имени, т.к. `xmlPath` узла формы/макета в дереве —
+  XML владельца; для остальных child-like узлов — XML владельца) есть ли теги из
+  `REPOSITORY_SUBORDINATE_TAGS` (`infra/repository/RepositoryObjectNames.ts` — производное множество ключей
+  `REPOSITORY_SUBORDINATE_LAYOUT`, тем же множеством теперь фильтруются раунды выгрузки в
+  `RepositoryDumpRounds.ts`). Нечитаемый или неизвестный XML — вопрос всё равно задаётся (см.
+  `canApplyRecursively`). Если вопрос не задан, `recursive = false` — это безопасно: платформа довозит
+  новые подчинённые и при нерекурсивной операции (стратегия раскрытия `new-subordinates`), просто не
+  захватывает их.
+- **`unlock` с `-force`** (`pickUnlockForce`) — проверено на стенде (план §10.12): без ключа Конфигуратор
+  завершается с rc=1 «Объект … был изменён» и ничего не освобождает; с ключом объект в базе возвращается к
+  версии хранилища.
+- **`update`/`updateToVersion` с `-force`** (`pickUpdateForce`, подтверждение получения новых и удаления
+  удалённых объектов) и **`disconnect` с `-force`** (`pickDisconnectForce`, отключение без аутентификации в
+  хранилище и без проверки захваченных изменённых объектов) — описаны по документации платформы,
+  **на стенде не проверены**; поведение `update` без `-force`, когда в хранилище появились новые или
+  удалились объекты, рекомендуется дополнительно проверить на стенде.
+- `repository.update` больше не спрашивает номер версии — всегда получает актуальную (без `-Version`).
+  Номер версии спрашивает отдельная команда узла `v8vscedit.repository.updateToVersion` («Получить версию
+  из хранилища…», иконка `history`, в контекстном меню сразу после `repository.update` при
+  `-repoConnected`): `promptRepositoryVersion` (натуральное число без ведущих нулей, `validateRepositoryVersion`)
+  → рекурсия → `-force` → тот же поток `runRepositoryUpdateFlow` с `-Version`.
+
 ## Трёхстороннее слияние
 
 `RepositoryMergePlanner.ts` (чистый план) и `RepositoryMergeApplier.ts` (применение). Для каждого файла
@@ -270,8 +302,9 @@ Readonly-команды VS Code (`set/resetActiveEditorReadonlyInSession`, `ui/r
 
 `v8vscedit.repository.syncFilesOnLockUnlock` (по умолчанию `true`) включает выгрузку, слияние, снимки и откат.
 Захват с `-revised`, guard, состояние захватов и readonly работают всегда. MCP-инструмента нет: команды
-`v8vscedit.repository.*` не входят в `ALLOWED_COMMANDS` моста `v8vscedit_execute_command` — все четыре операции
-требуют интерактивных решений пользователя (рекурсия, конфликты, откат).
+`v8vscedit.repository.*` не входят в `ALLOWED_COMMANDS` моста `v8vscedit_execute_command` — все пять операций
+(`lock`/`update`/`updateToVersion`/`unlock`/`commit`) требуют интерактивных решений пользователя (рекурсия,
+конфликты, откат, номер версии).
 
 ## Известные ограничения
 
