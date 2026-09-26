@@ -27,6 +27,7 @@ import {
   type ScopeDepth,
 } from '../../../infra/repository/RepositoryObjectScope';
 import type { RepositoryNodeRef, RepositoryTarget } from '../../../infra/repository/RepositoryService';
+import { pruneMergeBackups, pruneRepositoryObjectsFiles } from '../../../infra/repository/RepositoryTempCleanup';
 import type { CommandServices } from '../_shared';
 import { dumpConfigurationToTemp } from '../ext/ConfigurationDumpRunner';
 import { notifyConfigurationOperationBusy } from '../ext/configurationOperationBusy';
@@ -173,12 +174,63 @@ export async function runRepositoryExclusive<T>(
   label: string,
   operation: () => Promise<T>
 ): Promise<{ acquired: true; value: T } | { acquired: false }> {
-  const result = await services.configurationOperationGuard.runExclusive(`Хранилище: ${label}`, operation);
+  const result = await services.configurationOperationGuard.runExclusive(`Хранилище: ${label}`, () => {
+    // Только внутри аренды: вне её файл objects/ может принадлежать идущей операции.
+    sweepRepositoryTempArtifacts(services, deps.now());
+    return operation();
+  });
   if (!result.acquired) {
     reportRepositoryBusy(services, deps, label, result.heldBy);
     return { acquired: false };
   }
   return result;
+}
+
+/**
+ * Подметание хвостов прошлых операций хранилища: файлов `objects/` и устаревших
+ * резервных копий слияния. Шаги независимы, сбой любого — предупреждение в журнал:
+ * очистка не должна срывать операцию, ради которой взята аренда.
+ */
+export function sweepRepositoryTempArtifacts(
+  services: Pick<RepositoryFileSyncServices, 'workspaceFolder' | 'outputChannel'>,
+  now: Date
+): void {
+  const workspaceRoot = services.workspaceFolder.uri.fsPath;
+  const steps: readonly (() => string[])[] = [
+    () => pruneRepositoryObjectsFiles(workspaceRoot),
+    () => pruneMergeBackups(workspaceRoot, now),
+  ];
+  let removed = 0;
+  for (const step of steps) {
+    try {
+      removed += step().length;
+    } catch (error) {
+      // fs бросает только Error; String(error) — страховка типа unknown.
+      /* c8 ignore next */
+      const message = error instanceof Error ? error.message : String(error);
+      services.outputChannel.appendLine(`[repository][file-sync][warn] очистка временных файлов не удалась: ${message}`);
+    }
+  }
+  if (removed > 0) {
+    logFileSync(services, `очистка временных файлов: удалено ${String(removed)}`);
+  }
+}
+
+/**
+ * Запуск Конфигуратора по `subject.objectsFile`: файл нужен только этому запуску и
+ * удаляется при любом исходе, включая исключение.
+ */
+export async function runSubjectCli(
+  subject: RepositorySubject,
+  request: RepositoryCliRequest,
+  services: RepositoryFileSyncServices,
+  deps: RepositoryFileSyncDeps
+): Promise<RepositoryCliResult> {
+  try {
+    return await deps.runRepositoryCli(request, services);
+  } finally {
+    services.repositoryService.removeObjectsFile(subject.objectsFile);
+  }
 }
 
 /** Сообщение об исходе Конфигуратора — только после освобождения guard'а. */
@@ -214,6 +266,7 @@ export function reportFlowError(
  */
 export interface RepositorySubject {
   target: RepositoryTarget;
+  /** Файл `-ObjectsFile`: путь действителен только до завершения `runSubjectCli`. */
   objectsFile: string;
   anchor: string;
   members: string[];

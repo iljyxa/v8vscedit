@@ -25,6 +25,7 @@ import {
   resolveMergeScope,
   resolveSubjectTarget,
   runRepositoryExclusive,
+  runSubjectCli,
   type RepositoryFileSyncDeps,
   type RepositoryFileSyncServices,
   type RepositoryFlowOutcome,
@@ -67,9 +68,11 @@ export async function runRepositoryUnlockFlow(
   try {
     leased = await runRepositoryExclusive<UnlockLeaseResult>(services, deps, label, async () => {
       const subject = prepareRepositorySubject(node, options.recursive, target, services);
-      const cli = await deps.runRepositoryCli(
+      const cli = await runSubjectCli(
+        subject,
         buildRepositoryUnlockRequest(target, subject.objectsFile, objectLabel, options.force),
-        services
+        services,
+        deps
       );
       if (cli.status !== 'done') {
         return { cli };
@@ -130,9 +133,11 @@ export async function runRepositoryCommitFlow(
   try {
     leased = await runRepositoryExclusive<UnlockLeaseResult>(services, deps, label, async () => {
       const subject = prepareRepositorySubject(node, formData.recursive, target, services);
-      const cli = await deps.runRepositoryCli(
+      const cli = await runSubjectCli(
+        subject,
         buildRepositoryCommitRequest(target, subject.objectsFile, objectLabel, formData),
-        services
+        services,
+        deps
       );
       if (cli.status !== 'done' || formData.keepLocked) {
         return { cli, subject };

@@ -61,7 +61,13 @@
   `SUBORDINATE_OBJECT_FOLDERS` (`infra/fs/SubordinateObjectLayout.ts`, единственный источник подкаталогов
   подчинённых, из него читают и `REPOSITORY_SUBORDINATE_LAYOUT` в `RepositoryObjectNames.ts`, и
   `SupportInfoService`), а не новый словарь → тест на копии реальной фикстуры с имитацией платформы
-  `src/test/suite/support/partialDumpFixture.ts`.
+  `src/test/suite/support/partialDumpFixture.ts`. CLI с `-ObjectsFile` запускать только через
+  `runSubjectCli` (удаляет файл в `finally` при любом исходе, включая исключение); аренду guard'а брать
+  только через `runRepositoryExclusive` (первым шагом сама подметает хвосты через
+  `sweepRepositoryTempArtifacts`/`infra/repository/RepositoryTempCleanup.ts` — отдельно вызывать не
+  нужно); ресурсы выгрузки во временный каталог до передачи владения вызывающему оборачивать в
+  `disposeOnError`/`disposeOnErrorAsync` (там же), а не голым `try/catch` — см.
+  [repository-file-sync.md](./repository-file-sync.md#временные-файлы-и-очистка).
 - **Новая операция, запускающая Конфигуратор для полного импорта/обновления/применения конфигурации к
   базе** (аналог `importConfigurations`/`updateChangedConfigurations`/`runPostRepositorySync`): захват —
   через `services.configurationOperationGuard` (`runExclusive(title, op)` для одной атомарной цепочки

@@ -26,6 +26,7 @@ import {
 } from '../../../infra/repository/RepositoryObjectNames';
 import { CONFIG_DUMP_INFO_FILE, type ObjectScope, type ScopeDepth } from '../../../infra/repository/RepositoryObjectScope';
 import type { RepositoryNodeRef, RepositoryTarget } from '../../../infra/repository/RepositoryService';
+import { disposeOnError, disposeOnErrorAsync } from '../../../infra/repository/RepositoryTempCleanup';
 import { readConfigDumpInfoFile } from '../../../infra/xml/ConfigDumpInfoReader';
 import { buildRepositoryLockRequest, buildRepositoryUpdateRequest } from './RepositoryCommandRunner';
 import {
@@ -43,6 +44,7 @@ import {
   resolveMergeScope,
   resolveSubjectTarget,
   runRepositoryExclusive,
+  runSubjectCli,
   toDumpListName,
   type DumpMergeSource,
   type DumpScopeEntry,
@@ -128,7 +130,7 @@ async function runFetchFlow(
       const request = operation === 'lock'
         ? buildRepositoryLockRequest(target, subject.objectsFile, objectLabel)
         : buildRepositoryUpdateRequest(target, subject.objectsFile, objectLabel, options);
-      const cli = await deps.runRepositoryCli(request, services);
+      const cli = await runSubjectCli(subject, request, services, deps);
       if (cli.status !== 'done') {
         return { cli };
       }
@@ -140,7 +142,9 @@ async function runFetchFlow(
       }
       const acquisition = await acquireRepositoryDump(subject, baseHashes, services, deps);
       if (operation === 'lock' && acquisition.status === 'acquired' && acquisition.dump.extraMembers.length > 0) {
-        applySubjectLock(services, subject, [...subject.members, ...acquisition.dump.extraMembers]);
+        const { dump } = acquisition;
+        // Выгрузка уже принадлежит потоку: если запись состояния упадёт, её никто не освободит.
+        disposeOnError(dump, () => applySubjectLock(services, subject, [...subject.members, ...dump.extraMembers]));
       }
       return { cli, subject, acquisition };
     });
@@ -241,42 +245,45 @@ async function acquireObjectsDump(
   if (rounds.status === 'failed') {
     return { status: 'failed', reason: rounds.reason };
   }
-  const recursive = expansion === 'subordinates' || expansion === 'subsystem';
-  const drafts = new Map<string, DumpSourceDraft>();
-  const added: string[] = [];
-  for (const { fullName, dir } of rounds.found) {
-    const scope = resolveMergeScope(target, fullName, dir, 'unit');
-    if (!scope) {
-      log(`«${fullName}»: область файлов не определена — пропущено.`);
-      continue;
+  // Каталоги раундов освобождает dispose результата — до его передачи их держит эта функция.
+  return disposeOnError(rounds, (): DumpAcquisition => {
+    const recursive = expansion === 'subordinates' || expansion === 'subsystem';
+    const drafts = new Map<string, DumpSourceDraft>();
+    const added: string[] = [];
+    for (const { fullName, dir } of rounds.found) {
+      const scope = resolveMergeScope(target, fullName, dir, 'unit');
+      if (!scope) {
+        log(`«${fullName}»: область файлов не определена — пропущено.`);
+        continue;
+      }
+      // В ChildObjects Configuration.xml попадают только объекты верхнего уровня.
+      if (getRepositoryUnitAncestors(fullName).length === 0 && isObjectMissingInProject(target, fullName)) {
+        added.push(fullName);
+      }
+      const draft = drafts.get(dir) ?? { entries: [], removed: [] };
+      drafts.set(dir, draft);
+      draft.entries.push({ fullName, scope });
+      const removed = collectRemovedUnitSubordinates(target, fullName, dir);
+      if (recursive) {
+        draft.removed.push(...scopeEntries(target, removed, undefined, 'tree'));
+      } else if (removed.length > 0) {
+        log(`«${fullName}»: в хранилище нет ${removed.join(', ')} — при нерекурсивной операции файлы не тронуты.`);
+      }
     }
-    // В ChildObjects Configuration.xml попадают только объекты верхнего уровня.
-    if (getRepositoryUnitAncestors(fullName).length === 0 && isObjectMissingInProject(target, fullName)) {
-      added.push(fullName);
-    }
-    const draft = drafts.get(dir) ?? { entries: [], removed: [] };
-    drafts.set(dir, draft);
-    draft.entries.push({ fullName, scope });
-    const removed = collectRemovedUnitSubordinates(target, fullName, dir);
-    if (recursive) {
-      draft.removed.push(...scopeEntries(target, removed, undefined, 'tree'));
-    } else if (removed.length > 0) {
-      log(`«${fullName}»: в хранилище нет ${removed.join(', ')} — при нерекурсивной операции файлы не тронуты.`);
-    }
-  }
-  const known = new Set(subject.members);
-  return {
-    status: 'acquired',
-    dump: {
-      sources: [...drafts.entries()].map(([dir, draft]) => ({ dir, entries: draft.entries, removed: draft.removed })),
-      added,
-      removed: [],
-      extraMembers: recursive ? rounds.found.map((unit) => unit.fullName).filter((fullName) => !known.has(fullName)) : [],
-      missing: rounds.missing,
-      rootManifest: false,
-      dispose: () => { rounds.dispose(); },
-    },
-  };
+    const known = new Set(subject.members);
+    return {
+      status: 'acquired',
+      dump: {
+        sources: [...drafts.entries()].map(([dir, draft]) => ({ dir, entries: draft.entries, removed: draft.removed })),
+        added,
+        removed: [],
+        extraMembers: recursive ? rounds.found.map((unit) => unit.fullName).filter((fullName) => !known.has(fullName)) : [],
+        missing: rounds.missing,
+        rootManifest: false,
+        dispose: () => { rounds.dispose(); },
+      },
+    };
+  });
 }
 
 /** Подчинённые единицы, перечисленные в XML проекта, но исчезнувшие из XML выгрузки. */
@@ -308,74 +315,78 @@ async function acquireRootIncrementalDump(
     log(`сбой выгрузки ConfigDumpInfo.xml (${info.reason}) — полная выгрузка.`);
     return acquireFullDump(target, services, deps);
   }
-  const infoPath = path.join(info.dir, CONFIG_DUMP_INFO_FILE);
-  const nextInfo = readConfigDumpInfoFile(infoPath);
-  // Пустой новый ConfigDumpInfo при непустом проектном — сбой выгрузки, а не удаление всех объектов.
-  if (!nextInfo || (nextInfo.size === 0 && projectInfo.size > 0)) {
-    info.dispose();
-    log('ConfigDumpInfo.xml из базы не разобран — полная выгрузка.');
-    return acquireFullDump(target, services, deps);
-  }
-  // Группировка по единицам: изменённая форма выгружается одна, без владельца.
-  const diff = diffConfigDumpInfo(projectInfo, nextInfo, extractDumpInfoUnit);
-  const totalOwners = new Set([...nextInfo.keys()].map(extractDumpInfoUnit)).size;
-  const strategy = decideRootIncrementalStrategy(diff, totalOwners);
-  if (strategy !== 'partial') {
-    info.dispose();
-    if (strategy === 'none') {
-      log('ConfigDumpInfo.xml без изменений — выгрузка объектов не нужна.');
-      return { status: 'unchanged' };
-    }
-    log('изменено владельцев больше порога — полная выгрузка.');
-    return acquireFullDump(target, services, deps);
-  }
-  const toFullName = (owner: string): string | null => {
-    const fullName = dumpInfoOwnerToRepositoryFullName(owner, target);
-    /* c8 ignore start -- страховка от вида метаданных новой версии платформы, которого нет в
-       ONE_C_TYPE_NAMES: все префиксы реальных выгрузок 2.20/2.21 распознаются. */
-    if (!fullName) {
-      log(`владелец "${owner}" не распознан — пропущен.`);
-    }
-    /* c8 ignore stop */
-    return fullName;
-  };
-  // Неизвестный вид подчинённого сводится к единице-родителю — возможны повторы.
-  const fetched = [...new Set([...diff.changedOwners, ...diff.addedOwners].map(toFullName).filter((name): name is string => name !== null))];
-  const removed = diff.removedOwners.map(toFullName).filter((name): name is string => name !== null && !isRootLockName(name));
   const disposers = [() => { info.dispose(); }];
-  let dir = info.dir;
-  if (fetched.length > 0) {
-    const rounds = await runDumpRounds({
-      target,
-      anchors: fetched,
-      expansion: createTowardsExpansion(),
-      services,
-      dumpToTemp: deps.dumpToTemp,
-      toDumpListName,
-      baseHashes,
-      optimistic: false,
-    });
-    if (rounds.status === 'failed') {
+  // Каталоги update-info и раундов до передачи в результат принадлежат этой функции:
+  // исключение на любом шаге не должно оставлять их во временном каталоге.
+  return disposeOnErrorAsync({ dispose: () => disposers.forEach((dispose) => { dispose(); }) }, async (): Promise<DumpAcquisition> => {
+    const infoPath = path.join(info.dir, CONFIG_DUMP_INFO_FILE);
+    const nextInfo = readConfigDumpInfoFile(infoPath);
+    // Пустой новый ConfigDumpInfo при непустом проектном — сбой выгрузки, а не удаление всех объектов.
+    if (!nextInfo || (nextInfo.size === 0 && projectInfo.size > 0)) {
       info.dispose();
-      return { status: 'failed', reason: rounds.reason };
+      log('ConfigDumpInfo.xml из базы не разобран — полная выгрузка.');
+      return acquireFullDump(target, services, deps);
     }
-    disposers.push(() => { rounds.dispose(); });
-    dir = rounds.found[0].dir;
-  }
-  const isTopLevel = (fullName: string): boolean => getRepositoryUnitAncestors(fullName).length === 0;
-  return {
-    status: 'acquired',
-    dump: {
-      sources: [{ dir, entries: scopeEntries(target, fetched, dir, 'unit'), removed: scopeEntries(target, removed, undefined, 'tree') }],
-      added: fetched.filter((fullName) => isTopLevel(fullName) && isObjectMissingInProject(target, fullName)),
-      removed: removed.filter(isTopLevel),
-      configDumpInfoSource: infoPath,
-      extraMembers: [],
-      missing: [],
-      rootManifest: true,
-      dispose: () => disposers.forEach((dispose) => dispose()),
-    },
-  };
+    // Группировка по единицам: изменённая форма выгружается одна, без владельца.
+    const diff = diffConfigDumpInfo(projectInfo, nextInfo, extractDumpInfoUnit);
+    const totalOwners = new Set([...nextInfo.keys()].map(extractDumpInfoUnit)).size;
+    const strategy = decideRootIncrementalStrategy(diff, totalOwners);
+    if (strategy !== 'partial') {
+      info.dispose();
+      if (strategy === 'none') {
+        log('ConfigDumpInfo.xml без изменений — выгрузка объектов не нужна.');
+        return { status: 'unchanged' };
+      }
+      log('изменено владельцев больше порога — полная выгрузка.');
+      return acquireFullDump(target, services, deps);
+    }
+    const toFullName = (owner: string): string | null => {
+      const fullName = dumpInfoOwnerToRepositoryFullName(owner, target);
+      /* c8 ignore start -- страховка от вида метаданных новой версии платформы, которого нет в
+         ONE_C_TYPE_NAMES: все префиксы реальных выгрузок 2.20/2.21 распознаются. */
+      if (!fullName) {
+        log(`владелец "${owner}" не распознан — пропущен.`);
+      }
+      /* c8 ignore stop */
+      return fullName;
+    };
+    // Неизвестный вид подчинённого сводится к единице-родителю — возможны повторы.
+    const fetched = [...new Set([...diff.changedOwners, ...diff.addedOwners].map(toFullName).filter((name): name is string => name !== null))];
+    const removed = diff.removedOwners.map(toFullName).filter((name): name is string => name !== null && !isRootLockName(name));
+    let dir = info.dir;
+    if (fetched.length > 0) {
+      const rounds = await runDumpRounds({
+        target,
+        anchors: fetched,
+        expansion: createTowardsExpansion(),
+        services,
+        dumpToTemp: deps.dumpToTemp,
+        toDumpListName,
+        baseHashes,
+        optimistic: false,
+      });
+      if (rounds.status === 'failed') {
+        info.dispose();
+        return { status: 'failed', reason: rounds.reason };
+      }
+      disposers.push(() => { rounds.dispose(); });
+      dir = rounds.found[0].dir;
+    }
+    const isTopLevel = (fullName: string): boolean => getRepositoryUnitAncestors(fullName).length === 0;
+    return {
+      status: 'acquired',
+      dump: {
+        sources: [{ dir, entries: scopeEntries(target, fetched, dir, 'unit'), removed: scopeEntries(target, removed, undefined, 'tree') }],
+        added: fetched.filter((fullName) => isTopLevel(fullName) && isObjectMissingInProject(target, fullName)),
+        removed: removed.filter(isTopLevel),
+        configDumpInfoSource: infoPath,
+        extraMembers: [],
+        missing: [],
+        rootManifest: true,
+        dispose: () => disposers.forEach((dispose) => dispose()),
+      },
+    };
+  });
 }
 
 /**

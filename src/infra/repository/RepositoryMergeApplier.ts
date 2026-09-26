@@ -4,6 +4,7 @@ import { computeFileHash, patchHashCacheEntries } from '../cache/HashCache';
 import type { MergePlan, MergePlanEntry } from './RepositoryMergePlanner';
 import { removeEmptyParentDirs, type ObjectScope } from './RepositoryObjectScope';
 import type { RepositoryTarget } from './RepositoryService';
+import { getRepositoryMergeRoot } from './RepositoryTempCleanup';
 
 /**
  * Исход единственного диалога конфликтов:
@@ -50,10 +51,13 @@ export interface MergeApplyResult {
 const REPOSITORY_COPY_DIR = 'repository';
 const ALL_SCOPE: ObjectScope = { kind: 'all' };
 
-/** `.v8vscedit/repository/merge/<scopeKey>/<время>-<метка>` — уникален на операцию. */
+/**
+ * `.v8vscedit/repository/merge/<scopeKey>/<время>-<метка>` — уникален на операцию.
+ * Формат имени разбирает ротация `pruneMergeBackups`: меняется только вместе с ней.
+ */
 export function buildMergeBackupDir(workspaceRoot: string, scopeKey: string, label: string, now: Date): string {
   const stamp = now.toISOString().replace(/[:.]/g, '-');
-  return path.join(workspaceRoot, '.v8vscedit', 'repository', 'merge', scopeKey, `${stamp}-${label}`);
+  return path.join(getRepositoryMergeRoot(workspaceRoot), scopeKey, `${stamp}-${label}`);
 }
 
 /**

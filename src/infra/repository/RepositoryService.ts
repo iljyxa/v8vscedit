@@ -16,6 +16,7 @@ import {
 } from './RepositoryObjectNames';
 import type { RepositorySubordinateTag } from './RepositoryObjectNames';
 import { resolveLockUnitByRelativePath, resolveUnitSuffixByRelativePath } from './RepositoryObjectScope';
+import { getRepositoryObjectsDir } from './RepositoryTempCleanup';
 
 export interface RepositoryBinding {
   repoPath: string;
@@ -231,11 +232,14 @@ export class RepositoryService {
   async saveBinding(target: RepositoryTarget, binding: RepositoryBinding): Promise<void> {
     await this.bindings.saveBinding(target, binding);
     this.lockStateStore.resetScope(target, true);
+    // Снимки описывают захваты прежней привязки — эталонами для новой они не являются.
+    this.snapshotStore.discardAll(target);
   }
 
   async clearBinding(target: RepositoryTarget): Promise<void> {
     await this.bindings.clearBinding(target);
     this.lockStateStore.clearScope(target);
+    this.snapshotStore.discardAll(target);
   }
 
   /** Возвращает `true`, если для цели сохранён пароль хранилища в SecretStorage. */
@@ -551,15 +555,20 @@ export class RepositoryService {
     return resolved;
   }
 
+  /**
+   * Удаляет файл `-ObjectsFile` после запуска Конфигуратора. Путь вне каталога
+   * `objects/` игнорируется: метод не должен становиться удалением произвольного файла.
+   */
+  removeObjectsFile(filePath: string): void {
+    if (path.dirname(path.resolve(filePath)) !== path.resolve(getRepositoryObjectsDir(this.workspaceRoot))) {
+      return;
+    }
+    fs.rmSync(filePath, { force: true });
+  }
+
   private writeObjectsFile(target: RepositoryTarget, xml: string): string {
     const scopeKey = buildRepositoryScopeKey(target);
-    const filePath = path.join(
-      this.workspaceRoot,
-      '.v8vscedit',
-      'repository',
-      'objects',
-      `${scopeKey}-${String(Date.now())}.xml`
-    );
+    const filePath = path.join(getRepositoryObjectsDir(this.workspaceRoot), `${scopeKey}-${String(Date.now())}.xml`);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, `${xml}\n`, 'utf-8');
     return filePath;
