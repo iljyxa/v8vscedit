@@ -7,6 +7,18 @@ import { EditorReadonlyController } from '../../ui/readonly/EditorReadonlyContro
 import { BslReadonlyGuard } from '../../ui/readonly/BslReadonlyGuard';
 import type { RepositoryService } from '../../infra/repository/RepositoryService';
 import type { SupportInfoService } from '../../infra/support/SupportInfoService';
+import {
+  describeTabs,
+  diffTabs,
+  isActiveDiff,
+  RESET_COMMAND,
+  revertDirtyAndCloseAll,
+  SET_COMMAND,
+  spyReadonlyCommands,
+  textTabsOf,
+  waitUntil as waitFor,
+  type ReadonlyCommandSpy,
+} from './support/editorTabsHarness';
 
 /**
  * `EditorReadonlyController` — подписчик на `RepositoryService.onDidChangeLocks`
@@ -196,7 +208,10 @@ suite('EditorReadonlyController — issue #1: readonly-переходы уже �
 
   test('вкладка сравнения (diff): переход выполняется через vscode.diff, reset — только для writable', async function () {
     this.timeout(10_000);
-    const originalPath = path.join(tmpDir, 'Original.bsl');
+    // Левая сторона — вне configRoot: иначе (issue #63) она тоже получила бы переход
+    // как файл объекта, а тест проверяет только правую сторону.
+    const originalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-editor-readonly-original-'));
+    const originalPath = path.join(originalDir, 'Original.bsl');
     fs.writeFileSync(originalPath, 'старое', 'utf-8');
     const modifiedUri = vscode.Uri.file(filePathA);
     await vscode.commands.executeCommand('vscode.diff', vscode.Uri.file(originalPath), modifiedUri, 'Сравнение', { preview: false });
@@ -233,6 +248,7 @@ suite('EditorReadonlyController — issue #1: readonly-переходы уже �
     } finally {
       disposable.dispose();
       (vscode.commands as { executeCommand: typeof vscode.commands.executeCommand }).executeCommand = originalExecuteCommand;
+      fs.rmSync(originalDir, { recursive: true, force: true });
     }
   });
 
@@ -727,3 +743,214 @@ async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<v
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
+
+/**
+ * Issue #63 — файл проекта открыт только левой стороной сравнения (keep-local:
+ * «файл проекта ↔ копия хранилища»). Readonly-команды VS Code действуют лишь на правую
+ * сторону активного сравнения, поэтому контроллер временно открывает файл обычной
+ * вкладкой, применяет команду и закрывает её, оставляя сравнение. Копия хранилища
+ * лежит вне configRoot и переходов не получает.
+ */
+suite('EditorReadonlyController — файл проекта слева в сравнении (issue #63)', () => {
+  let configRoot: string;
+  let copyDir: string;
+  let projectUri: vscode.Uri;
+  let copyUri: vscode.Uri;
+  let spy: ReadonlyCommandSpy | undefined;
+  let disposable: vscode.Disposable | undefined;
+  let settle: (() => Promise<void>) | undefined;
+
+  setup(() => {
+    configRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-readonly-left-'));
+    copyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-readonly-left-copy-'));
+    const projectPath = path.join(configRoot, 'ObjectModule.bsl');
+    const copyPath = path.join(copyDir, 'ObjectModule.bsl');
+    fs.writeFileSync(projectPath, 'Процедура Проект()\nКонецПроцедуры\n', 'utf-8');
+    fs.writeFileSync(copyPath, 'Процедура Копия()\nКонецПроцедуры\n', 'utf-8');
+    projectUri = vscode.Uri.file(projectPath);
+    copyUri = vscode.Uri.file(copyPath);
+  });
+
+  teardown(async () => {
+    // Очередь контроллера дорабатывает и после выполнения условий теста: без ожидания её
+    // повторное открытие сравнения попало бы во вкладки следующего теста.
+    await settle?.();
+    settle = undefined;
+    spy?.restore();
+    spy = undefined;
+    disposable?.dispose();
+    disposable = undefined;
+    await revertDirtyAndCloseAll();
+    fs.rmSync(configRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    fs.rmSync(copyDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  interface Started {
+    fire: () => void;
+    /** Дождаться окончания всех переходов очереди контроллера. */
+    settle: () => Promise<void>;
+    forgetCalls: string[];
+    logLines: string[];
+  }
+
+  function start(restricted: boolean): Started {
+    let listener: ChangeLocksListener | undefined;
+    const repositoryService = fakeRepositoryService({
+      isEditRestricted: () => restricted,
+      onDidChangeLocks: (l: ChangeLocksListener) => { listener = l; return { dispose: () => { listener = undefined; } }; },
+    });
+    const supportService = fakeSupportService(() => false);
+    const logLines: string[] = [];
+    const log = { appendLine: (line: string) => { logLines.push(line); } } as unknown as vscode.OutputChannel;
+    const guard = new BslReadonlyGuard(supportService, repositoryService, log);
+    const forgetCalls: string[] = [];
+    guard.forget = (uri: vscode.Uri) => { forgetCalls.push(uri.toString()); };
+    const controller = new EditorReadonlyController(repositoryService, supportService, guard, log);
+    disposable = controller.register();
+    // Сигнала завершения у контроллера нет (публичный API не расширяется ради тестов),
+    // поэтому ожидается его внутренняя очередь — единственная точка, где переходы
+    // гарантированно закончились.
+    // Переименование поля не должно тихо превратить ожидание в no-op и сделать тест гоночным.
+    settle = () => {
+      const queue = (controller as unknown as { queue: unknown }).queue;
+      assert.ok(queue instanceof Promise, 'У EditorReadonlyController нет внутренней очереди queue.');
+      return queue as Promise<void>;
+    };
+    spy = spyReadonlyCommands();
+    return {
+      settle,
+      fire: () => { listener?.({ target: { configRoot }, fullNames: ['Справочник.Товары'], allObjects: ['Справочник.Товары'] }); },
+      forgetCalls,
+      logLines,
+    };
+  }
+
+  async function openDiff(viewColumn: vscode.ViewColumn = vscode.ViewColumn.One): Promise<void> {
+    await vscode.commands.executeCommand('vscode.diff', projectUri, copyUri, 'ObjectModule.bsl (мои изменения: файл проекта ↔ хранилище: копия)', { preview: false, viewColumn });
+    // Модель вкладок и видимых редакторов хоста расширений обновляется асинхронно.
+    await waitFor(() => isActiveDiff(projectUri, copyUri, viewColumn) && isVisible(copyUri));
+  }
+
+  function isVisible(uri: vscode.Uri): boolean {
+    return vscode.window.visibleTextEditors.some((editor) => editor.document.uri.toString() === uri.toString());
+  }
+
+  async function showText(uri: vscode.Uri, viewColumn: vscode.ViewColumn): Promise<void> {
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), { preview: false, viewColumn });
+    await waitFor(() => {
+      const group = vscode.window.tabGroups.activeTabGroup;
+      const input = group.activeTab?.input;
+      return group.viewColumn === viewColumn && input instanceof vscode.TabInputText && input.uri.toString() === uri.toString() && isVisible(uri);
+    });
+  }
+
+  function commandsOnProject(command: string): number {
+    return (spy?.calls ?? []).filter((call) => call.command === command && call.activeUri === projectUri.toString()).length;
+  }
+
+  for (const restricted of [false, true]) {
+    test(`видимое сравнение, restricted=${String(restricted)} → ${restricted ? 'set' : 'reset'} при активном файле проекта, временной вкладки нет, сравнение активно`, async function () {
+      this.timeout(15_000);
+      await openDiff();
+      const started = start(restricted);
+
+      started.fire();
+      await started.settle();
+      await waitFor(() => textTabsOf(projectUri).length === 0 && isActiveDiff(projectUri, copyUri)).catch((error: unknown) => {
+        throw new Error(`${String(error)}: ${describeTabs({ calls: spy?.calls, log: started.logLines })}`);
+      });
+
+      assert.deepStrictEqual(spy?.calls, [{ command: restricted ? SET_COMMAND : RESET_COMMAND, activeUri: projectUri.toString() }]);
+      assert.deepStrictEqual(started.forgetCalls, restricted ? [] : [projectUri.toString()]);
+      assert.strictEqual(diffTabs().length, 1);
+      assert.ok(!spy.calls.some((call) => call.activeUri === copyUri.toString()), 'копия хранилища не должна быть активной при readonly-команде');
+    });
+  }
+
+  test('скрытое сравнение → переход применяется сразу, без активации пользователем; активная вкладка группы — прежняя', async function () {
+    this.timeout(15_000);
+    await openDiff();
+    const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-readonly-left-other-'));
+    try {
+      const otherUri = vscode.Uri.file(path.join(otherDir, 'Другой.bsl'));
+      fs.writeFileSync(otherUri.fsPath, 'другой', 'utf-8');
+      await showText(otherUri, vscode.ViewColumn.One);
+      const started = start(false);
+
+      started.fire();
+      await started.settle();
+      await waitFor(() => textTabsOf(projectUri).length === 0);
+
+      assert.strictEqual(commandsOnProject(RESET_COMMAND), 1, describeTabs({ calls: spy?.calls, log: started.logLines, commands: spy?.commands }));
+      const activeInput = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+      assert.ok(activeInput instanceof vscode.TabInputText && activeInput.uri.toString() === otherUri.toString());
+      assert.strictEqual(diffTabs().length, 1);
+    } finally {
+      fs.rmSync(otherDir, { recursive: true, force: true });
+    }
+  });
+
+  test('файл проекта в видимой обычной вкладке (колонка 2) и слева в сравнении (колонка 1) → используется обычная, вторая не создаётся', async function () {
+    this.timeout(15_000);
+    await openDiff(vscode.ViewColumn.One);
+    await showText(projectUri, vscode.ViewColumn.Two);
+    const started = start(false);
+
+    started.fire();
+    await started.settle();
+
+    assert.strictEqual(commandsOnProject(RESET_COMMAND), 1);
+    assert.strictEqual(textTabsOf(projectUri).length, 1);
+    assert.strictEqual(textTabsOf(projectUri)[0].group.viewColumn, vscode.ViewColumn.Two);
+  });
+
+  test('файл проекта в скрытой обычной вкладке той же группы и слева в видимом сравнении → обычная вкладка не закрывается, сравнение снова активно', async function () {
+    this.timeout(15_000);
+    await showText(projectUri, vscode.ViewColumn.One);
+    await openDiff(vscode.ViewColumn.One);
+    const started = start(false);
+
+    started.fire();
+    await started.settle();
+    await waitFor(() => isActiveDiff(projectUri, copyUri));
+
+    assert.strictEqual(commandsOnProject(RESET_COMMAND), 1);
+    assert.strictEqual(textTabsOf(projectUri).length, 1, 'существовавшая до перехода обычная вкладка должна остаться');
+  });
+
+  test('несохранённые правки слева → команда выполнена, временная вкладка оставлена, запись в журнале', async function () {
+    this.timeout(15_000);
+    await openDiff();
+    const edit = new vscode.WorkspaceEdit();
+    edit.insert(projectUri, new vscode.Position(0, 0), '// правка\n');
+    assert.ok(await vscode.workspace.applyEdit(edit));
+    const started = start(false);
+
+    started.fire();
+    await started.settle();
+    await waitFor(() => isActiveDiff(projectUri, copyUri));
+
+    assert.strictEqual(commandsOnProject(RESET_COMMAND), 1);
+    assert.strictEqual(textTabsOf(projectUri).length, 1);
+    assert.ok(started.logLines.includes('[readonly] временная вкладка оставлена (несохранённые изменения): ObjectModule.bsl'));
+  });
+
+  test('восстановление: активно сравнение в колонке 1, событие про файл в колонке 2 → снова активно то же сравнение, обычной вкладки копии нет', async function () {
+    this.timeout(15_000);
+    const backupUri = vscode.Uri.file(path.join(copyDir, 'Backup.bsl'));
+    fs.writeFileSync(backupUri.fsPath, 'резервная копия', 'utf-8');
+    await vscode.commands.executeCommand('vscode.diff', backupUri, copyUri, 'копии', { preview: false, viewColumn: vscode.ViewColumn.One });
+    await showText(projectUri, vscode.ViewColumn.Two);
+    await vscode.commands.executeCommand('vscode.diff', backupUri, copyUri, 'копии', { preview: false, viewColumn: vscode.ViewColumn.One });
+    // Предпосылка: активно сравнение в колонке 1 (модель вкладок хоста обновляется асинхронно).
+    await waitFor(() => isActiveDiff(backupUri, copyUri, vscode.ViewColumn.One) && isVisible(copyUri) && isVisible(projectUri));
+    const started = start(false);
+
+    started.fire();
+    await started.settle();
+    await waitFor(() => isActiveDiff(backupUri, copyUri, vscode.ViewColumn.One));
+
+    assert.strictEqual(commandsOnProject(RESET_COMMAND), 1);
+    assert.strictEqual(textTabsOf(copyUri).length, 0);
+  });
+});

@@ -41,12 +41,15 @@ import {
 import {
   chooseConflictResolutionModal,
   confirmRollbackModal,
+  formatMergeDiffTitle,
   getDirtyEditorFilePaths,
   isFileSyncOnLockUnlockEnabled,
+  mergeDiffProjectPath,
   openMergeDiffs,
   showNotification,
   type ConflictSummary,
   type MergeDiffPair,
+  type MergeDiffProjectSide,
   type NotificationAction,
   type RollbackSummary,
 } from './RepositoryFileSyncDialogs';
@@ -558,29 +561,39 @@ function isProjectFileWritable(services: RepositoryFileSyncServices, filePath: s
   return !services.repositoryService.isEditRestricted(filePath) && !(services.supportService?.isLocked(filePath) ?? false);
 }
 
-/** Текстовые пары для сравнения (не больше лимита вкладок); остальное — в журнал. */
-function selectDiffPairs(
-  services: RepositoryFileSyncServices,
-  candidates: readonly { rel: string; left: string; right: string }[],
-  titleSuffix: string
-): MergeDiffPair[] {
-  const textual = candidates.filter((item) => isTextMergeFile(item.rel) && fs.existsSync(item.right));
+interface MergeDiffCandidate {
+  rel: string;
+  local: string;
+  repository: string;
+  projectSide: MergeDiffProjectSide;
+}
+
+/**
+ * Текстовые пары для сравнения (не больше лимита вкладок); остальное — в журнал.
+ * Наличие и редактируемость проверяются только у файла проекта: вторая сторона —
+ * резервная копия или копия хранилища вне конфигурации.
+ */
+function selectDiffPairs(services: RepositoryFileSyncServices, candidates: readonly MergeDiffCandidate[]): MergeDiffPair[] {
+  const textual = candidates.filter((item) => isTextMergeFile(item.rel) && fs.existsSync(mergeDiffProjectPath(item)));
   const skipped = candidates.filter((item) => !textual.includes(item)).map((item) => item.rel);
   const overflow = textual.slice(MAX_DIFF_TABS).map((item) => item.rel);
   if (skipped.length > 0 || overflow.length > 0) {
     logFileSync(services, `без окна сравнения (двоичные, удалённые или сверх лимита ${String(MAX_DIFF_TABS)}): ${[...skipped, ...overflow].join(', ')}`);
   }
   return textual.slice(0, MAX_DIFF_TABS).map((item) => ({
-    title: `${path.posix.basename(item.rel)} (${titleSuffix})`,
-    left: item.left,
-    right: item.right,
-    writable: isProjectFileWritable(services, item.right),
+    title: formatMergeDiffTitle(item.rel, item.projectSide),
+    local: item.local,
+    repository: item.repository,
+    projectSide: item.projectSide,
+    writable: isProjectFileWritable(services, mergeDiffProjectPath(item)),
   }));
 }
 
 /**
- * Сообщения и сравнения после слияния — вне аренды. «Сравнить» открывает пары
- * «резервная копия ↔ файл проекта», keep-local — немодальное сообщение с кнопкой.
+ * Сообщения и сравнения после слияния — вне аренды. Сравнение всегда «слева локальное
+ * состояние, справа версия хранилища»: «Сравнить» открывает «резервная копия ↔ файл
+ * проекта», keep-local — немодальное сообщение с кнопкой для «файл проекта ↔ копия
+ * хранилища».
  */
 export async function reportMergeOutcome(
   services: RepositoryFileSyncServices,
@@ -604,8 +617,7 @@ export async function reportMergeOutcome(
   if (choice === 'compare') {
     const pairs = selectDiffPairs(
       services,
-      merge.backups.map((backup) => ({ rel: backup.rel, left: backup.backupPath, right: backup.projectPath })),
-      'мои изменения ↔ хранилище'
+      merge.backups.map((backup) => ({ rel: backup.rel, local: backup.backupPath, repository: backup.projectPath, projectSide: 'repository' }))
     );
     if (pairs.length > 0) {
       await deps.openDiffs(pairs);
@@ -615,8 +627,7 @@ export async function reportMergeOutcome(
   if (choice === 'keep-local' && merge.keptLocalFiles.length > 0) {
     const pairs = selectDiffPairs(
       services,
-      merge.repositoryCopies.map((copy) => ({ rel: copy.rel, left: copy.repositoryPath, right: copy.projectPath })),
-      'хранилище ↔ мои изменения'
+      merge.repositoryCopies.map((copy) => ({ rel: copy.rel, local: copy.projectPath, repository: copy.repositoryPath, projectSide: 'local' }))
     );
     const hint = pairs.some((pair) => !pair.writable) ? ' Захватите объект, чтобы перенести правки.' : '';
     deps.notifyInfo(
