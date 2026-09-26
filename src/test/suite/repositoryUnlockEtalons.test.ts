@@ -8,6 +8,7 @@ import { acquireUnlockEtalons } from '../../ui/commands/repository/RepositoryUnl
 import type { RepositoryFileSyncDeps, RepositoryFileSyncServices, RepositorySubject } from '../../ui/commands/repository/RepositoryFileSyncShared';
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { subordinateUnitFullName } from '../../infra/repository/RepositoryObjectNames';
+import { resolveObjectScope } from '../../infra/repository/RepositoryObjectScope';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOperationGuard';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
@@ -23,7 +24,16 @@ import type { MetadataTreeProvider } from '../../ui/tree/MetadataTreeProvider';
  * прямой вызов даёт контроль над иерархией снимков без накладных расходов
  * полного потока (см. оговорку в `repositoryUnlockSync.test.ts` — этот файл
  * и есть тот «отдельный заход», предусмотренный там).
+ *
+ * Рабочая область — РЕАЛЬНАЯ копия `example/2.21/src/cf` (см. CLAUDE.md TDD
+ * п.3 — только реальные фикстуры): `Справочник.Контрагенты` с формами
+ * `ФормаЭлемента`/`ФормаСписка`. «Версия хранилища» для `dumpToTemp` — тоже
+ * копия реального XML, при необходимости с точечной текстовой правкой (удаление
+ * строки `<Form>…</Form>`) — тот же приём, что и в
+ * `repositoryLockSyncRealFixtureFlow.test.ts` (Р4).
  */
+
+const EXAMPLE_CF = path.resolve(__dirname, '../../../example/2.21/src/cf');
 
 function createFakeSecretStore(): SecretStore {
   const map = new Map<string, string>();
@@ -43,14 +53,14 @@ interface Harness {
   outputLines: string[];
 }
 
+/** Рабочая область с РЕАЛЬНОЙ копией example/2.21/src/cf. */
 function createHarness(): Harness {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-unlock-etalons-'));
   const configRoot = path.join(workspaceRoot, 'src', 'cf');
-  fs.mkdirSync(configRoot, { recursive: true });
-  fs.writeFileSync(path.join(configRoot, 'Configuration.xml'), '<MetaDataObject/>', 'utf-8');
+  fs.cpSync(EXAMPLE_CF, configRoot, { recursive: true });
 
   const repositoryService = new RepositoryService(workspaceRoot, new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot));
-  const target: RepositoryTarget = { configRoot, configKind: 'cf', displayName: 'Тест' };
+  const target: RepositoryTarget = { configRoot, configKind: 'cf', displayName: 'ТорговыйУчет' };
   const outputLines: string[] = [];
 
   const services: RepositoryFileSyncServices = {
@@ -100,24 +110,6 @@ function baseDeps(overrides: Partial<RepositoryFileSyncDeps> = {}): RepositoryFi
   };
 }
 
-/** Owner-каталог с Form-подчинёнными в ChildObjects (тот же минимальный синтетический
- * приём, что уже используется в repositoryLockSync.test.ts для buildSubsystemXml —
- * ChildObjectRefsReader читает только прямые текстовые дети <ChildObjects>). */
-function buildCatalogXml(name: string, forms: string[]): string {
-  return `<?xml version="1.0" encoding="utf-8"?>
-<MetaDataObject>
-  <Catalog>
-    <Properties><Name>${name}</Name></Properties>
-    <ChildObjects>${forms.map((form) => `<Form>${form}</Form>`).join('')}</ChildObjects>
-  </Catalog>
-</MetaDataObject>`;
-}
-
-function writeOwnerAndForm(configRoot: string, forms: string[]): void {
-  fs.mkdirSync(path.join(configRoot, 'Catalogs'), { recursive: true });
-  fs.writeFileSync(path.join(configRoot, 'Catalogs', 'Объект.xml'), buildCatalogXml('Объект', forms), 'utf-8');
-}
-
 /** Раскладка снимков на диске — совпадает с `RepositoryLockSnapshotStore` (см. её тесты). */
 function legacySnapshotDir(harness: Harness, fullName: string): string {
   const scopeKey = crypto.createHash('sha1').update(`cf|${path.resolve(harness.configRoot)}|`).digest('hex');
@@ -125,28 +117,38 @@ function legacySnapshotDir(harness: Harness, fullName: string): string {
   return path.join(harness.workspaceRoot, '.v8vscedit', 'repository', 'snapshots', scopeKey, fullNameHash);
 }
 
+/** Реальный Catalogs/Контрагенты.xml БЕЗ ссылок на формы (текстовая правка копии — не сборка XML). */
+function ownerXmlWithoutForms(): string {
+  const original = fs.readFileSync(path.join(EXAMPLE_CF, 'Catalogs', 'Контрагенты.xml'), 'utf-8');
+  const stripped = original
+    .replace(/\s*<Form>ФормаЭлемента<\/Form>/, '')
+    .replace(/\s*<Form>ФормаСписка<\/Form>/, '');
+  assert.notStrictEqual(stripped, original, 'В реальном Контрагенты.xml обязаны быть обе ссылки <Form>.');
+  return stripped;
+}
+
+const kontragenty = 'Справочник.Контрагенты';
+const formaElementa = subordinateUnitFullName(kontragenty, 'Form', 'ФормаЭлемента');
+const formaSpiska = subordinateUnitFullName(kontragenty, 'Form', 'ФормаСписка');
+
 suite('RepositoryUnlockEtalons — acquireUnlockEtalons: снимок покрывает предком (issue #1, раздел 10, Р8, критерий 10.1.10)', () => {
   test('старый (глубокий, v1/v2) снимок владельца при рекурсивной отмене покрывает подчинённую единицу — она пропускается без собственного эталона', async () => {
     const harness = createHarness();
-    writeOwnerAndForm(harness.configRoot, ['ФормаЭлемента']);
-    const formXmlPath = path.join(harness.configRoot, 'Catalogs', 'Объект', 'ФормаЭлемента.xml');
-    fs.mkdirSync(path.dirname(formXmlPath), { recursive: true });
-    fs.writeFileSync(formXmlPath, '<MetaDataObject/>', 'utf-8');
 
     // Легаси-манифест (без version/depth) — readSnapshotInfo трактует его как depth:"tree".
-    const snapshotDir = legacySnapshotDir(harness, 'Справочник.Объект');
+    const snapshotDir = legacySnapshotDir(harness, kontragenty);
     fs.mkdirSync(path.join(snapshotDir, 'files', 'Catalogs'), { recursive: true });
-    fs.writeFileSync(path.join(snapshotDir, 'files', 'Catalogs', 'Объект.xml'), buildCatalogXml('Объект', ['ФормаЭлемента']), 'utf-8');
+    fs.copyFileSync(path.join(EXAMPLE_CF, 'Catalogs', 'Контрагенты.xml'), path.join(snapshotDir, 'files', 'Catalogs', 'Контрагенты.xml'));
     fs.writeFileSync(
       path.join(snapshotDir, 'manifest.json'),
-      JSON.stringify({ files: ['Catalogs/Объект.xml'] }),
+      JSON.stringify({ files: ['Catalogs/Контрагенты.xml'] }),
       'utf-8'
     );
 
-    const subject = buildSubject(harness, 'Справочник.Объект', ['Справочник.Объект', 'Справочник.Объект.Форма.ФормаЭлемента']);
+    const subject = buildSubject(harness, kontragenty, [kontragenty, formaElementa]);
     const result = await acquireUnlockEtalons(
       subject,
-      ['Справочник.Объект', 'Справочник.Объект.Форма.ФормаЭлемента'],
+      [kontragenty, formaElementa],
       true,
       {},
       harness.services,
@@ -155,7 +157,7 @@ suite('RepositoryUnlockEtalons — acquireUnlockEtalons: снимок покры
 
     assert.strictEqual(result.status, 'ready');
     assert.strictEqual(result.objects.length, 1, 'Подчинённая единица не должна получить отдельный эталон — она покрыта деревом владельца.');
-    assert.strictEqual(result.objects[0].fullName, 'Справочник.Объект');
+    assert.strictEqual(result.objects[0].fullName, kontragenty);
     assert.strictEqual(result.objects[0].source, 'snapshot');
     assert.strictEqual(result.objects[0].depth, 'tree');
     result.dispose();
@@ -165,29 +167,31 @@ suite('RepositoryUnlockEtalons — acquireUnlockEtalons: снимок покры
 suite('RepositoryUnlockEtalons — acquireUnlockEtalons: единица создана локально (issue #1, раздел 10, Р8)', () => {
   test('единица без снимка, но снимок ближайшего предка (v3, subordinates) её не перечисляет — эталон "empty" (создана локально)', async () => {
     const harness = createHarness();
-    writeOwnerAndForm(harness.configRoot, ['ФормаЭлемента', 'ФормаНоваяЛокальная']);
-    for (const form of ['ФормаЭлемента', 'ФормаНоваяЛокальная']) {
-      const formXmlPath = path.join(harness.configRoot, 'Catalogs', 'Объект', `${form}.xml`);
-      fs.mkdirSync(path.dirname(formXmlPath), { recursive: true });
-      fs.writeFileSync(formXmlPath, '<MetaDataObject/>', 'utf-8');
-    }
+    // Форма, созданная ЛОКАЛЬНО уже ПОСЛЕ захвата (в снимке владельца её ещё нет) —
+    // содержимое неважно (source:'empty' решается по списку subordinates снимка, а
+    // не чтением файла), поэтому маркер — пустой реальный файл, без синтетического XML.
+    const newLocalFormPath = path.join(harness.configRoot, 'Catalogs', 'Контрагенты', 'Forms', 'ФормаНоваяЛокальная.xml');
+    fs.writeFileSync(newLocalFormPath, '', 'utf-8');
+    const formaNovaya = subordinateUnitFullName(kontragenty, 'Form', 'ФормаНоваяЛокальная');
 
     // Снимок владельца v3 со СПИСКОМ подчинённых версии хранилища — ФормаНоваяЛокальная
     // в этот список НЕ входит (появилась в проекте уже после захвата).
+    const scope = resolveObjectScope(harness.configRoot, kontragenty, harness.target, 'unit');
+    assert.ok(scope, 'предпосылка: область владельца обязана резолвиться.');
     harness.repositoryService.snapshots.captureFromDirectory(
       harness.target,
-      'Справочник.Объект',
+      kontragenty,
       harness.configRoot,
-      { kind: 'object', fullName: 'Справочник.Объект', xmlRel: 'Catalogs/Объект.xml', dirRel: 'Catalogs/Объект', excludeDirRels: [], depth: 'unit' },
+      scope,
       [],
       'unit',
-      ['Справочник.Объект.Форма.ФормаЭлемента']
+      [formaElementa, formaSpiska]
     );
 
-    const subject = buildSubject(harness, 'Справочник.Объект', ['Справочник.Объект']);
+    const subject = buildSubject(harness, kontragenty, [kontragenty]);
     const result = await acquireUnlockEtalons(
       subject,
-      ['Справочник.Объект.Форма.ФормаНоваяЛокальная'],
+      [formaNovaya],
       true,
       {},
       harness.services,
@@ -198,7 +202,7 @@ suite('RepositoryUnlockEtalons — acquireUnlockEtalons: единица созд
     assert.strictEqual(result.objects.length, 1);
     assert.deepStrictEqual(
       result.objects[0],
-      { fullName: 'Справочник.Объект.Форма.ФормаНоваяЛокальная', source: 'empty', depth: 'unit' }
+      { fullName: formaNovaya, source: 'empty', depth: 'unit' }
     );
     result.dispose();
   });
@@ -207,23 +211,22 @@ suite('RepositoryUnlockEtalons — acquireUnlockEtalons: единица созд
 suite('RepositoryUnlockEtalons — acquireUnlockEtalons: dumpEtalons без снимка (issue #1, раздел 10, Р8)', () => {
   test('подчинённая единица отсутствует в ДАМПЕ найденного родителя — эталон "empty" (isAbsentInDumpedParent)', async () => {
     const harness = createHarness();
-    writeOwnerAndForm(harness.configRoot, ['ФормаЭлемента']);
     const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-unlock-etalons-dump-absent-'));
     try {
       // "Хранилище" отдаёт владельца БЕЗ ссылки на форму — форма никогда не была
       // выгружена сама по себе (её и не запросят следующим раундом), и ближайший
       // найденный родитель (владелец) её не перечисляет → она отсутствует в хранилище.
       fs.mkdirSync(path.join(dumpDir, 'Catalogs'), { recursive: true });
-      fs.writeFileSync(path.join(dumpDir, 'Catalogs', 'Объект.xml'), buildCatalogXml('Объект', []), 'utf-8');
+      fs.writeFileSync(path.join(dumpDir, 'Catalogs', 'Контрагенты.xml'), ownerXmlWithoutForms(), 'utf-8');
 
-      const subject = buildSubject(harness, 'Справочник.Объект', ['Справочник.Объект']);
+      const subject = buildSubject(harness, kontragenty, [kontragenty]);
       const deps = baseDeps({
         dumpToTemp: () => Promise.resolve({ ok: true, dir: dumpDir, dispose: () => undefined }),
       });
 
       const result = await acquireUnlockEtalons(
         subject,
-        ['Справочник.Объект', 'Справочник.Объект.Форма.ФормаЭлемента'],
+        [kontragenty, formaElementa],
         true,
         {},
         harness.services,
@@ -232,9 +235,9 @@ suite('RepositoryUnlockEtalons — acquireUnlockEtalons: dumpEtalons без сн
 
       assert.strictEqual(result.status, 'ready');
       const byName = new Map(result.objects.map((o) => [o.fullName, o]));
-      assert.strictEqual(byName.get('Справочник.Объект')?.source, 'dump');
-      assert.deepStrictEqual(byName.get('Справочник.Объект.Форма.ФормаЭлемента'), {
-        fullName: 'Справочник.Объект.Форма.ФормаЭлемента', source: 'empty', depth: 'unit',
+      assert.strictEqual(byName.get(kontragenty)?.source, 'dump');
+      assert.deepStrictEqual(byName.get(formaElementa), {
+        fullName: formaElementa, source: 'empty', depth: 'unit',
       });
       result.dispose();
     } finally {
@@ -244,13 +247,13 @@ suite('RepositoryUnlockEtalons — acquireUnlockEtalons: dumpEtalons без сн
 
   test('подчинённая единица есть в дампе родителя, но её собственная довыгрузка провалилась — без эталона, только лог (missing)', async () => {
     const harness = createHarness();
-    writeOwnerAndForm(harness.configRoot, ['ФормаЭлемента']);
     const ownerDumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-unlock-etalons-dump-missing-owner-'));
     try {
-      // "Хранилище" отдаёт владельца, ССЫЛАЮЩЕГОСЯ на форму — она РЕАЛЬНО существует
-      // в хранилище, но раунд её собственной довыгрузки (второй вызов dumpToTemp) проваливается.
+      // "Хранилище" отдаёт владельца, ССЫЛАЮЩЕГОСЯ на форму (реальный ChildObjects,
+      // без правок) — она РЕАЛЬНО существует в хранилище, но раунд её собственной
+      // довыгрузки (второй вызов dumpToTemp) проваливается.
       fs.mkdirSync(path.join(ownerDumpDir, 'Catalogs'), { recursive: true });
-      fs.writeFileSync(path.join(ownerDumpDir, 'Catalogs', 'Объект.xml'), buildCatalogXml('Объект', ['ФормаЭлемента']), 'utf-8');
+      fs.copyFileSync(path.join(EXAMPLE_CF, 'Catalogs', 'Контрагенты.xml'), path.join(ownerDumpDir, 'Catalogs', 'Контрагенты.xml'));
 
       let calls = 0;
       const deps = baseDeps({
@@ -263,10 +266,10 @@ suite('RepositoryUnlockEtalons — acquireUnlockEtalons: dumpEtalons без сн
         },
       });
 
-      const subject = buildSubject(harness, 'Справочник.Объект', ['Справочник.Объект']);
+      const subject = buildSubject(harness, kontragenty, [kontragenty]);
       const result = await acquireUnlockEtalons(
         subject,
-        ['Справочник.Объект', 'Справочник.Объект.Форма.ФормаЭлемента'],
+        [kontragenty, formaElementa],
         true,
         {},
         harness.services,
@@ -275,7 +278,7 @@ suite('RepositoryUnlockEtalons — acquireUnlockEtalons: dumpEtalons без сн
 
       assert.strictEqual(result.status, 'ready');
       assert.strictEqual(result.objects.length, 1, 'Для формы не должно быть эталона вовсе — только лог.');
-      assert.strictEqual(result.objects[0].fullName, 'Справочник.Объект');
+      assert.strictEqual(result.objects[0].fullName, kontragenty);
       assert.ok(
         harness.outputLines.some((line) => line.includes('версия хранилища не получена') && line.includes('ФормаЭлемента')),
         'должен быть залогирован факт непереданного эталона для формы.'
@@ -287,6 +290,44 @@ suite('RepositoryUnlockEtalons — acquireUnlockEtalons: dumpEtalons без сн
   });
 });
 
+suite('RepositoryUnlockEtalons — decideSnapshotEtalons: сортировка byDepth (issue #1, раздел 10, Р8)', () => {
+  test('при равной глубине предков (0) единицы упорядочиваются по имени (fallback localeCompare)', async () => {
+    const harness = createHarness();
+    // Два реальных верхнеуровневых справочника фикстуры: "Валюты" < "Контрагенты"
+    // по алфавиту — порядок обработки должен быть именно таким независимо от
+    // порядка в исходном массиве released.
+    const subject = buildSubject(harness, kontragenty, [kontragenty, 'Справочник.Валюты']);
+    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-unlock-etalons-sort-dump-'));
+    try {
+      fs.mkdirSync(path.join(dumpDir, 'Catalogs'), { recursive: true });
+      fs.copyFileSync(path.join(EXAMPLE_CF, 'Catalogs', 'Контрагенты.xml'), path.join(dumpDir, 'Catalogs', 'Контрагенты.xml'));
+      fs.copyFileSync(path.join(EXAMPLE_CF, 'Catalogs', 'Валюты.xml'), path.join(dumpDir, 'Catalogs', 'Валюты.xml'));
+      const deps = baseDeps({ dumpToTemp: () => Promise.resolve({ ok: true, dir: dumpDir, dispose: () => undefined }) });
+
+      // Оба переданы в порядке "Контрагенты", "Валюты" (обратном алфавитному) — оба
+      // верхнеуровневые (ancestors.length===0 у обоих, разница глубин 0 — только
+      // тай-брейк по имени решает порядок обработки, а не порядок в исходном массиве released).
+      const result = await acquireUnlockEtalons(subject, [kontragenty, 'Справочник.Валюты'], true, {}, harness.services, deps);
+
+      assert.strictEqual(result.status, 'ready');
+      assert.deepStrictEqual(
+        result.objects.map((o) => o.fullName),
+        ['Справочник.Валюты', kontragenty],
+        'Порядок обработки обязан быть алфавитным (localeCompare), а не порядком исходного массива.'
+      );
+      result.dispose();
+    } finally {
+      fs.rmSync(dumpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * ВРЕМЕННАЯ СИНТЕТИКА (issue #1, раздел 10.7, фикстура F1 — issue #48 форка):
+ * реальной фикстуры вложенных подсистем (`Подсистема.A.Подсистема.B`) в `example/`
+ * ещё нет. До появления F1 цепочка «непосредственный родитель тоже не найден»
+ * проверяется на минимальном синтетическом дереве подсистем.
+ */
 function buildSubsystemXml(name: string, refs: string[], childSubsystems: string[]): string {
   return `<?xml version="1.0" encoding="utf-8"?>
 <MetaDataObject>
@@ -304,36 +345,7 @@ function buildSubsystemXml(name: string, refs: string[], childSubsystems: string
 </MetaDataObject>`;
 }
 
-suite('RepositoryUnlockEtalons — decideSnapshotEtalons: сортировка byDepth (issue #1, раздел 10, Р8)', () => {
-  test('при равной глубине предков (0) единицы упорядочиваются по имени (fallback localeCompare)', async () => {
-    const harness = createHarness();
-    fs.mkdirSync(path.join(harness.configRoot, 'Catalogs'), { recursive: true });
-    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'Б.xml'), '<MetaDataObject><Catalog><Properties><Name>Б</Name></Properties></Catalog></MetaDataObject>', 'utf-8');
-    fs.writeFileSync(path.join(harness.configRoot, 'Catalogs', 'А.xml'), '<MetaDataObject><Catalog><Properties><Name>А</Name></Properties></Catalog></MetaDataObject>', 'utf-8');
-
-    const subject = buildSubject(harness, 'Справочник.Б', ['Справочник.Б', 'Справочник.А']);
-    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-unlock-etalons-sort-dump-'));
-    try {
-      fs.mkdirSync(path.join(dumpDir, 'Catalogs'), { recursive: true });
-      fs.writeFileSync(path.join(dumpDir, 'Catalogs', 'Б.xml'), '<MetaDataObject/>', 'utf-8');
-      fs.writeFileSync(path.join(dumpDir, 'Catalogs', 'А.xml'), '<MetaDataObject/>', 'utf-8');
-      const deps = baseDeps({ dumpToTemp: () => Promise.resolve({ ok: true, dir: dumpDir, dispose: () => undefined }) });
-
-      // Оба переданы в порядке "Б", "А" (обратном алфавитному) — оба верхнеуровневые
-      // (ancestors.length===0 у обоих, разница глубин 0 — только тай-брейк по имени
-      // решает порядок обработки, а не порядок в исходном массиве released).
-      const result = await acquireUnlockEtalons(subject, ['Справочник.Б', 'Справочник.А'], true, {}, harness.services, deps);
-
-      assert.strictEqual(result.status, 'ready');
-      assert.deepStrictEqual(result.objects.map((o) => o.fullName), ['Справочник.А', 'Справочник.Б'], 'Порядок обработки обязан быть алфавитным (localeCompare), а не порядком исходного массива.');
-      result.dispose();
-    } finally {
-      fs.rmSync(dumpDir, { recursive: true, force: true });
-    }
-  });
-});
-
-suite('RepositoryUnlockEtalons — isAbsentInDumpedParent: непосредственный родитель тоже не найден (issue #1, раздел 10, Р8)', () => {
+suite('RepositoryUnlockEtalons — isAbsentInDumpedParent: непосредственный родитель тоже не найден (issue #1, раздел 10, Р8) (временно синтетика: ждёт фикстуру F1, issue #48)', () => {
   test('раунд довыгрузки родителя провалился — потомок родителя тоже не получает эталон (ветка !parent)', async () => {
     const harness = createHarness();
     fs.mkdirSync(path.join(harness.configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница', 'Subsystems'), { recursive: true });
