@@ -471,6 +471,47 @@ suite('MetadataTreeProvider — -repoEditRestricted/-repoEditAllowed для ед
   });
 });
 
+suite('MetadataTreeProvider — -repoLocked/-repoUnlocked для вложенной подсистемы (issue #50)', () => {
+  const NESTED = 'Подсистема.Продажи.Подсистема.Розница';
+
+  test('Захват вложенной подсистемы по полному имени: Розница -repoLocked, родитель Продажи -repoUnlocked', async () => {
+    const harness = createHarness();
+    try {
+      await harness.repositoryService.saveBinding(harness.target, { repoPath: '\\\\repo\\storage', repoUser: 'tester', repoPassword: 'secret' });
+      harness.repositoryService.setConnected(harness.target, true);
+      harness.repositoryService.lockState.applyLock(harness.target, { anchor: NESTED, members: [NESTED], mode: 'object' });
+
+      const allNodes = collectAllNodes(harness.treeProvider);
+      const parent = findByKindAndLabel(allNodes, 'Subsystem', 'Продажи');
+      const nested = findByKindAndLabel(collectAllNodes(harness.treeProvider, parent), 'Subsystem', 'Розница');
+      harness.treeProvider.getTreeItem(parent);
+      harness.treeProvider.getTreeItem(nested);
+
+      assert.strictEqual(contextSuffix(nested.contextValue), 'locked', `ожидался -repoLocked на Розница: ${String(nested.contextValue)}`);
+      assert.strictEqual(contextSuffix(parent.contextValue), 'unlocked', `родитель не захвачен: ${String(parent.contextValue)}`);
+    } finally {
+      harness.dispose();
+    }
+  });
+
+  test('Захват по короткому имени "Подсистема.Розница" не считается захватом вложенной подсистемы', async () => {
+    const harness = createHarness();
+    try {
+      await harness.repositoryService.saveBinding(harness.target, { repoPath: '\\\\repo\\storage', repoUser: 'tester', repoPassword: 'secret' });
+      harness.repositoryService.setConnected(harness.target, true);
+      harness.repositoryService.lockState.applyLock(harness.target, { anchor: 'Подсистема.Розница', members: ['Подсистема.Розница'], mode: 'object' });
+
+      const parent = findByKindAndLabel(collectAllNodes(harness.treeProvider), 'Subsystem', 'Продажи');
+      const nested = findByKindAndLabel(collectAllNodes(harness.treeProvider, parent), 'Subsystem', 'Розница');
+      harness.treeProvider.getTreeItem(nested);
+
+      assert.strictEqual(contextSuffix(nested.contextValue), 'unlocked', `короткое имя — несуществующая единица: ${String(nested.contextValue)}`);
+    } finally {
+      harness.dispose();
+    }
+  });
+});
+
 function countOccurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
 }

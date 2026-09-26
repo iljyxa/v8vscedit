@@ -15,7 +15,7 @@ import {
   subordinateUnitFullName,
 } from './RepositoryObjectNames';
 import type { RepositorySubordinateTag } from './RepositoryObjectNames';
-import { resolveUnitSuffixByRelativePath } from './RepositoryObjectScope';
+import { resolveLockUnitByRelativePath, resolveUnitSuffixByRelativePath } from './RepositoryObjectScope';
 
 export interface RepositoryBinding {
   repoPath: string;
@@ -360,7 +360,10 @@ export class RepositoryService {
       return this.buildSubordinateUnitFullName(ownerFullName, kind, node.label);
     }
 
-    return this.buildRootObjectFullName(kind, node.xmlPath, node.label);
+    const nestedSubsystemFullName = kind === 'Subsystem' && node.xmlPath
+      ? this.resolveNestedSubsystemFullName(node.xmlPath)
+      : null;
+    return nestedSubsystemFullName ?? this.buildRootObjectFullName(kind, node.xmlPath, node.label);
   }
 
   createObjectsFileForNode(node: RepositoryNodeRef, recursive: boolean): { filePath: string; fullNames: string[] } {
@@ -420,6 +423,21 @@ export class RepositoryService {
     }
 
     return `${rootKindName}.${objectName}`;
+  }
+
+  /**
+   * Вложенная подсистема — подчинённая единица `Подсистема.A.Подсистема.B`: label узла
+   * содержит только собственное имя, а короткое `Подсистема.B` платформа отклоняет.
+   * Цепочка родителей читается из пути XML (`Subsystems/A/Subsystems/B.xml`) тем же
+   * правилом, что и единица файла для readonly. Подсистема верхнего уровня — `null`.
+   */
+  private resolveNestedSubsystemFullName(xmlPath: string): string | null {
+    const target = this.resolveTargetByXmlPath(xmlPath);
+    if (!target) {
+      return null;
+    }
+    const rel = path.relative(target.configRoot, xmlPath);
+    return resolveUnitSuffixByRelativePath(rel).length > 0 ? resolveLockUnitByRelativePath(rel, target) : null;
   }
 
   /**

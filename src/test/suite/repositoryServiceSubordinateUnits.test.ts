@@ -374,3 +374,78 @@ suite('RepositoryService.isSubordinateUnitNode — issue #46', () => {
     });
   }
 });
+
+/**
+ * Issue #50: вложенная подсистема — подчинённая единица хранилища
+ * `Подсистема.Продажи.Подсистема.Розница`; label узла дерева содержит только
+ * собственное имя, и короткое `Подсистема.Розница` платформа отклоняет.
+ * Фикстура — реальная вложенная подсистема `Subsystems/Продажи/Subsystems/Розница.xml`.
+ */
+suite('RepositoryService.resolveFullName — вложенная подсистема (issue #50)', () => {
+  function subsystemNode(xmlPath: string, label: string): RepositoryNodeRef {
+    return { nodeKind: 'Subsystem', label, xmlPath };
+  }
+
+  function nestedXmlPath(harness: Harness): string {
+    const xmlPath = path.join(harness.configRoot, 'Subsystems', 'Продажи', 'Subsystems', 'Розница.xml');
+    assert.ok(fs.existsSync(xmlPath), 'ожидалась реальная вложенная подсистема фикстуры Продажи/Розница');
+    return xmlPath;
+  }
+
+  test('Вложенная подсистема Продажи/Розница → "Подсистема.Продажи.Подсистема.Розница"', () => {
+    const harness = createHarness();
+    try {
+      assert.strictEqual(
+        harness.service.resolveFullName(subsystemNode(nestedXmlPath(harness), 'Розница')),
+        'Подсистема.Продажи.Подсистема.Розница'
+      );
+    } finally {
+      harness.dispose();
+    }
+  });
+
+  test('Подсистема верхнего уровня Продажи — без изменений "Подсистема.Продажи"', () => {
+    const harness = createHarness();
+    try {
+      const xmlPath = ownerXmlPath(harness, 'Subsystems', 'Продажи');
+      assert.strictEqual(harness.service.resolveFullName(subsystemNode(xmlPath, 'Продажи')), 'Подсистема.Продажи');
+    } finally {
+      harness.dispose();
+    }
+  });
+
+  test('Узел подсистемы без xmlPath или вне корня выгрузки — имя по label, как раньше', () => {
+    const harness = createHarness();
+    try {
+      assert.strictEqual(harness.service.resolveFullName({ nodeKind: 'Subsystem', label: 'Розница' }), 'Подсистема.Розница');
+      const outside = path.join(harness.workspaceRoot, 'нет-выгрузки', 'Subsystems', 'Продажи', 'Subsystems', 'Розница.xml');
+      assert.strictEqual(harness.service.resolveFullName(subsystemNode(outside, 'Розница')), 'Подсистема.Розница');
+    } finally {
+      harness.dispose();
+    }
+  });
+
+  for (const recursive of [false, true]) {
+    test(`Objects.xml для вложенной подсистемы (recursive=${String(recursive)}) — полное имя с цепочкой родителя`, () => {
+      const harness = createHarness();
+      try {
+        const result = harness.service.createObjectsFileForNode(subsystemNode(nestedXmlPath(harness), 'Розница'), recursive);
+        assert.deepStrictEqual(result.fullNames, ['Подсистема.Продажи.Подсистема.Розница']);
+        const flag = recursive ? 'true' : 'false';
+        assert.strictEqual(
+          fs.readFileSync(result.filePath, 'utf-8'),
+          [
+            '<Objects xmlns="http://v8.1c.ru/8.3/config/objects" version="1.0">',
+            `  <Object fullName="Подсистема.Продажи.Подсистема.Розница" includeChildObjects="${flag}">`,
+            `    <Subsystem includeObjectsFromSubordinateSubsystems="${flag}"/>`,
+            '  </Object>',
+            '</Objects>',
+            '',
+          ].join('\n')
+        );
+      } finally {
+        harness.dispose();
+      }
+    });
+  }
+});
