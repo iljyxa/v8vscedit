@@ -52,7 +52,8 @@ src/
 │   │                                  # (state.json), RepositoryLockSnapshotStore (снимки), единицы
 │   │                                  # хранилища и области (RepositoryObjectNames/Scope), раунды
 │   │                                  # выгрузки (RepositoryDumpPlan/Rounds), трёхстороннее слияние
-│   │                                  # (RepositoryMergePlanner/Applier) — см. docs/repository-file-sync.md
+│   │                                  # (RepositoryMergePlanner/Applier), очистка временных артефактов
+│   │                                  # (RepositoryTempCleanup) — см. docs/repository-file-sync.md
 │   ├── git/                          # статус Git для узлов метаданных (GitMetadataStatusService,
 │   │                                  # декорации) + представление «Изменения метаданных»
 │   │                                  # (GitPorcelainReader, MetadataChangeResolver,
