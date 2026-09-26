@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { chooseConflictResolutionModal, confirmRollbackModal } from '../../ui/commands/repository/RepositoryFileSyncDialogs';
+import { chooseConflictResolutionModal, confirmRollbackModal, showNotification } from '../../ui/commands/repository/RepositoryFileSyncDialogs';
 
 /**
  * `RepositoryFileSyncDialogs.listFiles` — единственная функция файла вне
@@ -57,5 +57,59 @@ suite('RepositoryFileSyncDialogs — listFiles (через chooseConflictResolut
     } finally {
       restore();
     }
+  });
+});
+
+/**
+ * N4 (issue #1, раздел 10, попутная находка reviewer): `showNotification`
+ * принимает функцию показа ЧЕРЕЗ ПАРАМЕТР — vscode.window не используется напрямую,
+ * поэтому она тестируется юнит-тестом с внедрённым `show`, а не через vscode-стаб
+ * (см. решение оркестратора — функция должна покинуть c8-ignore-блок файла).
+ */
+suite('RepositoryFileSyncDialogs — showNotification (внедрённый show, issue #1, N4)', () => {
+  test('без actions — show вызывается с одним сообщением, без пунктов меню', async () => {
+    const calls: unknown[][] = [];
+    const show = (...args: unknown[]): Thenable<string | undefined> => {
+      calls.push(args);
+      return Promise.resolve(undefined);
+    };
+
+    showNotification(show, 'Сообщение без действий');
+    await Promise.resolve();
+
+    assert.deepStrictEqual(calls, [['Сообщение без действий']]);
+  });
+
+  test('с actions — show вызывается с метками кнопок; закрытие без выбора (undefined) не запускает ни один callback', async () => {
+    let ranA = false;
+    let ranB = false;
+    const show = (_message: string, ...items: string[]): Thenable<string | undefined> => {
+      assert.deepStrictEqual(items, ['A', 'B']);
+      return Promise.resolve(undefined);
+    };
+
+    showNotification(show, 'Сообщение с действиями', [
+      { label: 'A', run: () => { ranA = true; } },
+      { label: 'B', run: () => { ranB = true; } },
+    ]);
+    await Promise.resolve();
+
+    assert.strictEqual(ranA, false);
+    assert.strictEqual(ranB, false);
+  });
+
+  test('выбор конкретного действия запускает ИМЕННО его callback, остальные не трогает', async () => {
+    let ranA = false;
+    let ranB = false;
+    const show = (): Thenable<string | undefined> => Promise.resolve('B');
+
+    showNotification(show, 'Сообщение', [
+      { label: 'A', run: () => { ranA = true; } },
+      { label: 'B', run: () => { ranB = true; } },
+    ]);
+    await Promise.resolve();
+
+    assert.strictEqual(ranA, false);
+    assert.strictEqual(ranB, true);
   });
 });

@@ -512,6 +512,28 @@ suite('RepositoryService — isEditRestricted: суффикс единицы (is
     assert.strictEqual(service.isEditRestricted(ownerModule), true, 'Владелец должен снова требовать захвата (P4: на сервере остался незахваченным).');
     assert.strictEqual(service.isEditRestricted(formModule), false, 'Форма должна остаться редактируемой — на сервере она осталась захваченной (P4).');
   });
+
+  /**
+   * N8 (issue #1, попутная находка reviewer): путь с сегментом, для которого суффикс
+   * единицы даёт НЕРАСПОЗНАННОГО родителя (`subordinateUnitFullName` бросает при
+   * реконструкции промежуточного `parent`), не должен ронять `isEditRestricted` —
+   * ограничение считается безопасным дефолтом (`true`). Реальный файловый сегмент с
+   * точкой в имени (`Forms/Y.bak/Forms/Test.xml`) — не корректная 1С-структура (форма
+   * внутри формы невозможна), но валиден как ФАЙЛОВЫЙ путь: `resolveUnitSuffixByRelativePath`
+   * работает по именам каталогов, не проверяя реальную вложенность типов, и на втором
+   * сегменте пытается разобрать составное имя "…Форма.Y.bak" — точка внутри "Y.bak"
+   * даёт нечётное число частей, `parseRepositoryUnit` возвращает `null`.
+   */
+  test('N8: сегмент пути с точкой в имени даёт нераспознанного родителя единицы — isEditRestricted не бросает, возвращает true', async () => {
+    const { service, target } = await connectedService();
+    const weirdPath = path.join(target.configRoot, 'Catalogs', 'Контрагенты', 'Forms', 'Y.bak', 'Forms', 'Test.xml');
+    fs.mkdirSync(path.dirname(weirdPath), { recursive: true });
+    fs.writeFileSync(weirdPath, '', 'utf-8');
+
+    let result: boolean | undefined;
+    assert.doesNotThrow(() => { result = service.isEditRestricted(weirdPath); });
+    assert.strictEqual(result, true);
+  });
 });
 
 function restoreFile(filePath: string, backup: string | undefined): void {
