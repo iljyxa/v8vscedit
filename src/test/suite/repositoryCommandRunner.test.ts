@@ -441,6 +441,18 @@ suite('RepositoryCommandRunner — runRepositoryCliCommand: внедрение e
     assert.ok(String(errorMessageCalls[0][0]).includes('сбой после успешной команды'));
   });
 
+  test('execute → {status:"done"}, afterSuccess бросает НЕ-Error значение — сообщение через String(error) (ветка else тернарника)', async () => {
+    const result = await runRepositoryCliCommand(
+      // eslint-disable-next-line @typescript-eslint/only-throw-error -- намеренно НЕ-Error для проверки ветки String(error).
+      { ...baseOptions(), afterSuccess: () => { throw 'сбой-строкой'; } },
+      services,
+      () => Promise.resolve({ status: 'done' })
+    );
+    assert.strictEqual(result, false);
+    assert.strictEqual(errorMessageCalls.length, 1);
+    assert.ok(String(errorMessageCalls[0][0]).includes('сбой-строкой'));
+  });
+
   test('execute → {status:"interrupted"} — showInformationMessage с сообщением прерывания, результат false (не showErrorMessage)', async () => {
     const result = await runRepositoryCliCommand(
       baseOptions(),
