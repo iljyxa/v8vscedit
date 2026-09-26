@@ -9,7 +9,9 @@
       "Bash(git status *)",
       "Bash(git diff *)",
       "Bash(git log *)",
-      "Bash(git show *)"
+      "Bash(git show *)",
+      "Bash(bash .claude/scripts/qa-gate.sh*)",
+      "Bash(MOCHA_GREP=* xvfb-run -a npm run test:fast)"
     ]
   },
   "sandbox": {
@@ -17,7 +19,11 @@
       "npm test",
       "npm run test:fast",
       "MOCHA_GREP=* npm run test:fast",
-      "VSCODE_TEST_VERSION=* npm test"
+      "VSCODE_TEST_VERSION=* npm test",
+      "bash .claude/scripts/qa-gate.sh",
+      "bash .claude/scripts/qa-gate.sh *",
+      "MOCHA_GREP=* xvfb-run -a npm run test:fast",
+      "xvfb-run -a npm test"
     ]
   },
   "hooks": {
