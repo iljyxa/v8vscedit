@@ -108,6 +108,22 @@ const ROOT_OR_GROUP_KINDS_WITHOUT_OWN_XML: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Узел — самостоятельная подчинённая единица хранилища (`Владелец.Форма.Имя`,
+ * `Владелец.Макет.Имя`), а не часть XML владельца. Правило совпадает с тем, по
+ * которому `resolveFullName` строит полное имя единицы: захват такой единицы
+ * независим от нерекурсивного захвата владельца, поэтому признак редактируемости
+ * её содержимого нужно считать по ней самой. Чистая функция без I/O — годится для
+ * hot path дерева.
+ */
+export function isSubordinateUnitNode(node: Pick<RepositoryNodeRef, 'nodeKind' | 'metaContext'>): boolean {
+  const kind = node.nodeKind;
+  return kind !== undefined
+    && CHILD_LIKE_KINDS.has(kind)
+    && isRepositorySubordinateTag(kind)
+    && Boolean(node.metaContext?.ownerObjectXmlPath);
+}
+
+/**
  * Фасад хранилища для команд и UI: резолвинг цели по файлам выгрузки, привязка
  * (`RepositoryBindingStore`), состояние захватов (`RepositoryLockState`), снимки
  * захвата (`RepositoryLockSnapshotStore`) и генерация `Objects.xml`.

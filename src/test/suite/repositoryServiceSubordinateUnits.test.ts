@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { RepositoryService, type RepositoryNodeRef } from '../../infra/repository/RepositoryService';
+import { RepositoryService, isSubordinateUnitNode, type RepositoryNodeRef } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 
@@ -309,4 +309,68 @@ suite('RepositoryService.createObjectsFileForNode — единицы Form/Templa
       harness.dispose();
     }
   });
+});
+
+/**
+ * Issue #46: `isSubordinateUnitNode` — единая точка определения «узел это
+ * ПОДЧИНЁННАЯ ЕДИНИЦА хранилища со своим XML верхнего уровня» (Form/Template
+ * с `metaContext.ownerObjectXmlPath`), которую используют и дерево
+ * (`MetadataTreeProvider.resolveRepositoryState`), и панель свойств
+ * (`resolveRepositoryEditProbePath`). Признак редактируемости такого узла
+ * обязан считаться по захвату САМОЙ единицы, а не владельца (нерекурсивный
+ * захват владельца её не захватывает — issue #45).
+ */
+suite('RepositoryService.isSubordinateUnitNode — issue #46', () => {
+  test('Form c ownerObjectXmlPath → true', () => {
+    assert.strictEqual(
+      isSubordinateUnitNode({ nodeKind: 'Form', metaContext: { rootMetaKind: 'Catalog', ownerObjectXmlPath: '/tmp/x.xml' } }),
+      true
+    );
+  });
+
+  test('Template c ownerObjectXmlPath → true', () => {
+    assert.strictEqual(
+      isSubordinateUnitNode({ nodeKind: 'Template', metaContext: { rootMetaKind: 'Catalog', ownerObjectXmlPath: '/tmp/x.xml' } }),
+      true
+    );
+  });
+
+  test('Form без metaContext → false', () => {
+    assert.strictEqual(isSubordinateUnitNode({ nodeKind: 'Form' }), false);
+  });
+
+  test('Form с metaContext, но без ownerObjectXmlPath → false', () => {
+    assert.strictEqual(
+      isSubordinateUnitNode({ nodeKind: 'Form', metaContext: { rootMetaKind: 'Catalog' } }),
+      false
+    );
+  });
+
+  test('Template без metaContext → false', () => {
+    assert.strictEqual(isSubordinateUnitNode({ nodeKind: 'Template' }), false);
+  });
+
+  test('nodeKind undefined → false', () => {
+    assert.strictEqual(isSubordinateUnitNode({ metaContext: { rootMetaKind: 'Catalog', ownerObjectXmlPath: '/tmp/x.xml' } }), false);
+  });
+
+  const nonSubordinateKinds = [
+    'CommonForm',
+    'CommonTemplate',
+    'Subsystem',
+    'Attribute',
+    'TabularSection',
+    'Command',
+    'Column',
+    'Catalog',
+  ] as const;
+
+  for (const kind of nonSubordinateKinds) {
+    test(`${kind} c ownerObjectXmlPath → false (не подчинённая единица со своим XML)`, () => {
+      assert.strictEqual(
+        isSubordinateUnitNode({ nodeKind: kind, metaContext: { rootMetaKind: 'Catalog', ownerObjectXmlPath: '/tmp/x.xml' } }),
+        false
+      );
+    });
+  }
 });
