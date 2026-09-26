@@ -11,13 +11,19 @@ import { RepositoryLockSnapshotStore } from './RepositoryLockSnapshotStore';
 import {
   getRootLockName,
   isRepositorySubordinateTag,
+  isRootLockName,
   ONE_C_TYPE_NAMES,
   parseRepositoryUnit,
   REPOSITORY_SUBORDINATE_TAGS,
   subordinateUnitFullName,
 } from './RepositoryObjectNames';
 import type { RepositorySubordinateTag } from './RepositoryObjectNames';
-import { resolveLockUnitByRelativePath, resolveUnitSuffixByRelativePath, resolveUnitXmlRel } from './RepositoryObjectScope';
+import {
+  resolveLockUnitByRelativePath,
+  resolveOwnerFullNameByRelativePath,
+  resolveUnitSuffixByRelativePath,
+  resolveUnitXmlRel,
+} from './RepositoryObjectScope';
 import { getRepositoryObjectsDir } from './RepositoryTempCleanup';
 
 export interface RepositoryBinding {
@@ -293,9 +299,15 @@ export class RepositoryService {
    * Возвращает `true`, если редактирование файла должно быть запрещено из-за
    * активного подключения к хранилищу без локального захвата объекта. Файлы
    * подчинённых единиц (форм, макетов и т.п.) проверяются по захвату самой единицы:
-   * нерекурсивный захват владельца их не захватывает.
+   * нерекурсивный захват владельца их не захватывает. Файлы корня (`Configuration.xml`,
+   * `Ext/**`) XML владельца не имеют — их захват это захват корня, как в дереве.
    */
   isEditRestricted(filePath: string): boolean {
+    const rootTarget = this.resolveRootFileTarget(filePath);
+    if (rootTarget) {
+      return this.isConnected(rootTarget) && !this.isRootLocked(rootTarget);
+    }
+
     const ownerObjectXmlPath = this.resolveOwnerObjectXmlPath(filePath);
     if (!ownerObjectXmlPath) {
       return false;
@@ -524,6 +536,16 @@ export class RepositoryService {
     const value = this.resolveSubordinateUnitFullNameByXmlPath(xmlPath) ?? fullName;
     this.rootFullNameCache.set(cacheKey, { mtimeMs, value });
     return value;
+  }
+
+  /** Цель хранилища, если файл относится к корню конфигурации/расширения; иначе `null`. */
+  private resolveRootFileTarget(filePath: string): RepositoryTarget | null {
+    const target = this.resolveTargetByXmlPath(filePath);
+    if (!target) {
+      return null;
+    }
+    const owner = resolveOwnerFullNameByRelativePath(path.relative(target.configRoot, filePath), target);
+    return owner !== null && isRootLockName(owner) ? target : null;
   }
 
   private resolveOwnerObjectXmlPath(filePath: string): string | null {

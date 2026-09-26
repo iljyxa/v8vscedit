@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
+import { getRootLockName } from '../../infra/repository/RepositoryObjectNames';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import { MetadataNode } from '../../ui/tree/TreeNode';
@@ -409,6 +410,37 @@ suite('PropertiesViewController — isEditLockedByRepository через buildRen
       const before = fs.readFileSync(formXmlPath, 'utf-8');
       await controller.handleWebviewMessage({ type: 'propertyChanged', key: 'Comment', value: 'issue-46' });
       assert.notStrictEqual(fs.readFileSync(formXmlPath, 'utf-8'), before, 'при editLockedByRepository=false правка обязана примениться к файлу формы.');
+    } finally {
+      harness.dispose();
+    }
+  });
+});
+
+// ─── 3. Корень конфигурации (issue #55) ──────────────────────────────────────
+
+suite('isEditLockedByRepository — корень конфигурации требует захвата корня (issue #55)', () => {
+  function configurationNode(harness: Harness): MetadataNode {
+    return new MetadataNode(
+      { label: 'ТорговыйУчет', nodeKind: 'configuration', xmlPath: path.join(harness.configRoot, 'Configuration.xml') },
+      vscode.TreeItemCollapsibleState.None
+    );
+  }
+
+  test('подключено без захвата корня → свойства корня заблокированы; захват объекта не помогает; захват корня снимает блокировку', async () => {
+    const harness = createHarness();
+    try {
+      const deps: PropertyEditLockDeps = { repositoryService: harness.repositoryService };
+      const node = configurationNode(harness);
+      assert.strictEqual(isEditLockedByRepository(node, deps), false, 'без подключения к хранилищу блокировки нет.');
+
+      await bindAndConnect(harness);
+      assert.strictEqual(isEditLockedByRepository(node, deps), true);
+
+      harness.repositoryService.setLocked(harness.target, [OWNER], true);
+      assert.strictEqual(isEditLockedByRepository(node, deps), true);
+
+      harness.repositoryService.setLocked(harness.target, [getRootLockName(harness.target)], true);
+      assert.strictEqual(isEditLockedByRepository(node, deps), false);
     } finally {
       harness.dispose();
     }

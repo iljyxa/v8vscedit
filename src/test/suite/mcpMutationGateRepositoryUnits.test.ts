@@ -19,6 +19,7 @@ import type { CommandServices } from '../../ui/commands/_shared';
 import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOperationGuard';
 import { findConfigurations } from '../../infra/fs/ConfigLocator';
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
+import { getRootLockName } from '../../infra/repository/RepositoryObjectNames';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import { SupportInfoService, SupportMode } from '../../infra/support/SupportInfoService';
@@ -519,6 +520,30 @@ suite('McpMutationGate.assertNodeContentEditable — поддержка блок
         () => { gate.assertNodeContentEditable(node); },
         { message: 'Объект защищён от изменения: находится на поддержке с запретом редактирования.' }
       );
+    } finally {
+      harness.dispose();
+    }
+  });
+});
+
+suite('MCP: свойства корня «Конфигурация» требуют захвата корня (issue #55)', () => {
+  test('без захвата корня set_property_by_path → isError, Configuration.xml не изменён; после захвата корня — успех', async () => {
+    const harness = createHarness();
+    try {
+      await bindAndConnect(harness);
+      harness.repositoryService.setLocked(harness.target, [OWNER], true);
+      const configurationXml = path.join(harness.configRoot, 'Configuration.xml');
+      const before = fs.readFileSync(configurationXml, 'utf-8');
+
+      const denied = callTool(harness, 'v8vscedit_set_property_by_path', { path: 'Конфигурация', propertyKey: 'Comment', value: 'issue-55' });
+      assert.strictEqual(isErrorResult(denied), true, `ожидалась блокировка, получено: ${extractText(denied)}`);
+      assert.ok(extractText(denied).includes('не захвачен в хранилище конфигурации'), extractText(denied));
+      assert.strictEqual(fs.readFileSync(configurationXml, 'utf-8'), before);
+
+      harness.repositoryService.setLocked(harness.target, [getRootLockName(harness.target)], true);
+      const allowed = callTool(harness, 'v8vscedit_set_property_by_path', { path: 'Конфигурация', propertyKey: 'Comment', value: 'issue-55' });
+      assert.strictEqual(isErrorResult(allowed), false, `ожидался успех, получено: ${extractText(allowed)}`);
+      assert.ok(fs.readFileSync(configurationXml, 'utf-8').includes('issue-55'));
     } finally {
       harness.dispose();
     }
