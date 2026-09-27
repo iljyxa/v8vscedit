@@ -30,31 +30,37 @@ export class FileRepositoryLockStatusSource implements RepositoryLockStatusSourc
     } catch (error) {
       throw toStatusError(error, filePath);
     }
+    let records: RepositoryServerLockRecord[];
     try {
-      const users = await readOneCdTable(file, 'USERS');
-      const objects = (await readOneCdTable(file, 'OBJECTS')).map((row) => ({
-        objectId: formatGuidBytesLe(row.OBJID as Buffer),
-        revised: row.REVISED === true,
-        revisor: binaryKey(row.REVISORID),
-        lockedAt: typeof row.REVISEDATE === 'string' ? row.REVISEDATE : undefined,
-      }));
-      // Соединение USERS × OBJECTS: захват с держателем, которого нет в USERS, не выводится.
-      const records: RepositoryServerLockRecord[] = [];
-      for (const user of users) {
-        const userKey = binaryKey(user.USERID);
-        for (const object of objects) {
-          if (object.revised && object.revisor === userKey) {
-            records.push({ objectId: object.objectId, user: user.NAME as string, lockedAt: object.lockedAt });
-          }
-        }
-      }
-      return { records };
+      records = await readRecords(file);
     } catch (error) {
-      throw toStatusError(error, filePath);
-    } finally {
       await file.close();
+      throw toStatusError(error, filePath);
+    }
+    await file.close();
+    return { records };
+  }
+}
+
+/** Соединение USERS × OBJECTS: захват с держателем, которого нет в USERS, не выводится. */
+async function readRecords(file: OneCdFile): Promise<RepositoryServerLockRecord[]> {
+  const users = await readOneCdTable(file, 'USERS');
+  const objects = (await readOneCdTable(file, 'OBJECTS')).map((row) => ({
+    objectId: formatGuidBytesLe(row.OBJID as Buffer),
+    revised: row.REVISED === true,
+    revisor: binaryKey(row.REVISORID),
+    lockedAt: typeof row.REVISEDATE === 'string' ? row.REVISEDATE : undefined,
+  }));
+  const records: RepositoryServerLockRecord[] = [];
+  for (const user of users) {
+    const userKey = binaryKey(user.USERID);
+    for (const object of objects) {
+      if (object.revised && object.revisor === userKey) {
+        records.push({ objectId: object.objectId, user: user.NAME as string, lockedAt: object.lockedAt });
+      }
     }
   }
+  return records;
 }
 
 /** Ошибка доступа к файлу хранилища → код и понятная причина с путём. */

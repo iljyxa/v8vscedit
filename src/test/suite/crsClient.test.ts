@@ -12,6 +12,7 @@ import {
   readHttpExchange,
   readRun,
   requestPasswordHash,
+  requestVersion,
   type CrsExchangeName,
 } from './support/repositoryLockFixtures';
 
@@ -99,6 +100,12 @@ for (const version of NETWORK_FIXTURE_VERSIONS) {
       const { send, bodies } = replay('version-mismatch', 'version-mismatch');
       await expectStatusError(callCrs(address(), request('8.3.0.0'), send), 'version-mismatch', /Несоответствие версий/);
       assert.strictEqual(bodies.length, 2);
+    });
+
+    test('несоответствие версий, затем ошибка аутентификации → auth-failed после повтора', async () => {
+      const { send, bodies } = replay('version-mismatch', 'auth-failed');
+      await expectStatusError(callCrs(address(), request('8.3.0.0', 'Petrov', 'wrong'), send), 'auth-failed', /аутентификации/);
+      assert.strictEqual(requestVersion(bodies[1]), run.platform);
     });
 
     test('ошибка аутентификации → auth-failed с текстом сервера и подсказкой про пароль', async () => {

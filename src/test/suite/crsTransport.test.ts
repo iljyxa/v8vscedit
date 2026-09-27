@@ -100,7 +100,10 @@ for (const version of NETWORK_FIXTURE_VERSIONS) {
 
     test('http: ответ больше лимита по Content-Length → too-large', async () => {
       const exchange = readHttpExchange(version, 'statistic-admin');
-      const server = await startHttpReplayServer(() => ({ status: 200, body: exchange.response }));
+      // Content-Length задан явно: проверяется отказ по заголовку, до чтения тела.
+      const server = await startHttpReplayServer(() => ({
+        status: 200, headers: { 'Content-Length': String(exchange.response.length) }, body: exchange.response,
+      }));
       servers.push(server);
       const address = parseCrsAddress(`http://127.0.0.1:${String(server.port)}/repo/repo.1ccr`);
       await expectStatusError(sendCrsRequest(address, exchange.request, { ...OPTIONS, maxResponseBytes: 100 }), 'too-large');

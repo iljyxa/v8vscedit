@@ -61,22 +61,31 @@ export type CrsSender = (address: CrsAddress, body: Buffer) => Promise<Buffer>;
 /** Не больше двух вызовов: второй — только при несоответствии версий с известной версией сервера. */
 export async function callCrs(address: CrsAddress, request: CrsCallRequest, send: CrsSender): Promise<{ response: CrsCallReturn; serverVersion: string }> {
   const passwordHash = hashCrsPassword(request.password);
-  let version = request.versionHint;
-  for (let attempt = 1; ; attempt += 1) {
+  const call = async (version: string): Promise<CrsCallReturn | CrsException> => {
     const body = buildCrsCallBody({ alias: address.alias, method: request.method, version, user: request.user, passwordHash, paramsXml: request.paramsXml });
     const response = parseCrsResponse(await send(address, body));
-    if (response.kind === 'return') {
-      return { response: response.value, serverVersion: version };
-    }
-    const exception = decodeCrsException(response.clsid, response.payload);
-    if (exception.serverVersion === undefined) {
-      throw toStatusError(exception);
-    }
-    if (attempt === 2) {
-      throw new RepositoryLockStatusError('version-mismatch', `${exception.message} (повтор с версией сервера ${version} не помог)`);
-    }
-    version = exception.serverVersion;
+    return response.kind === 'return' ? response.value : decodeCrsException(response.clsid, response.payload);
+  };
+  const first = await call(request.versionHint);
+  if (!isException(first)) {
+    return { response: first, serverVersion: request.versionHint };
   }
+  if (first.serverVersion === undefined) {
+    throw toStatusError(first);
+  }
+  const serverVersion = first.serverVersion;
+  const second = await call(serverVersion);
+  if (!isException(second)) {
+    return { response: second, serverVersion };
+  }
+  // После повтора с версией сервера возможна обычная ошибка (например, пароль) — её и показываем.
+  throw second.serverVersion === undefined
+    ? toStatusError(second)
+    : new RepositoryLockStatusError('version-mismatch', `${second.message} (повтор с версией сервера ${serverVersion} не помог)`);
+}
+
+function isException(value: CrsCallReturn | CrsException): value is CrsException {
+  return 'clsid' in value;
 }
 
 function toStatusError(exception: CrsException): RepositoryLockStatusError {
