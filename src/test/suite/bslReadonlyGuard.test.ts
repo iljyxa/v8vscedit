@@ -6,6 +6,15 @@ import * as vscode from 'vscode';
 import { BslReadonlyGuard } from '../../ui/readonly/BslReadonlyGuard';
 import type { RepositoryService } from '../../infra/repository/RepositoryService';
 import type { SupportInfoService } from '../../infra/support/SupportInfoService';
+import { EditorReadonlyController } from '../../ui/readonly/EditorReadonlyController';
+import {
+  RESET_COMMAND,
+  revertDirtyAndCloseAll,
+  SET_COMMAND,
+  spyReadonlyCommands,
+  waitUntil as waitFor,
+  type ReadonlyCommandSpy,
+} from './support/editorTabsHarness';
 
 /**
  * Issue #4: контекстное меню webview-навигатора закрывалось само собой, потому что
@@ -137,6 +146,143 @@ suite('BslReadonlyGuard — issue #4: фокус не отбирается пр�
       1,
       'readonly-команда для одного и того же документа не должна выполняться повторно'
     );
+  });
+});
+
+type ChangeLocksListener = (event: { target: { configRoot: string }; fullNames: readonly string[]; allObjects: readonly string[] }) => void;
+
+/**
+ * Issue #81: hot exit восстанавливает несохранённый буфер файла, который уже не захвачен
+ * (или стоит на замке поддержки), и guard при открытии ставил ему readonly сессии —
+ * сохранить правки становилось нельзя. Readonly несохранённого документа откладывается
+ * до сохранения или отката тем же ожиданием, что у `EditorReadonlyController` (#62).
+ * Грязный документ с событием открытия получить нельзя, поэтому применение вызывается
+ * напрямую — это общая точка синхронного и запасного путей обработчика открытия.
+ */
+suite('BslReadonlyGuard — issue #81: несохранённый буфер не переводится в readonly', () => {
+  let configRoot: string;
+  let uri: vscode.Uri;
+  let spy: ReadonlyCommandSpy | undefined;
+  const disposables: vscode.Disposable[] = [];
+
+  setup(() => {
+    configRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-readonly-guard-dirty-'));
+    uri = vscode.Uri.file(path.join(configRoot, 'Module.bsl'));
+    fs.writeFileSync(uri.fsPath, 'Процедура Тест()\nКонецПроцедуры\n', 'utf-8');
+  });
+
+  teardown(async () => {
+    spy?.restore();
+    spy = undefined;
+    for (const item of disposables.splice(0)) {
+      item.dispose();
+    }
+    await revertDirtyAndCloseAll();
+    fs.rmSync(configRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  interface Started {
+    controller: EditorReadonlyController | undefined;
+    state: { restricted: boolean };
+    logLines: string[];
+    fire: () => void;
+    applyReadonly: (editor: vscode.TextEditor) => Promise<void>;
+    settle: () => Promise<void>;
+  }
+
+  function start(withController: boolean): Started {
+    const state = { restricted: true };
+    let listener: ChangeLocksListener | undefined;
+    const repositoryService = {
+      isEditRestricted: () => state.restricted,
+      onDidChangeLocks: (l: ChangeLocksListener) => { listener = l; return { dispose: () => { listener = undefined; } }; },
+    } as unknown as RepositoryService;
+    const supportService = { isLocked: () => false } as unknown as SupportInfoService;
+    const logLines: string[] = [];
+    const log = { appendLine: (line: string) => logLines.push(line) } as unknown as vscode.OutputChannel;
+    const guard = new BslReadonlyGuard(supportService, repositoryService, log);
+    disposables.push(guard.register());
+    const controller = withController ? new EditorReadonlyController(repositoryService, supportService, guard, log) : undefined;
+    if (controller) {
+      disposables.push(controller.register());
+    }
+    spy = spyReadonlyCommands();
+    const applyReadonly = (guard as unknown as { applyReadonly: (editor: vscode.TextEditor) => Promise<void> }).applyReadonly.bind(guard);
+    return {
+      controller,
+      state,
+      logLines,
+      fire: () => { listener?.({ target: { configRoot }, fullNames: ['Справочник.А'], allObjects: [] }); },
+      applyReadonly,
+      settle: () => (controller as unknown as { queue: Promise<void> }).queue,
+    };
+  }
+
+  async function openDirty(): Promise<vscode.TextEditor> {
+    const document = await vscode.workspace.openTextDocument(uri);
+    const editor = await vscode.window.showTextDocument(document, { preview: false });
+    const edit = new vscode.WorkspaceEdit();
+    edit.insert(uri, new vscode.Position(0, 0), '// правка\n');
+    assert.ok(await vscode.workspace.applyEdit(edit));
+    assert.ok(document.isDirty);
+    return editor;
+  }
+
+  function commandsOn(command: string): number {
+    return (spy?.calls ?? []).filter((call) => call.command === command && call.activeUri === uri.toString()).length;
+  }
+
+  test('несохранённый документ: readonly не ставится, после сохранения ставится через контроллер', async function () {
+    this.timeout(15_000);
+    // Документ правится до регистрации guard'а: иначе тот сделал бы его readonly уже при открытии.
+    const editor = await openDirty();
+    const started = start(true);
+
+    await started.applyReadonly(editor);
+    assert.deepStrictEqual(spy?.calls, [], 'несохранённый буфер не должен становиться readonly');
+    assert.ok(
+      started.logLines.some((line) => line.includes('до сохранения') && line.includes('Module.bsl')),
+      `отложенный переход должен журналироваться: ${started.logLines.join(' | ')}`
+    );
+
+    assert.strictEqual(await editor.document.save(), true);
+    await waitFor(() => commandsOn(SET_COMMAND) === 1);
+    assert.deepStrictEqual(spy.calls, [{ command: SET_COMMAND, activeUri: uri.toString() }]);
+  });
+
+  test('пропуск грязного документа не запоминается: после отката readonly применяется guard-ом', async function () {
+    this.timeout(15_000);
+    // Документ правится до регистрации guard'а: иначе тот сделал бы его readonly уже при открытии.
+    const editor = await openDirty();
+    const started = start(false);
+
+    await started.applyReadonly(editor);
+    assert.deepStrictEqual(spy?.calls, []);
+
+    await vscode.commands.executeCommand('workbench.action.files.revert');
+    assert.ok(!editor.document.isDirty);
+    await started.applyReadonly(editor);
+
+    assert.strictEqual(commandsOn(SET_COMMAND), 1);
+  });
+
+  test('захват до сохранения отменяет отложенный readonly', async function () {
+    this.timeout(15_000);
+    // Документ правится до регистрации guard'а: иначе тот сделал бы его readonly уже при открытии.
+    const editor = await openDirty();
+    const started = start(true);
+
+    await started.applyReadonly(editor);
+    started.state.restricted = false;
+    started.fire();
+    await started.settle();
+    assert.strictEqual(await editor.document.save(), true);
+    // Прямой вызов вместо ожидания события: момент его доставки не гарантирован,
+    // а повторная обработка того же сохранения идемпотентна.
+    started.controller?.onDocumentChanged(editor.document);
+    await started.settle();
+
+    assert.deepStrictEqual(spy?.calls, [{ command: RESET_COMMAND, activeUri: uri.toString() }]);
   });
 });
 
