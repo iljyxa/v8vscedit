@@ -23,7 +23,10 @@ VS Code Extension Process (dist/extension.js)
         └── bsl-analyzer lsp
 ```
 
-`LspManager` читает настройку `v8vscedit.lsp.mode`.
+`LspManager` читает настройку `v8vscedit.lsp.mode`. Клиент подписывается на `.bsl`-документы
+без `synchronize.fileEvents` (`buildBslAnalyzerDocumentOptions`, `lsp/LspManager.ts`): сервер не
+обрабатывает `workspace/didChangeWatchedFiles` и следит за файлами сам, поэтому события клиента —
+лишний трафик на каждую выгрузку во временный каталог операции.
 
 Допустимые значения:
 
@@ -61,6 +64,29 @@ VS Code Extension Process (dist/extension.js)
 | `v8vscedit.bslAnalyzer.restart` | Перезапустить LSP |
 | `v8vscedit.bslAnalyzer.update` | Проверить обновления |
 | `v8vscedit.bslAnalyzer.showOutput` | Показать лог |
+
+### Перезапуск при появлении основной конфигурации (issue #104)
+
+`bsl-analyzer` выбирает корень конфигурации только один раз при старте: если тогда основной
+выгрузки `src/cf/Configuration.xml` ещё не было, сервер индексирует и отслеживает всю рабочую
+область целиком, включая `.v8vscedit/**` — на Windows его watcher держит дескрипторы этих файлов,
+из-за чего удаление временных каталогов операций (хранилище, импорт) падает с `ENOTEMPTY`/`EPERM`.
+
+`Container.reloadEntries()` после перестроения дерева вызывает `restartLspOnRootsChange`, который
+через `BslAnalyzerRootTracker` (`infra/environment/BslAnalyzerRootTracker.ts`, чистый домен без
+`vscode`) перезапускает `LspManager` **ровно** при переходе «нет основной конфигурации → есть»:
+
+- на bootstrap (первое наблюдение) — не перезапускает: сервер и так стартует с текущим составом;
+- появление/переименование cfe без основной cf — не перезапускает: сервер `bsl-analyzer` выбирает
+  корень по `.toml`, а не по составу расширений;
+- исчезновение основной конфигурации — не перезапускает (сервер уже проиндексирован так, как есть,
+  откатывать нечего);
+- `v8vscedit.lsp.mode = off` — не перезапускает, при последующем включении сервер стартует заново
+  и сам увидит актуальный состав.
+
+`BslAnalyzerRootTracker.observe()` хранит только факт «есть/нет основной конфигурации» между
+вызовами и не хранит `vscode`-состояние — логика решения (`decideBslAnalyzerRestart`) покрыта
+unit-тестами домена, а сам вызов рестарта — тонкая обвязка в `Container.ts`.
 
 ## Открытие BSL-модулей
 

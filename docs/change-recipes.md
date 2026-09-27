@@ -81,8 +81,14 @@
   только через `createImportTempDir` (`infra/fs/WorkspaceTempDir.ts`), а сессию выгрузки агента — через
   `buildAgentDumpSessionId`, иначе хвосты после краха не подметёт `sweepStaleOperationTemp` — см.
   [repository-file-sync.md](./repository-file-sync.md#временные-файлы-и-очистка). Любое удаление файла/
-  каталога хранилища — только через `removePathWithRetries` (`RepositoryTempCleanup.ts`), никогда голым
-  `fs.rmSync`/`fs.rmdirSync` — на Windows временные `EPERM`/`EBUSY` при удалении требуют повтора. Шаги
+  каталога хранилища или временного каталога операции Конфигуратора — только через
+  `removePathWithRetries`/`describeFsError` (`infra/fs/PathRemoval.ts`, issue #104 — примитив удаления
+  вынесен сюда из `RepositoryTempCleanup.ts`, чтобы им мог пользоваться и код вне хранилища;
+  `RepositoryTempCleanup.ts` по-прежнему единственный источник раскладки путей и очистки самого
+  хранилища, но саму функцию удаления импортирует оттуда же), никогда голым
+  `fs.rmSync`/`fs.rmdirSync` — на Windows временные
+  `EPERM`/`EBUSY`/`ENOTEMPTY` при удалении требуют повтора (тем же примитивом закрыт
+  `ExtensionCommandRunner.removeTempDir` для импорта cf/cfe). Шаги
   снимков после того, как операция на сервере уже состоялась (захват/получение/отмена/помещение), —
   только через best-effort-обёртки `ui/commands/repository/RepositorySnapshotSteps.ts`
   (`trySnapshotStep`/`captureUnitSnapshotStep`/`captureRootManifestStep` + сводное
