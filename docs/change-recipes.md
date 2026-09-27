@@ -77,7 +77,9 @@
   только через `runRepositoryExclusive` (первым шагом сама подметает хвосты через
   `sweepRepositoryTempArtifacts`/`infra/repository/RepositoryTempCleanup.ts` — отдельно вызывать не
   нужно); ресурсы выгрузки во временный каталог до передачи владения вызывающему оборачивать в
-  `disposeOnError`/`disposeOnErrorAsync` (там же), а не голым `try/catch` — см.
+  `disposeOnError`/`disposeOnErrorAsync` (там же), а не голым `try/catch`; каталог выгрузки создавать
+  только через `createImportTempDir` (`infra/fs/WorkspaceTempDir.ts`), а сессию выгрузки агента — через
+  `buildAgentDumpSessionId`, иначе хвосты после краха не подметёт `sweepStaleOperationTemp` — см.
   [repository-file-sync.md](./repository-file-sync.md#временные-файлы-и-очистка). Окна сравнения —
   единая конвенция сторон (слева локальное состояние, справа версия хранилища, `MergeDiffPair` +
   `formatMergeDiffTitle` в `RepositoryFileSyncDialogs.ts`); снятие/применение readonly сессии к ресурсу
