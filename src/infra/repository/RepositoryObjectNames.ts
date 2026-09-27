@@ -33,7 +33,7 @@ export const ONE_C_TYPE_NAMES: Partial<Record<MetaKind, string>> = {
   CommandGroup: 'ГруппаКоманд',
   CommonPicture: 'ОбщаяКартинка',
   CommonTemplate: 'ОбщийМакет',
-  XDTOPackage: 'XDTOPackage',
+  XDTOPackage: 'ПакетXDTO',
   StyleItem: 'ЭлементСтиля',
   DefinedType: 'ОпределяемыйТип',
   FunctionalOption: 'ФункциональнаяОпция',
