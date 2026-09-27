@@ -122,6 +122,17 @@ for (const version of LOCK_FIXTURE_VERSIONS) {
       assert.deepStrictEqual(parseRepositoryLockGrants(output), ['Справочник.Валюты']);
     });
 
+    /*
+     * Issue #88: рекурсивный захват корня печатает по строке на каждую единицу выгрузки — это
+     * реальный перечень видов платформы. Каждая строка обязана распознаваться реестром имён,
+     * иначе расхождение ONE_C_TYPE_NAMES с платформой молча выбрасывает единицу из разбора.
+     */
+    test('lock-root-recursive-refused.out.txt: каждая строка успеха — распознанная единица (голое имя корня — сентинел)', () => {
+      const output = readLog(PARTIAL_ROOT_ROOT, version, 'lock-root-recursive-refused.out.txt');
+      const unresolved = parseRepositoryLockGrants(output).filter((name) => resolveRefusedUnit(name, target) === null);
+      assert.deepStrictEqual(unresolved, []);
+    });
+
     for (const { root, log } of GRANT_LOGS) {
       test(`${path.basename(root)}/${log}: строки успеха и отказа равны expect шага`, () => {
         const step = readScenarioAt(root).steps.find((item) => item.log === log);
@@ -199,17 +210,14 @@ suite('summarizeRepositoryLockOutput — попытанные единицы (is
     const summary = summarizeRepositoryLockOutput(output, target, { members: [ROOT], recursive: true, isRoot: true });
     const expected = readScenarioAt(PARTIAL_ROOT_ROOT).steps[1].expect;
     assert.ok(expected);
-    // Платформа печатает XDTO-пакет русским видом «ПакетXDTO», а ONE_C_TYPE_NAMES знает его
-    // только как «XDTOPackage» — строка не распознаётся и отбрасывается как нераспознанный вид
-    // (расхождение реестра вне объёма issue #87, для рекурсивного корня на захват не влияет).
-    const unrecognized = ['ПакетXDTO.ПакетXDTO1'];
     assert.deepStrictEqual(
       [...summary.granted].sort(),
-      expected.grants.filter((name) => !unrecognized.includes(name)).map((name) => (name === 'ТорговыйУчет' ? ROOT : name)).sort()
+      expected.grants.map((name) => (name === 'ТорговыйУчет' ? ROOT : name)).sort()
     );
     assert.ok(summary.granted.includes(ROOT));
     assert.ok(!summary.granted.includes('ТорговыйУчет'));
     assert.ok(summary.granted.includes('Справочник.Валюты'));
+    assert.ok(summary.granted.includes('ПакетXDTO.ПакетXDTO1'), 'XDTO-пакет распознаётся под видом платформы (issue #88)');
     assert.deepStrictEqual(summary.refused, [{ fullName: 'Справочник.Банки', user: 'Petrov' }]);
   });
 
