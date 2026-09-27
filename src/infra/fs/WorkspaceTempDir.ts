@@ -7,8 +7,22 @@ import * as path from 'path';
  * кроме таких каталогов, — и создание, и подметание опираются на этот модуль.
  */
 
+function getWorkspaceServiceRoot(workspaceRoot: string): string {
+  return path.join(workspaceRoot, '.v8vscedit');
+}
+
+/**
+ * Файл в служебном `.v8vscedit/` рабочей области (бэкапы слияния, копии хранилища,
+ * кэши) — не файл конфигурации, даже если корень конфигурации совпадает с корнем
+ * рабочей области.
+ */
+export function isInsideWorkspaceServiceDir(workspaceRoot: string, filePath: string): boolean {
+  const relative = path.relative(getWorkspaceServiceRoot(workspaceRoot), filePath);
+  return relative.split(path.sep)[0] !== '..' && !path.isAbsolute(relative);
+}
+
 export function getImportTempRoot(workspaceRoot: string): string {
-  return path.join(workspaceRoot, '.v8vscedit', 'import-temp');
+  return path.join(getWorkspaceServiceRoot(workspaceRoot), 'import-temp');
 }
 
 export function createImportTempDir(workspaceRoot: string, prefix: string): string {

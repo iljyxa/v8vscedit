@@ -13,6 +13,7 @@ import { buildAgentDumpSessionId, pruneStaleAgentDumps } from '../../infra/agent
 import {
   createImportTempDir,
   getImportTempRoot,
+  isInsideWorkspaceServiceDir,
   isStale,
   pruneStaleImportTempDirs,
   readMtimeMs,
@@ -80,6 +81,22 @@ suite('WorkspaceTempDir — раскладка import-temp (issue #76)', () => {
     }
     assert.notStrictEqual(first, second);
   });
+});
+
+suite('WorkspaceTempDir — isInsideWorkspaceServiceDir (issue #79)', () => {
+  const root = path.join(path.sep, 'ws');
+  const cases: readonly { name: string; filePath: string; expected: boolean }[] = [
+    { name: 'бэкап слияния', filePath: path.join(root, '.v8vscedit', 'repository', 'merge', 's', 'b', 'ObjectModule.bsl'), expected: true },
+    { name: 'сам служебный каталог', filePath: path.join(root, '.v8vscedit'), expected: true },
+    { name: 'файл конфигурации', filePath: path.join(root, 'Catalogs', 'А', 'Ext', 'ObjectModule.bsl'), expected: false },
+    { name: 'каталог с похожим именем', filePath: path.join(root, '.v8vscedit-backup', 'x.bsl'), expected: false },
+    { name: 'служебный каталог другой рабочей области', filePath: path.join(path.sep, 'other', '.v8vscedit', 'x.bsl'), expected: false },
+  ];
+  for (const { name, filePath, expected } of cases) {
+    test(`${name} → ${String(expected)}`, () => {
+      assert.strictEqual(isInsideWorkspaceServiceDir(root, filePath), expected);
+    });
+  }
 });
 
 suite('WorkspaceTempDir — isStale', () => {

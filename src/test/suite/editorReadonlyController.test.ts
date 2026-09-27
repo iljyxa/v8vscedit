@@ -953,6 +953,29 @@ suite('EditorReadonlyController — файл проекта слева в сра
     assert.strictEqual(commandsOnProject(RESET_COMMAND), 1);
     assert.strictEqual(textTabsOf(copyUri).length, 0);
   });
+
+  // Issue #79: при configRoot = корню рабочей области служебный `.v8vscedit/` лежит внутри
+  // него, но это не файлы конфигурации — бэкап слева в сравнении не переключается.
+  test('бэкап слияния из .v8vscedit/ слева в сравнении → readonly-команды нет, временной вкладки нет; файл проекта переключён', async function () {
+    this.timeout(15_000);
+    const scopeDir = path.join(configRoot, '.v8vscedit', 'repository', 'merge', 'scope', '2024-06-01T12-00-00-000Z-keep-local');
+    fs.mkdirSync(scopeDir, { recursive: true });
+    const backupUri = vscode.Uri.file(path.join(scopeDir, 'ObjectModule.bsl'));
+    fs.writeFileSync(backupUri.fsPath, 'резервная копия', 'utf-8');
+    await vscode.commands.executeCommand('vscode.diff', backupUri, copyUri, 'бэкап', { preview: false, viewColumn: vscode.ViewColumn.One });
+    await showText(projectUri, vscode.ViewColumn.Two);
+    await vscode.commands.executeCommand('vscode.diff', backupUri, copyUri, 'бэкап', { preview: false, viewColumn: vscode.ViewColumn.One });
+    await waitFor(() => isActiveDiff(backupUri, copyUri, vscode.ViewColumn.One) && isVisible(copyUri) && isVisible(projectUri));
+    const started = start(false);
+
+    started.fire();
+    await started.settle();
+
+    assert.strictEqual(commandsOnProject(RESET_COMMAND), 1, describeTabs({ calls: spy?.calls, log: started.logLines }));
+    assert.ok(!spy?.calls.some((call) => call.activeUri === backupUri.toString()), 'бэкап не должен получать readonly-команду');
+    assert.strictEqual(textTabsOf(backupUri).length, 0);
+    assert.ok(isActiveDiff(backupUri, copyUri, vscode.ViewColumn.One));
+  });
 });
 
 /**
