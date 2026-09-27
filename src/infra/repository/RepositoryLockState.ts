@@ -11,7 +11,10 @@ import type { RepositoryTarget } from './RepositoryService';
  *    кроме точечно освобождённых (`releasedUnderRoot`);
  *  - `lockGroups` — якорь рекурсивного захвата → его состав на момент захвата;
  *  - `lockModes` — режим последнего захвата единицы. Запись без режима (сделанная до
- *    появления единиц-подчинённых) по-прежнему покрывает подчинённых своего владельца.
+ *    появления единиц-подчинённых) по-прежнему покрывает подчинённых своего владельца;
+ *  - `foreignLocks`/`serverOwnLocks`/`lockSync` — статусы захватов с сервера (issue #6).
+ *    Чужой захват сильнее локальной записи: объект не редактируется, но запись и снимок
+ *    захвата сохраняются — решает пользователь штатными командами.
  */
 interface RepositoryScopeState {
   connected?: boolean;
@@ -20,6 +23,11 @@ interface RepositoryScopeState {
   lockGroups?: Record<string, string[]>;
   releasedUnderRoot?: string[];
   lockModes?: Record<string, RepositoryLockMode>;
+  /** Чужие захваты по последнему опросу сервера и по отказам захвата (issue #6). */
+  foreignLocks?: Record<string, RepositoryLockHolder>;
+  /** Захваты нашего пользователя по данным сервера — в том числе сделанные вне проекта. */
+  serverOwnLocks?: Record<string, { lockedAt?: string }>;
+  lockSync?: { syncedAt: string; user: string; serverVersion?: string };
 }
 
 export type RepositoryLockMode = 'recursive' | 'object';
@@ -58,6 +66,42 @@ export interface RepositoryUnlockRequest {
   isRoot: boolean;
 }
 
+/** Держатель захвата на сервере: пользователь, время захвата (опрос) или время отказа захвата. */
+export interface RepositoryLockHolder {
+  readonly user: string;
+  readonly lockedAt?: string;
+  readonly observedAt?: string;
+}
+
+export type RepositoryLockInfo =
+  | { readonly state: 'free' }
+  | { readonly state: 'own'; readonly user?: string; readonly lockedAt?: string; readonly confirmed?: boolean; readonly syncedAt?: string }
+  | { readonly state: 'own-elsewhere'; readonly user: string; readonly lockedAt?: string }
+  | { readonly state: 'foreign'; readonly user: string; readonly lockedAt?: string; readonly observedAt?: string };
+
+export interface RepositoryServerLockSync {
+  readonly user: string;
+  readonly syncedAt: string;
+  readonly serverVersion?: string;
+  /** Ревизия состояния на момент начала опроса: изменилась — результат устарел. */
+  readonly basedOnRevision: number;
+  readonly foreign: Readonly<Record<string, RepositoryLockHolder>>;
+  readonly own: Readonly<Record<string, { lockedAt?: string }>>;
+}
+
+export interface RepositoryServerLockApplyResult {
+  changed: string[];
+  ownElsewhere: string[];
+  unconfirmed: string[];
+}
+
+/** Локальное время `YYYY-MM-DDTHH:mm:ss` — в том же виде, в каком сервер отдаёт время захвата. */
+export function toLocalTimestamp(date: Date): string {
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${String(date.getFullYear())}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+    + `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 const REPOSITORY_STATE_VERSION = 2;
 
 /** Ключ цели: общий для state.json, снимков, пароля хранилища и файлов Objects.xml. */
@@ -73,6 +117,11 @@ export function buildRepositoryScopeKey(target: RepositoryTarget): string {
 export class RepositoryLockState {
   private cache: { mtimeMs: number; value: RepositoryStateFile } | undefined;
   private readonly listeners = new Set<RepositoryLocksChangedListener>();
+  /**
+   * Счётчик записей состояния в этом процессе: опрос сервера сверяет его до и после
+   * чтения, чтобы не затереть захват, сделанный во время опроса.
+   */
+  private revision = 0;
 
   constructor(private readonly workspaceRoot: string) {}
 
@@ -98,24 +147,13 @@ export class RepositoryLockState {
 
   isLocked(target: RepositoryTarget, fullName: string): boolean {
     const scope = this.readScope(target);
-    if (!scope) {
-      return false;
-    }
-    if (isLockedDirectly(scope, fullName)) {
-      return true;
-    }
-    // Корень считается захваченным только явно: рекурсивный признак раскрывает
-    // захват на объекты, но не заменяет собой запись корня.
-    if (scope.rootRecursive === true && !isRootLockName(fullName) && !(scope.releasedUnderRoot ?? []).includes(fullName)) {
-      return true;
-    }
-    // Старая запись владельца без режима: подчинённые раньше захватывались вместе с ним.
-    return getRepositoryUnitAncestors(fullName)
-      .some((ancestor) => isLockedDirectly(scope, ancestor) && scope.lockModes?.[ancestor] === undefined);
+    return scope !== undefined && !isForeignLocked(scope, fullName) && isLockedLocally(scope, fullName);
   }
 
   isRootLocked(target: RepositoryTarget): boolean {
-    return this.readScope(target)?.lockedFullNames.includes(getRootLockName(target)) ?? false;
+    const scope = this.readScope(target);
+    const root = getRootLockName(target);
+    return scope !== undefined && !isForeignLocked(scope, root) && scope.lockedFullNames.includes(root);
   }
 
   isRootRecursiveLocked(target: RepositoryTarget): boolean {
@@ -143,6 +181,12 @@ export class RepositoryLockState {
         const mode = request.mode;
         members.forEach((fullName) => { lockModes[fullName] = mode; });
       }
+      // Сервер только что выдал захват: чужая отметка устарела, а свой захват подтверждён
+      // (иначе до следующего опроса узел показывал бы «сервер не подтверждает»).
+      const serverOwnLocks = { ...(scope.serverOwnLocks ?? {}) };
+      if (scope.lockSync) {
+        members.forEach((fullName) => { serverOwnLocks[fullName] = serverOwnLocks[fullName] ?? {}; });
+      }
       return {
         ...scope,
         lockedFullNames: sortNames([...locked]),
@@ -150,6 +194,8 @@ export class RepositoryLockState {
         lockGroups,
         releasedUnderRoot: released,
         lockModes,
+        foreignLocks: withoutKeys(scope.foreignLocks, members),
+        serverOwnLocks,
       };
     });
     this.emit(target, members);
@@ -169,7 +215,14 @@ export class RepositoryLockState {
     this.updateScope(target, (scope) => {
       if (request.isRoot && request.recursive) {
         removed = sortNames([...new Set([...scope.lockedFullNames, ...request.members, request.anchor])]);
-        return { connected: scope.connected, lockedFullNames: [] };
+        // Данные опроса не относятся к локальным захватам: чужие захваты остаются в силе.
+        return {
+          connected: scope.connected,
+          lockedFullNames: [],
+          foreignLocks: scope.foreignLocks,
+          serverOwnLocks: withoutKeys(scope.serverOwnLocks, removed),
+          lockSync: scope.lockSync,
+        };
       }
       const affected = new Set<string>([request.anchor, ...request.members]);
       if (request.recursive) {
@@ -195,6 +248,7 @@ export class RepositoryLockState {
         lockGroups,
         releasedUnderRoot: sortNames([...released]),
         lockModes: withoutKeys(scope.lockModes, [...affected]),
+        serverOwnLocks: withoutKeys(scope.serverOwnLocks, [...affected]),
       };
     });
     this.emit(target, removed);
@@ -209,9 +263,107 @@ export class RepositoryLockState {
     this.updateScope(target, (scope) => {
       const items = new Set(scope.lockedFullNames);
       fullNames.forEach((fullName) => (locked ? items.add(fullName) : items.delete(fullName)));
-      return { ...scope, lockedFullNames: sortNames([...items]) };
+      return {
+        ...scope,
+        lockedFullNames: sortNames([...items]),
+        serverOwnLocks: locked ? scope.serverOwnLocks : withoutKeys(scope.serverOwnLocks, fullNames),
+      };
     });
     this.emit(target, fullNames);
+  }
+
+  getRevision(): number {
+    return this.revision;
+  }
+
+  /** Версия сервера последнего успешного опроса — первая попытка рукопожатия следующего. */
+  getServerVersion(target: RepositoryTarget): string | undefined {
+    return this.readScope(target)?.lockSync?.serverVersion;
+  }
+
+  /**
+   * Состояние захвата объекта для отображения. Порядок: чужой захват сильнее локального;
+   * локальный — подтверждён сервером или нет (если опрос был); захват нашего
+   * пользователя только на сервере — `own-elsewhere`.
+   */
+  getLockInfo(target: RepositoryTarget, fullName: string): RepositoryLockInfo {
+    const scope = this.readScope(target);
+    if (!scope) {
+      return { state: 'free' };
+    }
+    const foreign = scope.foreignLocks?.[fullName];
+    if (foreign) {
+      return { state: 'foreign', user: foreign.user, lockedAt: foreign.lockedAt, observedAt: foreign.observedAt };
+    }
+    const serverOwn = scope.serverOwnLocks?.[fullName];
+    const sync = scope.lockSync;
+    if (isLockedLocally(scope, fullName)) {
+      if (!sync) {
+        return { state: 'own' };
+      }
+      return serverOwn
+        ? { state: 'own', user: sync.user, lockedAt: serverOwn.lockedAt, confirmed: true, syncedAt: sync.syncedAt }
+        : { state: 'own', user: sync.user, confirmed: false, syncedAt: sync.syncedAt };
+    }
+    return serverOwn && sync ? { state: 'own-elsewhere', user: sync.user, lockedAt: serverOwn.lockedAt } : { state: 'free' };
+  }
+
+  /**
+   * Результат опроса сервера целиком заменяет чужие и свои серверные захваты цели.
+   * `null` — состояние менялось во время опроса (ревизия), результат устарел.
+   */
+  applyServerLocks(target: RepositoryTarget, sync: RepositoryServerLockSync): RepositoryServerLockApplyResult | null {
+    if (sync.basedOnRevision !== this.revision) {
+      return null;
+    }
+    const before = this.readScope(target);
+    const foreign = { ...sync.foreign };
+    const own = { ...sync.own };
+    let scope: RepositoryScopeState = { lockedFullNames: [] };
+    this.updateScope(target, (current) => {
+      scope = {
+        ...current,
+        foreignLocks: foreign,
+        serverOwnLocks: own,
+        lockSync: { syncedAt: sync.syncedAt, user: sync.user, serverVersion: sync.serverVersion },
+      };
+      return scope;
+    });
+    const changed = sortNames([...new Set([
+      ...changedKeys(before?.foreignLocks, foreign),
+      ...changedKeys(before?.serverOwnLocks, own),
+    ])]);
+    const localNames = collectLocalLockNames(scope);
+    const result: RepositoryServerLockApplyResult = {
+      changed,
+      ownElsewhere: sortNames(Object.keys(own).filter((fullName) => !isLockedLocally(scope, fullName))),
+      unconfirmed: sortNames(localNames.filter((fullName) => !(fullName in own) && !(fullName in foreign))),
+    };
+    this.emit(target, changed);
+    return result;
+  }
+
+  /**
+   * Отметки «захвачено другим» из вывода отказа захвата. Время захвата пакетный режим не
+   * выводит: у того же держателя сохраняется время из опроса, у нового — только `observedAt`.
+   */
+  applyLockRefusals(target: RepositoryTarget, refusals: readonly { fullName: string; user: string }[], observedAt: string): string[] {
+    if (refusals.length === 0) {
+      return [];
+    }
+    this.updateScope(target, (scope) => {
+      const foreignLocks = { ...(scope.foreignLocks ?? {}) };
+      for (const refusal of refusals) {
+        const known = foreignLocks[refusal.fullName] as RepositoryLockHolder | undefined;
+        foreignLocks[refusal.fullName] = known?.user === refusal.user
+          ? { ...known, observedAt }
+          : { user: refusal.user, observedAt };
+      }
+      return { ...scope, foreignLocks };
+    });
+    const changed = sortNames([...new Set(refusals.map((refusal) => refusal.fullName))]);
+    this.emit(target, changed);
+    return changed;
   }
 
   onDidChangeLocks(listener: RepositoryLocksChangedListener): { dispose(): void } {
@@ -225,6 +377,7 @@ export class RepositoryLockState {
     scope?.lockedFullNames.forEach((fullName) => allObjects.add(fullName));
     Object.values(scope?.lockGroups ?? {}).forEach((members) => members.forEach((fullName) => allObjects.add(fullName)));
     scope?.releasedUnderRoot?.forEach((fullName) => allObjects.add(fullName));
+    Object.keys(scope?.foreignLocks ?? {}).forEach((fullName) => allObjects.add(fullName));
     const event: RepositoryLocksChangedEvent = { target, fullNames: [...fullNames], allObjects: sortNames([...allObjects]) };
     for (const listener of [...this.listeners]) {
       try {
@@ -263,6 +416,7 @@ export class RepositoryLockState {
   }
 
   private save(state: RepositoryStateFile): void {
+    this.revision += 1;
     const filePath = this.getStateFilePath();
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
@@ -323,7 +477,67 @@ function sanitizeScope(raw: Record<string, unknown>): RepositoryScopeState {
       Object.entries(raw.lockModes).filter((entry): entry is [string, RepositoryLockMode] => isLockMode(entry[1]))
     );
   }
+  if (isRecord(raw.foreignLocks)) {
+    scope.foreignLocks = sanitizeRecord(raw.foreignLocks, (value) =>
+      isRecord(value) && typeof value.user === 'string'
+        ? { user: value.user, ...optionalText('lockedAt', value.lockedAt), ...optionalText('observedAt', value.observedAt) }
+        : undefined);
+  }
+  if (isRecord(raw.serverOwnLocks)) {
+    scope.serverOwnLocks = sanitizeRecord(raw.serverOwnLocks, (value) =>
+      isRecord(value) ? optionalText('lockedAt', value.lockedAt) : undefined);
+  }
+  const sync = raw.lockSync;
+  if (isRecord(sync) && typeof sync.syncedAt === 'string' && typeof sync.user === 'string') {
+    scope.lockSync = { syncedAt: sync.syncedAt, user: sync.user, ...optionalText('serverVersion', sync.serverVersion) };
+  }
   return scope;
+}
+
+function sanitizeRecord<T>(raw: Record<string, unknown>, sanitize: (value: unknown) => T | undefined): Record<string, T> {
+  const result: Record<string, T> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const item = sanitize(value);
+    if (item !== undefined) {
+      result[key] = item;
+    }
+  }
+  return result;
+}
+
+function optionalText<K extends string>(key: K, value: unknown): Partial<Record<K, string>> {
+  return typeof value === 'string' ? ({ [key]: value } as Partial<Record<K, string>>) : {};
+}
+
+/** Имена с явной локальной записью захвата (без раскрытия рекурсивного корня). */
+function collectLocalLockNames(scope: RepositoryScopeState): string[] {
+  return [...new Set([...scope.lockedFullNames, ...Object.values(scope.lockGroups ?? {}).flat()])];
+}
+
+/** Ключи, у которых значение появилось, исчезло или изменилось. */
+function changedKeys(before: Readonly<Record<string, unknown>> | undefined, after: Readonly<Record<string, unknown>>): string[] {
+  const previous = before ?? {};
+  return [...new Set([...Object.keys(previous), ...Object.keys(after)])]
+    .filter((key) => JSON.stringify(previous[key]) !== JSON.stringify(after[key]));
+}
+
+function isForeignLocked(scope: RepositoryScopeState, fullName: string): boolean {
+  return scope.foreignLocks?.[fullName] !== undefined;
+}
+
+/** Локальный захват без учёта чужих: явная запись, рекурсивный корень или старая запись владельца. */
+function isLockedLocally(scope: RepositoryScopeState, fullName: string): boolean {
+  if (isLockedDirectly(scope, fullName)) {
+    return true;
+  }
+  // Корень считается захваченным только явно: рекурсивный признак раскрывает
+  // захват на объекты, но не заменяет собой запись корня.
+  if (scope.rootRecursive === true && !isRootLockName(fullName) && !(scope.releasedUnderRoot ?? []).includes(fullName)) {
+    return true;
+  }
+  // Старая запись владельца без режима: подчинённые раньше захватывались вместе с ним.
+  return getRepositoryUnitAncestors(fullName)
+    .some((ancestor) => isLockedDirectly(scope, ancestor) && scope.lockModes?.[ancestor] === undefined);
 }
 
 function isLockMode(value: unknown): value is RepositoryLockMode {
@@ -336,7 +550,7 @@ function isLockedDirectly(scope: RepositoryScopeState, fullName: string): boolea
     || Object.values(scope.lockGroups ?? {}).some((members) => members.includes(fullName));
 }
 
-function withoutKeys(record: Readonly<Record<string, RepositoryLockMode>> | undefined, keys: readonly string[]): Record<string, RepositoryLockMode> {
+function withoutKeys<T>(record: Readonly<Record<string, T>> | undefined, keys: readonly string[]): Record<string, T> {
   return Object.fromEntries(Object.entries(record ?? {}).filter(([key]) => !keys.includes(key)));
 }
 
@@ -357,6 +571,15 @@ function compactScope(scope: RepositoryScopeState): RepositoryScopeState {
   }
   if (scope.lockModes && Object.keys(scope.lockModes).length > 0) {
     result.lockModes = scope.lockModes;
+  }
+  if (scope.foreignLocks && Object.keys(scope.foreignLocks).length > 0) {
+    result.foreignLocks = scope.foreignLocks;
+  }
+  if (scope.serverOwnLocks && Object.keys(scope.serverOwnLocks).length > 0) {
+    result.serverOwnLocks = scope.serverOwnLocks;
+  }
+  if (scope.lockSync) {
+    result.lockSync = scope.lockSync;
   }
   return result;
 }

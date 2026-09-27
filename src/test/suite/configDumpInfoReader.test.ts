@@ -5,6 +5,7 @@ import * as path from 'path';
 import {
   parseConfigDumpInfo,
   parseConfigDumpInfoEntries,
+  parseConfigDumpInfoUnitIds,
   readConfigDumpInfoFile,
 } from '../../infra/xml/ConfigDumpInfoReader';
 
@@ -110,5 +111,34 @@ suite('ConfigDumpInfoReader — parseConfigDumpInfo/readConfigDumpInfoFile', () 
     assert.strictEqual(map.get('Catalog.Товары'), 'root-hash');
     assert.strictEqual(map.get('Catalog.Товары.ObjectModule'), 'module-hash');
     assert.strictEqual(map.has('Catalog.Товары.Attribute.Артикул'), false);
+  });
+});
+
+/**
+ * Issue #6: uuid единицы хранилища (OBJID в 1CD и ответе сервера) = uuid записи
+ * ConfigDumpInfo.xml с `configVersion`. Записи модулей (`<uuid>.0` и т.п.) и вложенные
+ * ссылки без версии единицами не являются.
+ */
+suite('ConfigDumpInfoReader — parseConfigDumpInfoUnitIds (issue #6)', () => {
+  const text = fs.readFileSync(path.join(EXAMPLE_2_21_CF, 'ConfigDumpInfo.xml'), 'utf-8');
+
+  test('uuid → имя единицы: справочник и его форма', () => {
+    const ids = parseConfigDumpInfoUnitIds(text);
+    assert.strictEqual(ids.get('2c53bb9d-bda3-431e-95f5-0d4145c8ac74'), 'Catalog.Контрагенты');
+    assert.strictEqual(ids.get('aee063ce-8ead-4c2e-9d7b-1bff5536f475'), 'Catalog.Контрагенты.Form.ФормаСписка');
+  });
+
+  test('ключей с суффиксом .N нет; записей без configVersion нет', () => {
+    const ids = parseConfigDumpInfoUnitIds(text);
+    assert.ok([...ids.keys()].every((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)));
+    const versioned = new Set(parseConfigDumpInfoEntries(text).map((entry) => entry.name));
+    assert.ok([...ids.values()].every((name) => versioned.has(name)));
+    assert.ok(![...ids.values()].includes('Catalog.Контрагенты.Attribute.ИНН'));
+  });
+
+  test('BOM снимается; uuid в верхнем регистре нормализуется', () => {
+    assert.strictEqual(text.charCodeAt(0), 0xfeff, 'фикстура с BOM');
+    const upper = text.replace('2c53bb9d-bda3-431e-95f5-0d4145c8ac74', '2C53BB9D-BDA3-431E-95F5-0D4145C8AC74');
+    assert.strictEqual(parseConfigDumpInfoUnitIds(upper).get('2c53bb9d-bda3-431e-95f5-0d4145c8ac74'), 'Catalog.Контрагенты');
   });
 });

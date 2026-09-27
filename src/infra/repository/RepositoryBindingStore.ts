@@ -4,6 +4,8 @@ import type { ProjectSecretStorage } from '../environment/ProjectSecretStorage';
 import { buildRepositoryScopeKey } from './RepositoryLockState';
 import type { RepositoryBinding, RepositoryTarget, StoredRepositoryBinding } from './RepositoryService';
 
+const PLATFORM_VERSION_RE = /\d+\.\d+\.\d+\.\d+/;
+
 interface CachedEnv {
   mtimeMs: number;
   value: Record<string, unknown>;
@@ -91,6 +93,19 @@ export class RepositoryBindingStore {
     }
     const repoPassword = await this.secrets.getRepoPassword(buildRepositoryScopeKey(target));
     return { repoPath: stored.repoPath, repoUser: stored.repoUser, repoPassword: repoPassword ?? '' };
+  }
+
+  /**
+   * Версия платформы проекта для первого вызова сервера хранилища: `--v8version`, иначе
+   * версия-подстрока пути `--path`. Читает уже кэшируемый env.json.
+   */
+  readPlatformVersionHint(): string | undefined {
+    const defaults = getDefaultSection(this.readEnvFile());
+    const explicit = readString(defaults['--v8version'])?.trim();
+    if (explicit) {
+      return explicit;
+    }
+    return PLATFORM_VERSION_RE.exec(readString(defaults['--path']) ?? '')?.[0];
   }
 
   hasBinding(target: RepositoryTarget): boolean {

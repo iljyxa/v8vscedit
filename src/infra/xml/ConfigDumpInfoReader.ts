@@ -15,6 +15,8 @@ export interface ConfigDumpInfoEntry {
  */
 const METADATA_TAG_RE = /<Metadata\b([^>]*?)\/?>/g;
 const ATTRIBUTE_RE = /\b(name|id|configVersion)="([^"]*)"/g;
+/** Голый uuid: у записей модулей и вложенных частей id с суффиксом (`<uuid>.0`). */
+const UNIT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Все записи с `configVersion` в порядке следования в файле. */
 export function parseConfigDumpInfoEntries(xmlText: string): ConfigDumpInfoEntry[] {
@@ -33,6 +35,16 @@ export function parseConfigDumpInfoEntries(xmlText: string): ConfigDumpInfoEntry
     entries.push({ name, id: attributes.get('id') ?? '', configVersion });
   }
   return entries;
+}
+
+/**
+ * Карта `uuid единицы → имя записи` для записей с `configVersion`: uuid единицы хранилища
+ * (OBJID в 1CD и в ответе сервера) совпадает с uuid объекта выгрузки.
+ */
+export function parseConfigDumpInfoUnitIds(xmlText: string): ReadonlyMap<string, string> {
+  return new Map(parseConfigDumpInfoEntries(xmlText)
+    .filter((entry) => UNIT_ID_RE.test(entry.id))
+    .map((entry): [string, string] => [entry.id.toLowerCase(), entry.name]));
 }
 
 /** Карта `name → configVersion` для записей с версией; нераспознанный текст — пустая карта. */

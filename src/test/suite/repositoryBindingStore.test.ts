@@ -128,3 +128,37 @@ suite('RepositoryBindingStore — граничные ветки (issue #1)', () 
     assert.strictEqual(store.hasBinding(cfTarget), false);
   });
 });
+
+/**
+ * Issue #6: подсказка версии платформы для рукопожатия с сервером хранилища —
+ * `--v8version`, иначе версия-подстрока пути `--path` к платформе.
+ */
+suite('RepositoryBindingStore — readPlatformVersionHint (issue #6)', () => {
+  let workspaceRoot: string;
+  let store: RepositoryBindingStore;
+
+  setup(() => {
+    workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-binding-hint-'));
+    store = new RepositoryBindingStore(workspaceRoot, new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot));
+  });
+
+  teardown(() => {
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  });
+
+  const cases: [string, string | undefined, string | undefined][] = [
+    ['--v8version задан', JSON.stringify({ default: { '--v8version': ' 8.3.27.2342 ', '--path': '/opt/1cv8/x86_64/8.5.1.1529/1cv8' } }), '8.3.27.2342'],
+    ['--v8version пуст — версия из --path', JSON.stringify({ default: { '--v8version': '', '--path': '/opt/1cv8/x86_64/8.5.1.1529/1cv8' } }), '8.5.1.1529'],
+    ['ни версии, ни версии в пути', JSON.stringify({ default: { '--path': '/usr/bin/1cv8' } }), undefined],
+    ['пустой env.json', '', undefined],
+    ['env.json нет', undefined, undefined],
+  ];
+  for (const [title, content, expected] of cases) {
+    test(title, () => {
+      if (content !== undefined) {
+        fs.writeFileSync(store.getEnvJsonPath(), content, 'utf-8');
+      }
+      assert.strictEqual(store.readPlatformVersionHint(), expected);
+    });
+  }
+});
