@@ -57,6 +57,8 @@ import type { CommandServices, NodeArg } from '../../ui/commands/_shared';
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import { createArgsRecordingDesigner } from './support/argsRecordingDesigner';
+import { installFakeWebviewPanels } from './support/fakeWebviewPanel';
+import { RepositoryCommitViewProvider } from '../../ui/views/RepositoryCommitViewProvider';
 import {
   DEFAULT_REPOSITORY_FILE_SYNC_DEPS,
   type RepositoryFileSyncDeps,
@@ -881,6 +883,39 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
         assert.strictEqual(treeRefreshes, 0);
         assert.strictEqual(actionsRefreshes, 0);
       });
+    });
+
+    /**
+     * Issue #102: с настоящим провайдером формы команда доходит до Конфигуратора.
+     * Webview после загрузки шлёт `ready` — раньше провайдер принимал его за отмену
+     * и закрывал форму, не дав пользователю её заполнить.
+     */
+    test('repository.commit с настоящей формой: ready не отменяет помещение, submit доводит до CLI «repository-commit» (issue #102)', async () => {
+      const panels = installFakeWebviewPanels();
+      const commitView = new RepositoryCommitViewProvider(vscode.Uri.file(path.resolve(__dirname, '../../../')));
+      panels.onHtml = (panel) => {
+        setTimeout(() => {
+          panel.receive({ type: 'ready' });
+          panel.receive({
+            type: 'command',
+            command: 'submit',
+            payload: { comment: 'Правка формы элемента', recursive: false, keepLocked: true, force: false },
+          });
+        }, 0);
+      };
+      servicesBox.current = { ...servicesBox.current, repositoryCommitViewProvider: commitView };
+      try {
+        await vscode.commands.executeCommand('v8vscedit.repository.commit', catalogNode(true));
+      } finally {
+        commitView.dispose();
+        panels.restore();
+      }
+
+      assert.strictEqual(panels.panels.length, 1);
+      assert.deepStrictEqual(cliRequests.map((request) => request.command), ['repository-commit']);
+      const args = cliRequests[0].extraArgs;
+      assert.strictEqual(args[args.indexOf('-Comment') + 1], 'Правка формы элемента');
+      assert.strictEqual(treeRefreshes, 1);
     });
 
     test('repository.lock: захват без рекурсии записан в состояние, объект захвачен', async () => {
