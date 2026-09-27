@@ -112,7 +112,10 @@
   `onecd/OneCdFile.ts`+`OneCdTable.ts` для 1CD, `crs/CrsClient.ts`+`infra/xml/CrsMessageXml.ts` для
   crserver), а не встроенный парсинг внутри класса источника. Тест — на реальных байтах/файлах,
   снятых с платформы (генератор `example/tools/build-repository-locks.mjs`), синтетика недопустима —
-  формат недокументирован платформой.
+  формат недокументирован платформой. После `connect`/`create` (без `-NoBind`) опрос вызывается не из
+  самой команды, а из `ui/commands/repository/RepositoryBindFlow.ts` (`completeRepositoryBind`) через тот
+  же `syncTarget` — новый источник не требует отдельной интеграции для этого пути (issue #106, см.
+  [repository-file-sync.md](./repository-file-sync.md#статусы-захватов-с-сервера)).
 - **Новая операция, запускающая Конфигуратор для полного импорта/обновления/применения конфигурации к
   базе** (аналог `importConfigurations`/`updateChangedConfigurations`/`runPostRepositorySync`): захват —
   через `services.configurationOperationGuard` (`runExclusive(title, op)` для одной атомарной цепочки

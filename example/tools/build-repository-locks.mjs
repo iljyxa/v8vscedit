@@ -30,6 +30,12 @@
 //      под Petrov;
 //   3. шаги захвата из сценария; шаг с expectRefusal — ожидаемый отказ (код 1), /Out шага с log
 //      сохраняется и сверяется с expect;
+//   3б. (секция binds сценария, issue #106 — example/repository/2.21-bind) привязка к хранилищу
+//      новой базы: base "empty" — пустая, "loaded" — с загруженной конфигурацией шага 1;
+//      /ConfigurationRepositoryBindCfg -forceBindAlreadyBindedUser [-forceReplaceCfg, если
+//      forceReplaceCfg не false]; /Out сохраняется в log и сверяется с expect (unmarked — точный
+//      список блока «Обнаружены объекты, захваченные в хранилище, но непомеченные как захваченные в
+//      конфигурации:», contains — подстрока); expectFailure — ожидаемый отказ;
 //   4. (--network) обмены собственным минимальным клиентом этого скрипта (он написан независимо от
 //      продуктового TypeScript — байты продукта обязаны совпасть с ним); запрос Конфигуратора
 //      снимается записывающим tcp-прокси при /ConfigurationRepositoryReport;
@@ -159,6 +165,13 @@ async function main() {
     verifyRefusals(readFileSync(path.join(outDir, 'lock-refused.out.txt')));
   }
 
+  if (scenario.binds) {
+    step('3б. Привязка баз к хранилищу');
+    for (const [index, bind] of scenario.binds.entries()) {
+      await runBind(bind, index, { work, repoAddress, source, outDir });
+    }
+  }
+
   let designerRequest;
   if (crserver) {
     step('4. Обмены с crserver');
@@ -278,6 +291,59 @@ function verifyStepLog(raw, expect, what) {
       + `  получены отказы:   ${refusals.join(', ')}\n${text}`);
   }
   console.log(`  ${what}: захваты [${grants.join(', ')}], отказы [${refusals.join(', ')}]`);
+}
+
+/**
+ * Привязка базы к хранилищу пользователем сценария (issue #106): empty — новая пустая база,
+ * loaded — база с загруженной конфигурацией. /Out сохраняется и сверяется с expect.
+ */
+async function runBind(bind, index, context) {
+  const user = scenario.users.find((candidate) => candidate.name === bind.user);
+  const base = await createBase(context.work, `Bind${String(index)}`);
+  if (bind.base === 'loaded') {
+    await ibcmd(base, 'infobase', 'config', 'import', context.source);
+    await ibcmd(base, 'infobase', 'config', 'apply', '--force');
+  } else if (bind.base !== 'empty') {
+    fail(`binds[${String(index)}]: неизвестная база ${String(bind.base)}`);
+  }
+  const command = ['/ConfigurationRepositoryBindCfg', '-forceBindAlreadyBindedUser'];
+  if (bind.forceReplaceCfg !== false) {
+    command.push('-forceReplaceCfg');
+  }
+  const log = await designer(base, context.work, context.repoAddress, user, command,
+    { expectFailure: bind.expectFailure === true });
+  copyFileSync(log, path.join(context.outDir, bind.log));
+  verifyBindLog(readFileSync(log), bind.expect ?? {}, bind.log);
+}
+
+/**
+ * Сверка /Out привязки: unmarked — точный список строк блока «Обнаружены объекты, захваченные в
+ * хранилище, но непомеченные как захваченные в конфигурации:» (строки блока начинаются с таба);
+ * contains — подстрока вывода.
+ */
+function verifyBindLog(raw, expect, what) {
+  const text = decodeDesignerLog(raw);
+  if (expect.contains !== undefined && !text.includes(expect.contains)) {
+    fail(`${what}: в выводе нет «${expect.contains}»\n${text}`);
+  }
+  if (expect.unmarked) {
+    const lines = text.split('\n');
+    const header = lines.findIndex((line) => line.startsWith('Обнаружены объекты, захваченные в хранилище'));
+    const unmarked = [];
+    for (const line of header < 0 ? [] : lines.slice(header + 1)) {
+      if (!line.startsWith('\t')) {
+        break;
+      }
+      unmarked.push(line.trim());
+    }
+    if (JSON.stringify(unmarked) !== JSON.stringify(expect.unmarked)) {
+      fail(`${what}: блок непомеченных захватов не совпадает со сценарием\n  ожидалось: ${expect.unmarked.join(', ')}\n`
+        + `  получено:  ${unmarked.join(', ')}\n${text}`);
+    }
+    console.log(`  ${what}: непомеченные захваты [${unmarked.join(', ')}]`);
+  } else {
+    console.log(`  ${what}: вывод содержит «${String(expect.contains)}»`);
+  }
 }
 
 function verifyDatabaseLocks(database, run) {

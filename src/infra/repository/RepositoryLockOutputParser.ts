@@ -137,3 +137,58 @@ export function selectLockedMembers(candidates: readonly string[], summary: Repo
   }
   return [...selected].sort((left, right) => left.localeCompare(right, 'ru'));
 }
+
+const BIND_UNMARKED_HEADER = 'Обнаружены объекты, захваченные в хранилище, но непомеченные как захваченные в конфигурации:';
+
+/**
+ * Имена из блока «Обнаружены объекты, захваченные в хранилище, но непомеченные как захваченные
+ * в конфигурации:» вывода /ConfigurationRepositoryBindCfg (issue #106): платформа печатает
+ * заголовок, затем по строке с табом в начале на каждый захват пользователя, который в
+ * привязываемой базе не помечен захваченным. Это единственный след своих захватов, доступный
+ * без опроса сервера. CRLF допустим; без блока — []. Порядок — как в выводе, без повторов.
+ */
+export function parseRepositoryBindUnmarkedLocks(output: string): string[] {
+  const lines = output.replace(/\r\n?/g, '\n').split('\n');
+  const header = lines.findIndex((line) => line.trim() === BIND_UNMARKED_HEADER);
+  if (header < 0) {
+    return [];
+  }
+  const names = new Set<string>();
+  for (const line of lines.slice(header + 1)) {
+    if (!line.startsWith('\t')) {
+      break;
+    }
+    names.add(line.trim());
+  }
+  return [...names];
+}
+
+/**
+ * Имена из вывода привязки → fullName state.json (как у отказа захвата: корень — голым именем
+ * конфигурации). Нераспознанные — отдельно: у пустого проекта имя корня хранилища не совпадает
+ * с именем цели. fullNames — без повторов, в порядке state.json.
+ */
+export function resolveBindReportedUnits(
+  objectNames: readonly string[],
+  target: RepositoryTarget
+): { fullNames: string[]; unrecognized: string[] } {
+  const fullNames = new Set<string>();
+  const unrecognized = new Set<string>();
+  for (const objectName of objectNames) {
+    const fullName = resolveRefusedUnit(objectName, target);
+    if (fullName) {
+      fullNames.add(fullName);
+    } else {
+      unrecognized.add(objectName);
+    }
+  }
+  return {
+    fullNames: [...fullNames].sort((left, right) => left.localeCompare(right, 'ru')),
+    unrecognized: [...unrecognized],
+  };
+}
+
+/** Отказ привязки из-за непустой конфигурации базы (платформа печатает «Конфигурация не пустая!»). */
+export function isRepositoryBindNotEmptyFailure(output: string): boolean {
+  return output.includes('Конфигурация не пустая!');
+}
