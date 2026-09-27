@@ -474,6 +474,11 @@
         "icon": "$(graph)"
       },
       {
+        "command": "v8vscedit.repository.refreshLocks",
+        "title": "Обновить статусы захватов",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "v8vscedit.repository.setLabel",
         "title": "Установить метку версии",
         "icon": "$(tag)"

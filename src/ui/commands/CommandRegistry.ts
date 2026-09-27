@@ -17,6 +17,7 @@ import { registerOpenXmlCommand } from './open/OpenXmlCommand';
 import { registerShowPropertiesCommand } from './properties/ShowPropertiesCommand';
 import { registerInitializeProjectCommand } from './project/InitializeProjectCommand';
 import { registerRepositoryCommands } from './repository/RepositoryCommands';
+import { registerRepositoryLockStatusCommands } from './repository/RepositoryLockStatusCommands';
 import { registerRoleRightsCommands } from './role/RoleRightsCommands';
 import { registerTreeSearchCommands } from './search/TreeSearchCommands';
 import { registerInstallAiSkillsCommand } from './skills/InstallAiSkillsCommand';
@@ -60,4 +61,5 @@ export function registerCommands(
   registerInstallAiSkillsCommand(context, services);
   registerExtensionCommands(context, services);
   registerRepositoryCommands(context, services);
+  registerRepositoryLockStatusCommands(context, services);
 }

@@ -42,7 +42,8 @@ export interface RepositoryCliRequest {
 export type RepositoryCliResult =
   | { status: 'done' }
   | { status: 'interrupted'; message: string }
-  | { status: 'failed'; message: string };
+  /** `output` — вывод /Out Конфигуратора: по нему распознаются отказы захвата. */
+  | { status: 'failed'; message: string; output?: string };
 
 interface RepositoryCliRunOptions {
   command: string;
@@ -195,7 +196,7 @@ async function runRepositoryDesigner(
       const message = `Ошибка при ${operation}: ${reason}`;
       services.outputChannel.appendLine(`[repository][error] ${message}`);
       endRepositoryOperationStatus(title, 'ошибка');
-      return { status: 'failed', message };
+      return { status: 'failed', message, output: logContent };
     }
 
     services.outputChannel.appendLine(`[repository] Завершено: ${commandAsText}`);
@@ -586,7 +587,7 @@ function readLogFileContent(outFile: string): string {
   }
 }
 
-function decodeLogFile(data: Buffer): string {
+export function decodeLogFile(data: Buffer): string {
   if (data.length >= 2 && data[0] === 0xff && data[1] === 0xfe) {
     return data.subarray(2).toString('utf16le');
   }

@@ -75,6 +75,7 @@ import { AiMcpViewProvider } from './ui/views/ai/AiMcpViewProvider';
 import { AiSecretStorage } from './infra/ai/AiSecretStorage';
 import { disposeCachedAgentOperationServices, setProjectSecretStorage } from './ui/commands/ext/ExtensionCommandRunner';
 import { disposeRepositoryCommandStatusBar } from './ui/commands/repository/RepositoryCommandRunner';
+import { syncRepositoryLockStatusesOnStartup } from './ui/commands/repository/RepositoryLockStatusCommands';
 import { GitStateObserver } from './ui/git/GitStateObserver';
 import type { GitApiLike, GitExtensionLike } from './ui/git/gitExtensionApi';
 
@@ -368,6 +369,7 @@ export class Container {
     c.wireCommands();
     c.wireReadonlyGuard();
     c.reloadEntries();
+    void syncRepositoryLockStatusesOnStartup(c.buildCommandServices(), vscode.workspace.isTrusted);
     c.wireMcpConfigurationWatcher();
     c.startMcpServer();
     c.wireLsp();
