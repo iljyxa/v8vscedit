@@ -639,3 +639,20 @@ export async function reportMergeOutcome(
     );
   }
 }
+
+/**
+ * Сбой после записи файлов проекта: общий reportFlowError не говорит, где лежат прежние
+ * версии, и пользователь считает правки потерянными. Каталога нет — копий не снималось.
+ */
+export function reportBackupsAfterFailure(
+  services: Pick<RepositoryFileSyncServices, 'outputChannel'>,
+  deps: Pick<RepositoryFileSyncDeps, 'notifyWarning'>,
+  objectLabel: string,
+  backupDir: string
+): void {
+  if (!fs.existsSync(backupDir)) {
+    return;
+  }
+  services.outputChannel.appendLine(`[repository][file-sync][warn] «${objectLabel}»: синхронизация файлов прервана, резервные копии: ${backupDir}`);
+  deps.notifyWarning(`«${objectLabel}»: синхронизация файлов прервана, прежние версии файлов проекта сохранены в ${backupDir}`);
+}

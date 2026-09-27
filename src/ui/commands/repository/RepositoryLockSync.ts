@@ -39,6 +39,12 @@ import { readConfigDumpInfoFile } from '../../../infra/xml/ConfigDumpInfoReader'
 import { buildRepositoryLockRequest, buildRepositoryUpdateRequest } from './RepositoryCommandRunner';
 import { refreshRepositoryUi } from './RepositoryDatabaseSync';
 import {
+  captureRootManifestStep,
+  captureUnitSnapshotStep,
+  reportSnapshotFailures,
+  type SnapshotStepFailure,
+} from './RepositorySnapshotSteps';
+import {
   applyMergeWithPostMutation,
   buildOperationBackupDir,
   DEFAULT_REPOSITORY_FILE_SYNC_DEPS,
@@ -48,6 +54,7 @@ import {
   prepareRepositorySubject,
   reportCliOutcome,
   reportFlowError,
+  reportBackupsAfterFailure,
   reportMergeOutcome,
   resolveConflictChoice,
   resolveMergeScope,
@@ -539,25 +546,38 @@ async function completeFetchSync(
     return;
   }
   if (acquisition.status === 'unchanged') {
-    if (shouldCaptureRootManifest(operation, services, target)) {
-      services.repositoryService.snapshots.captureRootManifest(target);
-    }
+    const failures = shouldCaptureRootManifest(operation, services, target)
+      ? captureRootManifestStep(services, target, () => { services.repositoryService.snapshots.captureRootManifest(target); })
+      : [];
+    reportSnapshotFailures(deps, objectLabel, failures);
     return;
   }
   const dump = withoutRefusedUnits(acquisition.dump, refused);
   try {
     const planned = planMergeSources(services, deps, target, dump.sources);
     const choice = await resolveConflictChoice(deps, planned, operation === 'lock' ? 'Захват' : 'Получение', objectLabel);
-    const applied = await applyMergeWithPostMutation(services, {
-      target,
-      sources: planned,
-      choice,
-      backupDir: buildOperationBackupDir(services, deps, target, operation),
-      childObjects: { added: dump.added, removed: dump.removed },
-      configDumpInfoSource: dump.configDumpInfoSource,
-    });
-    captureFetchSnapshots(operation, subject, dump, planned, applied, services);
-    await reportMergeOutcome(services, deps, planned, applied, choice, objectLabel);
+    const backupDir = buildOperationBackupDir(services, deps, target, operation);
+    let snapshotFailures: SnapshotStepFailure[] = [];
+    // Файлы проекта уже могут быть перезаписаны: при сбое пользователь должен узнать, где прежние версии.
+    try {
+      const applied = await applyMergeWithPostMutation(services, {
+        target,
+        sources: planned,
+        choice,
+        backupDir,
+        childObjects: { added: dump.added, removed: dump.removed },
+        configDumpInfoSource: dump.configDumpInfoSource,
+      });
+      // Снимок — после слияния, но его сбой не должен скрыть окна сравнения и резервные копии.
+      snapshotFailures = captureFetchSnapshots(operation, subject, dump, planned, applied, services);
+      await reportMergeOutcome(services, deps, planned, applied, choice, objectLabel);
+    } catch (error) {
+      reportBackupsAfterFailure(services, deps, objectLabel, backupDir);
+      // Снимок мог не сохраниться до сбоя показа итога — о нём пользователь тоже должен узнать.
+      reportSnapshotFailures(deps, objectLabel, snapshotFailures);
+      throw error;
+    }
+    reportSnapshotFailures(deps, objectLabel, snapshotFailures);
     if (dump.missing.length > 0) {
       services.outputChannel.appendLine(`[repository][file-sync] «${objectLabel}»: не выгружены ${dump.missing.join(', ')}.`);
       deps.notifyWarning(`«${objectLabel}»: часть подчинённых объектов не получена из базы (${String(dump.missing.length)}), их файлы не изменены (см. журнал).`);
@@ -587,7 +607,7 @@ function captureFetchSnapshots(
   planned: readonly PlannedMergeSource[],
   applied: MergeApplicationResult,
   services: RepositoryFileSyncServices
-): void {
+): SnapshotStepFailure[] {
   const { target } = subject;
   const snapshots = services.repositoryService.snapshots;
   if (dump.rootManifest) {
@@ -606,10 +626,11 @@ function captureFetchSnapshots(
           overrides[entry.rel] = entry.repositoryHash;
         }
       });
-      snapshots.captureRootManifest(target, overrides, excludeRels);
+      return captureRootManifestStep(services, target, () => { snapshots.captureRootManifest(target, overrides, excludeRels); });
     }
-    return;
+    return [];
   }
+  const failures: SnapshotStepFailure[] = [];
   for (const source of planned) {
     for (const entry of source.entries) {
       const locked = isRootLockName(entry.fullName)
@@ -619,9 +640,12 @@ function captureFetchSnapshots(
       if (locked) {
         const dumpXml = resolveXmlPathByFullName(source.dir, entry.fullName);
         const subordinates = dumpXml ? expandSubordinateUnits(entry.fullName, dumpXml) : undefined;
-        snapshots.captureFromDirectory(target, entry.fullName, source.dir, entry.scope, [], 'unit', subordinates);
+        failures.push(...captureUnitSnapshotStep(services, target, entry.fullName, () => {
+          snapshots.captureFromDirectory(target, entry.fullName, source.dir, entry.scope, [], 'unit', subordinates);
+        }));
       }
     }
   }
+  return failures;
 }
 

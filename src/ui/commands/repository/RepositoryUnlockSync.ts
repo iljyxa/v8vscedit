@@ -20,6 +20,7 @@ import {
   finishPostMutation,
   loadBaseHashes,
   prepareRepositorySubject,
+  reportBackupsAfterFailure,
   reportCliOutcome,
   reportFlowError,
   resolveMergeScope,
@@ -31,6 +32,13 @@ import {
   type RepositoryFlowOutcome,
   type RepositorySubject,
 } from './RepositoryFileSyncShared';
+import {
+  captureRootManifestStep,
+  captureUnitSnapshotStep,
+  reportSnapshotFailures,
+  trySnapshotStep,
+  type SnapshotStepFailure,
+} from './RepositorySnapshotSteps';
 import { acquireUnlockEtalons, hashRootFiles, type UnlockEtalonRequest, type UnlockEtalons } from './RepositoryUnlockEtalons';
 
 interface UnlockLeaseResult {
@@ -94,6 +102,7 @@ export async function runRepositoryUnlockFlow(
   if (cli.status !== 'done') {
     return reportCliOutcome(cli, label, deps);
   }
+  let snapshotFailures: SnapshotStepFailure[] = [];
   if (subject && released) {
     try {
       if (etalons) {
@@ -105,9 +114,10 @@ export async function runRepositoryUnlockFlow(
       if (etalons?.status === 'ready') {
         etalons.dispose();
       }
-      discardSubjectSnapshots(services, subject, released, options.recursive);
+      snapshotFailures = discardSubjectSnapshots(services, subject, released, options.recursive);
     }
   }
+  reportSnapshotFailures(deps, objectLabel, snapshotFailures);
   deps.notifyInfo(`Объекты «${objectLabel}» освобождены.`);
   return 'done';
 }
@@ -154,11 +164,13 @@ export async function runRepositoryCommitFlow(
   if (cli.status !== 'done') {
     return reportCliOutcome(cli, label, deps);
   }
+  let snapshotFailures: SnapshotStepFailure[] = [];
   if (subject && released) {
-    discardSubjectSnapshots(services, subject, released, formData.recursive);
+    snapshotFailures = discardSubjectSnapshots(services, subject, released, formData.recursive);
   } else if (subject && deps.isFileSyncEnabled()) {
-    recaptureSnapshotsFromProject(services, subject);
+    snapshotFailures = recaptureSnapshotsFromProject(services, subject);
   }
+  reportSnapshotFailures(deps, objectLabel, snapshotFailures);
   deps.notifyInfo(`Изменения «${objectLabel}» помещены в хранилище.`);
   return 'done';
 }
@@ -181,37 +193,47 @@ function isRootNode(node: RepositoryNodeRef): boolean {
   return node.nodeKind === 'configuration' || node.nodeKind === 'extension';
 }
 
+/** Захвата уже нет: неудалённый снимок — не повод сообщать об ошибке всей отмены захвата. */
 function discardSubjectSnapshots(
   services: RepositoryFileSyncServices,
   subject: RepositorySubject,
   released: readonly string[],
   recursive: boolean
-): void {
+): SnapshotStepFailure[] {
+  const { target } = subject;
   const snapshots = services.repositoryService.snapshots;
-  if (isRootRecursive(subject, recursive)) {
-    snapshots.discardAll(subject.target);
-    return;
-  }
-  released.forEach((fullName) => snapshots.discard(subject.target, fullName));
+  const steps = isRootRecursive(subject, recursive)
+    ? [trySnapshotStep(services, 'discard', target.displayName, snapshots.resolveScopeDir(target), () => { snapshots.discardAll(target); })]
+    : released.map((fullName) => trySnapshotStep(
+      services,
+      'discard',
+      fullName,
+      snapshots.resolveSnapshotDir(target, fullName),
+      () => { snapshots.discard(target, fullName); }
+    ));
+  return steps.filter((failure): failure is SnapshotStepFailure => failure !== undefined);
 }
 
 /** Помещение с сохранением захвата: версия хранилища = проект, снимок каждой захваченной единицы — из проекта. */
-function recaptureSnapshotsFromProject(services: RepositoryFileSyncServices, subject: RepositorySubject): void {
+function recaptureSnapshotsFromProject(services: RepositoryFileSyncServices, subject: RepositorySubject): SnapshotStepFailure[] {
   const { target } = subject;
   const repository = services.repositoryService;
   if (subject.isRoot && repository.lockState.isRootRecursiveLocked(target)) {
-    repository.snapshots.captureRootManifest(target);
-    return;
+    return captureRootManifestStep(services, target, () => { repository.snapshots.captureRootManifest(target); });
   }
+  const failures: SnapshotStepFailure[] = [];
   for (const fullName of subject.members) {
     const locked = isRootLockName(fullName) ? repository.isRootLocked(target) : repository.isLocked(target, fullName);
     const scope = locked ? resolveMergeScope(target, fullName, undefined, 'unit') : null;
     if (scope) {
       const projectXml = resolveXmlPathByFullName(target.configRoot, fullName);
       const subordinates = projectXml ? expandSubordinateUnits(fullName, projectXml) : undefined;
-      repository.snapshots.captureFromProject(target, fullName, scope, 'unit', subordinates);
+      failures.push(...captureUnitSnapshotStep(services, target, fullName, () => {
+        repository.snapshots.captureFromProject(target, fullName, scope, 'unit', subordinates);
+      }));
     }
   }
+  return failures;
 }
 
 interface EtalonComparison {
@@ -318,16 +340,22 @@ async function rollbackToEtalons(
     });
     if (rollback) {
       const backupDir = buildOperationBackupDir(services, deps, target, 'unlock');
-      for (const item of divergent) {
-        services.suppressConfigurationReloadForFiles(toAbsolute([...item.changed, ...item.missing, ...item.extra]));
-        const restored = services.repositoryService.snapshots.restoreToProject(target, item.fullName, item.scope, backupDir);
-        changedFiles.push(...restored.restored, ...restored.deleted);
-        structural ||= restored.deleted.length > 0 || item.missing.length > 0;
-        if (restored.backups.length > 0) {
-          services.outputChannel.appendLine(
-            `[repository][file-sync] резервные копии: ${restored.backups.map((backup) => backup.backupPath).join(', ')}`
-          );
+      // Откат мог успеть переписать часть файлов: при сбое пользователь должен узнать, где прежние версии.
+      try {
+        for (const item of divergent) {
+          services.suppressConfigurationReloadForFiles(toAbsolute([...item.changed, ...item.missing, ...item.extra]));
+          const restored = services.repositoryService.snapshots.restoreToProject(target, item.fullName, item.scope, backupDir);
+          changedFiles.push(...restored.restored, ...restored.deleted);
+          structural ||= restored.deleted.length > 0 || item.missing.length > 0;
+          if (restored.backups.length > 0) {
+            services.outputChannel.appendLine(
+              `[repository][file-sync] резервные копии: ${restored.backups.map((backup) => backup.backupPath).join(', ')}`
+            );
+          }
         }
+      } catch (error) {
+        reportBackupsAfterFailure(services, deps, objectLabel, backupDir);
+        throw error;
       }
     } else {
       keptDivergentFiles = divergent.flatMap((item) => toAbsolute([...item.changed, ...item.missing, ...item.extra]));

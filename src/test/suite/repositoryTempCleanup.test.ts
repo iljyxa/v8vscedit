@@ -8,12 +8,15 @@ import { buildMergeBackupDir } from '../../infra/repository/RepositoryMergeAppli
 import { RepositoryService } from '../../infra/repository/RepositoryService';
 import {
   DEFAULT_MERGE_BACKUP_RETENTION,
+  describeFsError,
   disposeOnError,
   disposeOnErrorAsync,
   getRepositoryMergeRoot,
   getRepositoryObjectsDir,
   pruneMergeBackups,
   pruneRepositoryObjectsFiles,
+  readDirOrEmpty,
+  removePathWithRetries,
 } from '../../infra/repository/RepositoryTempCleanup';
 
 /**
@@ -248,5 +251,66 @@ suite('RepositoryTempCleanup — disposeOnError / disposeOnErrorAsync', () => {
     // eslint-disable-next-line @typescript-eslint/require-await -- проверяется именно async-тело без await
     await assert.rejects(disposeOnErrorAsync(resource, async () => { throw error; }), (thrown) => thrown === error);
     assert.strictEqual(resource.calls, 1);
+  });
+});
+
+/**
+ * Issue #103 — удаление с повторами и описание сбоя ФС без пути из message Node: на Windows
+ * путь в message приходит в неверной кодировке (`\\?\c:\Ïðîåêòû\…`).
+ */
+suite('RepositoryTempCleanup — removePathWithRetries/describeFsError/readDirOrEmpty (issue #103)', () => {
+  const cases: { name: string; make: (root: string) => string }[] = [
+    {
+      name: 'непустой каталог',
+      make: (root) => {
+        const dir = path.join(root, 'snap');
+        writeFile(path.join(dir, 'files', 'Catalogs', 'Валюты.xml'), '<x/>');
+        writeFile(path.join(dir, 'manifest.json'), '{}');
+        return dir;
+      },
+    },
+    {
+      name: 'файл',
+      make: (root) => {
+        const file = path.join(root, 'manifest.json');
+        writeFile(file, '{}');
+        return file;
+      },
+    },
+    { name: 'пути нет', make: (root) => path.join(root, 'нет-такого') },
+  ];
+  for (const item of cases) {
+    test(`removePathWithRetries: ${item.name} — путь исчезает, без исключения`, () => {
+      const target = item.make(makeWorkspace());
+      removePathWithRetries(target);
+      assert.strictEqual(fs.existsSync(target), false);
+    });
+  }
+
+  const garbled = "EPERM: operation not permitted, rmdir '\\\\?\\c:\\Ïðîåêòû\\x'";
+  const describeCases: { name: string; error: unknown; expected: string }[] = [
+    { name: 'Error со строковым code', error: Object.assign(new Error(garbled), { code: 'EPERM' }), expected: 'EPERM' },
+    { name: 'Error без code', error: new Error('диск отключён'), expected: 'диск отключён' },
+    { name: 'Error с числовым code', error: Object.assign(new Error('сбой'), { code: 13 }), expected: 'сбой' },
+    { name: 'строка', error: 'просто строка', expected: 'просто строка' },
+    { name: 'объект', error: { reason: 'x' }, expected: '[object Object]' },
+  ];
+  for (const item of describeCases) {
+    test(`describeFsError: ${item.name}`, () => {
+      const described = describeFsError(item.error);
+      assert.strictEqual(described, item.expected);
+      assert.ok(!described.includes('Ïðîåêòû'));
+    });
+  }
+
+  test('readDirOrEmpty: каталога нет — пустой список', () => {
+    assert.deepStrictEqual(readDirOrEmpty(path.join(makeWorkspace(), 'нет')), []);
+  });
+
+  test('readDirOrEmpty: каталог есть — его записи', () => {
+    const root = makeWorkspace();
+    writeFile(path.join(root, 'a.txt'), 'a');
+    fs.mkdirSync(path.join(root, 'b'));
+    assert.deepStrictEqual(readDirOrEmpty(root).map((entry) => entry.name).sort(), ['a.txt', 'b']);
   });
 });
