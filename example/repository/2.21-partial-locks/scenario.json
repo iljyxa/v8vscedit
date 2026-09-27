@@ -1,0 +1,106 @@
+{
+  "description": "Частичный отказ рекурсивного захвата (issue #87) для example/tools/build-repository-locks.mjs. Petrov держит подчинённую форму одного справочника и корень другого; Admin захватывает их рекурсивно. expect шага — строки успеха и отказа в /Out.",
+  "alias": "locks",
+  "users": [
+    {
+      "name": "Admin",
+      "password": ""
+    },
+    {
+      "name": "Petrov",
+      "password": "123",
+      "rights": "LockObjects"
+    }
+  ],
+  "steps": [
+    {
+      "user": "Petrov",
+      "lock": [
+        "Справочник.ПричиныВозврата.Форма.ФормаЭлемента",
+        "Справочник.РолиКонтактныхЛиц"
+      ]
+    },
+    {
+      "user": "Admin",
+      "lock": [
+        {
+          "fullName": "Справочник.ПричиныВозврата",
+          "recursive": true
+        }
+      ],
+      "expectRefusal": true,
+      "log": "lock-recursive-subordinate-refused.out.txt",
+      "expect": {
+        "grants": [
+          "Справочник.ПричиныВозврата"
+        ],
+        "refusals": [
+          {
+            "objectName": "Справочник.ПричиныВозврата.Форма.ФормаЭлемента",
+            "user": "Petrov"
+          }
+        ]
+      }
+    },
+    {
+      "user": "Admin",
+      "lock": [
+        {
+          "fullName": "Справочник.РолиКонтактныхЛиц",
+          "recursive": true
+        }
+      ],
+      "expectRefusal": true,
+      "log": "lock-recursive-anchor-refused.out.txt",
+      "expect": {
+        "grants": [
+          "Справочник.РолиКонтактныхЛиц.Форма.ФормаЭлемента"
+        ],
+        "refusals": [
+          {
+            "objectName": "Справочник.РолиКонтактныхЛиц",
+            "user": "Petrov"
+          }
+        ]
+      }
+    },
+    {
+      "user": "Admin",
+      "lock": [
+        {
+          "fullName": "Справочник.ПричиныВозврата",
+          "recursive": true
+        }
+      ],
+      "expectRefusal": true,
+      "log": "lock-recursive-own-and-refused.out.txt",
+      "expect": {
+        "grants": [],
+        "refusals": [
+          {
+            "objectName": "Справочник.ПричиныВозврата.Форма.ФормаЭлемента",
+            "user": "Petrov"
+          }
+        ]
+      }
+    }
+  ],
+  "locks": [
+    {
+      "dumpName": "Catalog.ПричиныВозврата",
+      "user": "Admin"
+    },
+    {
+      "dumpName": "Catalog.ПричиныВозврата.Form.ФормаЭлемента",
+      "user": "Petrov"
+    },
+    {
+      "dumpName": "Catalog.РолиКонтактныхЛиц",
+      "user": "Petrov"
+    },
+    {
+      "dumpName": "Catalog.РолиКонтактныхЛиц.Form.ФормаЭлемента",
+      "user": "Admin"
+    }
+  ]
+}

@@ -849,3 +849,102 @@ suite('RepositoryLockState — статусы захватов с сервера
     assert.strictEqual(toLocalTimestamp(new Date(2026, 11, 31, 23, 59, 59)), '2026-12-31T23:59:59');
   });
 });
+
+/**
+ * Issue #87: частичный отказ захвата. `refused` — единицы, в захвате которых сервер
+ * отказал: они не записываются даже якорем, а при рекурсивном корне становятся
+ * точечно освобождёнными.
+ */
+suite('RepositoryLockState — applyLock с отказанными единицами (issue #87)', () => {
+  const ANCHOR = 'Справочник.ПричиныВозврата';
+  const FORM = 'Справочник.ПричиныВозврата.Форма.ФормаЭлемента';
+  const TEMPLATE = 'Справочник.ПричиныВозврата.Макет.Печать';
+
+  function readScope(workspaceRoot: string): Record<string, unknown> {
+    const raw = JSON.parse(fs.readFileSync(path.join(workspaceRoot, '.v8vscedit', 'repository', 'state.json'), 'utf-8')) as {
+      scopes: Record<string, Record<string, unknown>>;
+    };
+    return Object.values(raw.scopes)[0];
+  }
+
+  test('отказанный якорь не пишется в lockedFullNames/lockGroups/lockModes; одна оставшаяся единица — без группы', () => {
+    const { workspaceRoot, state, target } = createState();
+    state.applyLock(target, { anchor: ANCHOR, members: [ANCHOR, FORM], mode: 'recursive', refused: [ANCHOR] });
+    const scope = readScope(workspaceRoot);
+    assert.deepStrictEqual(scope.lockedFullNames, [FORM]);
+    assert.strictEqual(scope.lockGroups, undefined);
+    assert.deepStrictEqual(scope.lockModes, { [FORM]: 'recursive' });
+    assert.strictEqual(state.isLocked(target, ANCHOR), false);
+    assert.strictEqual(state.isLocked(target, FORM), true);
+  });
+
+  test('больше одной оставшейся единицы — группа по ключу якоря без отказанной', () => {
+    const { state, target } = createState();
+    state.applyLock(target, { anchor: ANCHOR, members: [ANCHOR, FORM, TEMPLATE], mode: 'recursive', refused: [ANCHOR] });
+    assert.deepStrictEqual(state.getLockGroup(target, ANCHOR), [TEMPLATE, FORM]);
+  });
+
+  test('отметка чужого захвата, поставленная до applyLock, сохраняется', () => {
+    const { state, target } = createState();
+    state.applyLockRefusals(target, [{ fullName: FORM, user: 'Petrov' }], '2026-09-27T14:30:00');
+    state.applyLock(target, { anchor: ANCHOR, members: [ANCHOR, FORM], mode: 'recursive', refused: [FORM] });
+    assert.deepStrictEqual(state.getLockInfo(target, FORM), { state: 'foreign', user: 'Petrov', lockedAt: undefined, observedAt: '2026-09-27T14:30:00' });
+    assert.strictEqual(state.isLocked(target, ANCHOR), true);
+    assert.strictEqual(state.getLockGroup(target, ANCHOR), undefined);
+  });
+
+  test('после опроса serverOwnLocks не получает отказанные; событие — только записанные', () => {
+    const { workspaceRoot, state, target } = createState();
+    state.applyServerLocks(target, { user: 'Admin', syncedAt: '2026-09-27T12:00:00', basedOnRevision: state.getRevision(), foreign: {}, own: {} });
+    const events: RepositoryLocksChangedEvent[] = [];
+    state.onDidChangeLocks((event) => events.push(event));
+    state.applyLock(target, { anchor: ANCHOR, members: [ANCHOR, FORM], mode: 'recursive', refused: [FORM] });
+    assert.deepStrictEqual(readScope(workspaceRoot).serverOwnLocks, { [ANCHOR]: {} });
+    assert.deepStrictEqual(events.map((event) => event.fullNames), [[ANCHOR]]);
+  });
+
+  test('рекурсивный корень: отказанные — в releasedUnderRoot (без сентинела), прочие захвачены', () => {
+    const { workspaceRoot, state, target } = createState();
+    const root = getRootLockName(target);
+    state.applyLock(target, { anchor: root, members: [root, 'Справочник.Валюты'], recursiveRoot: true, refused: ['Справочник.Банки'] });
+    assert.deepStrictEqual(readScope(workspaceRoot).releasedUnderRoot, ['Справочник.Банки']);
+    assert.strictEqual(state.isRootRecursiveLocked(target), true);
+    assert.strictEqual(state.isRootLocked(target), true);
+    assert.strictEqual(state.isLocked(target, 'Справочник.Банки'), false);
+    assert.strictEqual(state.isLocked(target, 'Справочник.Валюты'), true);
+    assert.strictEqual(state.isLocked(target, 'Справочник.Товары'), true);
+  });
+
+  test('рекурсивный корень: отказан сам корень — isRootLocked=false при isRootRecursiveLocked=true, сентинел не в releasedUnderRoot', () => {
+    const { workspaceRoot, state, target } = createState();
+    const root = getRootLockName(target);
+    state.applyLock(target, { anchor: root, members: [root, 'Справочник.Валюты'], recursiveRoot: true, refused: [root, 'Справочник.Банки'] });
+    assert.strictEqual(state.isRootRecursiveLocked(target), true);
+    assert.strictEqual(state.isRootLocked(target), false);
+    assert.deepStrictEqual(readScope(workspaceRoot).releasedUnderRoot, ['Справочник.Банки']);
+    assert.ok(!(readScope(workspaceRoot).lockedFullNames as string[]).includes(root));
+  });
+
+  test('рекурсивный корень: прежний releasedUnderRoot дополняется, повторно выданные из него убираются', () => {
+    const { workspaceRoot, state, target } = createState();
+    const root = getRootLockName(target);
+    state.applyLock(target, { anchor: root, members: [root], recursiveRoot: true });
+    state.applyUnlock(target, { anchor: 'Справочник.Товары', members: ['Справочник.Товары'], recursive: false, isRoot: false });
+    state.applyUnlock(target, { anchor: 'Справочник.Валюты', members: ['Справочник.Валюты'], recursive: false, isRoot: false });
+    state.applyLock(target, { anchor: root, members: [root, 'Справочник.Валюты'], recursiveRoot: true, refused: ['Справочник.Банки'] });
+    assert.deepStrictEqual(readScope(workspaceRoot).releasedUnderRoot, ['Справочник.Банки', 'Справочник.Товары']);
+    assert.strictEqual(state.isLocked(target, 'Справочник.Валюты'), true);
+  });
+
+  test('без refused (и с пустым) — прежнее поведение: рекурсивный корень обнуляет releasedUnderRoot', () => {
+    for (const refused of [undefined, []]) {
+      const { workspaceRoot, state, target } = createState();
+      const root = getRootLockName(target);
+      state.applyLock(target, { anchor: root, members: [root], recursiveRoot: true });
+      state.applyUnlock(target, { anchor: 'Справочник.Товары', members: ['Справочник.Товары'], recursive: false, isRoot: false });
+      state.applyLock(target, { anchor: root, members: [root], recursiveRoot: true, refused });
+      assert.strictEqual(readScope(workspaceRoot).releasedUnderRoot, undefined);
+      assert.strictEqual(state.isLocked(target, 'Справочник.Товары'), true);
+    }
+  });
+});
