@@ -9,10 +9,16 @@ export const aliases = {
   '@ui-shared': path.resolve(rootDir, 'src-ui/shared'),
 };
 
+/*
+ * Внешними остаются только модули, которые даёт среда выполнения. Всё остальное вшивается в
+ * бандл: VSIX не должен зависеть от node_modules, иначе `vsce package --no-dependencies`
+ * выпускает пакет без них, и активация падает на первом require. ssh2 вшивается
+ * целиком; cpu-features — его опциональный нативный аддон, ssh2 загружает его в try/catch
+ * и без аддона работает на чистом JS.
+ */
 export const nodeExternal = [
   'vscode',
   '@vscode/test-electron',
-  'ssh2',
   'cpu-features',
   ...builtinModules,
   ...builtinModules.map((name) => `node:${name}`),

@@ -170,6 +170,11 @@ LSP-клиентом (`vscode-languageclient`) и локальным MCP-сер�
   сборки); `devDependencies` игнорируются автоматически.
   [publishing](https://code.visualstudio.com/api/working-with-extensions/publishing-extension)
 - **Публиковать забандленный артефакт** (`main` = один бандл) — меньше файлов, быстрее install/startup.
+  **Проект:** node-бандл самодостаточен, `node_modules` в VSIX не попадает (`.vscodeignore`).
+  Внешними в `vite.shared.ts → nodeExternal` остаются только `vscode`, встроенные модули Node и
+  опциональные нативные аддоны, которые пакет грузит в `try/catch` (`cpu-features` у `ssh2`). Иначе
+  `vsce package --no-dependencies` соберёт VSIX без зависимости, и активация упадёт на `require`.
+  Инвариант проверяет `packageManifest.test.ts` по AST собранного `dist/`.
 - **SemVer: `vsce publish major|minor|patch`** автоинкрементит версию + git-tag.
   [vsce cli](https://vscode-docs.readthedocs.io/en/latest/tools/vscecli/)
 - **`vscode:prepublish` в `scripts` для сборки перед упаковкой.**
