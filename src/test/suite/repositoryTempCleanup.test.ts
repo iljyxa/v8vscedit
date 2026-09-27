@@ -8,7 +8,6 @@ import { buildMergeBackupDir } from '../../infra/repository/RepositoryMergeAppli
 import { RepositoryService } from '../../infra/repository/RepositoryService';
 import {
   DEFAULT_MERGE_BACKUP_RETENTION,
-  describeFsError,
   disposeOnError,
   disposeOnErrorAsync,
   getRepositoryMergeRoot,
@@ -16,8 +15,8 @@ import {
   pruneMergeBackups,
   pruneRepositoryObjectsFiles,
   readDirOrEmpty,
-  removePathWithRetries,
 } from '../../infra/repository/RepositoryTempCleanup';
+import { describeFsError, removePathWithRetries } from '../../infra/fs/PathRemoval';
 
 /**
  * Issue #64 — раскладка и очистка временных артефактов хранилища

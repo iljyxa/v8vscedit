@@ -25,7 +25,8 @@ import {
   resolveUnitSuffixByRelativePath,
   resolveUnitXmlRel,
 } from './RepositoryObjectScope';
-import { getRepositoryObjectsDir, type RemoveTree } from './RepositoryTempCleanup';
+import type { RemoveTree } from '../fs/PathRemoval';
+import { getRepositoryObjectsDir } from './RepositoryTempCleanup';
 
 export interface RepositoryBinding {
   repoPath: string;

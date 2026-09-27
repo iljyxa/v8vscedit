@@ -4,3 +4,4 @@ export * from './ExtensionListParser';
 export * from './InfoBaseRegistryService';
 export * from './ProjectEnvironmentService';
 export * from './ProjectSecretStorage';
+export * from './BslAnalyzerRootTracker';

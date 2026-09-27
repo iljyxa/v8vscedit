@@ -14,7 +14,8 @@ import {
   type ScopeDepth,
 } from './RepositoryObjectScope';
 import type { RepositoryTarget } from './RepositoryService';
-import { readDirOrEmpty, removePathWithRetries, type RemoveTree } from './RepositoryTempCleanup';
+import { removePathWithRetries, type RemoveTree } from '../fs/PathRemoval';
+import { readDirOrEmpty } from './RepositoryTempCleanup';
 
 /**
  * Снимок объекта на момент захвата — «версия хранилища», к которой можно откатить

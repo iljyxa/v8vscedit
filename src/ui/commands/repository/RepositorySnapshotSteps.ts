@@ -1,4 +1,4 @@
-import { describeFsError } from '../../../infra/repository/RepositoryTempCleanup';
+import { describeFsError } from '../../../infra/fs/PathRemoval';
 import type { RepositoryTarget } from '../../../infra/repository/RepositoryService';
 import type { RepositoryFileSyncDeps, RepositoryFileSyncServices } from './RepositoryFileSyncShared';
 

@@ -7,7 +7,7 @@ import { RepositoryLockSnapshotStore, diffOwnersAgainstBaseline } from '../../in
 import { resolveObjectScope, type ObjectScope } from '../../infra/repository/RepositoryObjectScope';
 import { computeFileHash } from '../../infra/cache/HashCache';
 import type { RepositoryTarget } from '../../infra/repository/RepositoryService';
-import { removePathWithRetries } from '../../infra/repository/RepositoryTempCleanup';
+import { removePathWithRetries } from '../../infra/fs/PathRemoval';
 import { fixtureUuid, writeConfigurationXml, writeObjectXml } from './support/flatMetadataFixtures';
 
 /**
