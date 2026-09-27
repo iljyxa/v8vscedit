@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import type { CommandServices } from '../_shared';
 import { type ConfigurationCommandOutcome, isConfigurationCommandSucceeded } from '../ext/configurationCommandOutcome';
-import { runDbClientFromWorkspace } from './DbRunCommandRunner';
+import { resolveDesignerRepositoryBinding, runDbClientFromWorkspace } from './DbRunCommandRunner';
 
 /** Регистрирует команды запуска 1С из настроек рабочей области. */
 export function registerDbCommands(
@@ -23,7 +23,8 @@ export function registerDbCommands(
     }),
 
     vscode.commands.registerCommand('v8vscedit.runConfigurator', async () => {
-      await runDbClientFromWorkspace(services.workspaceFolder, services.outputChannel, services.projectSecretStorage, { mode: 'DESIGNER' });
+      const repository = await resolveDesignerRepositoryBinding(services.repositoryService, services.treeProvider.getEntries());
+      await runDbClientFromWorkspace(services.workspaceFolder, services.outputChannel, services.projectSecretStorage, { mode: 'DESIGNER', repository });
     })
   );
 }

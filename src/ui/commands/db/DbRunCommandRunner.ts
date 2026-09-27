@@ -2,9 +2,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { spawn, type ChildProcess } from 'child_process';
+import type { ConfigEntry } from '../../../domain/Configuration';
 import { launchInteractiveDesignerWithAgentPause } from '../../../infra/agent';
 import { resolveDbPassword, type ProjectSecretStorage } from '../../../infra/environment';
 import { normalizeInfoBasePath, resolveV8ExecutablePath, resolveV8PathHintFromVersion } from '../../../infra/process';
+import type { RepositoryBinding, RepositoryService } from '../../../infra/repository/RepositoryService';
 import { getAgentOperationServiceForInteractiveDesigner, isAgentConfigurationOperationMode } from '../ext/ExtensionCommandRunner';
 
 interface DbRunConnectionParams {
@@ -21,6 +23,8 @@ interface DbRunOptions {
   execute?: string;
   cParam?: string;
   url?: string;
+  /** Параметры хранилища основной конфигурации; передаются только конфигуратору. */
+  repository?: RepositoryBinding | null;
 }
 
 /**
@@ -41,7 +45,7 @@ export async function runDbClientFromWorkspace(
       ? await getAgentOperationServiceForInteractiveDesigner(workspaceFolder, outputChannel)
       : undefined;
 
-    outputChannel.appendLine(`[db-run] Запуск: ${v8Path} ${args.join(' ')}`);
+    outputChannel.appendLine(`[db-run] Запуск: ${v8Path} ${buildMaskedLaunchArguments(options, connection).join(' ')}`);
     await launchInteractiveDesignerWithAgentPause({
       agentSession: agentService?.service,
       forceAgentDisconnect: agentService?.forceDisconnect,
@@ -85,6 +89,13 @@ function buildLaunchArguments(options: DbRunOptions, params: DbRunConnectionPara
   if (params.password) {
     args.push(`/P${params.password}`);
   }
+  if (options.mode === 'DESIGNER' && options.repository) {
+    args.push('/ConfigurationRepositoryF', options.repository.repoPath);
+    args.push('/ConfigurationRepositoryN', options.repository.repoUser);
+    if (options.repository.repoPassword) {
+      args.push('/ConfigurationRepositoryP', options.repository.repoPassword);
+    }
+  }
 
   let execute = options.execute ?? '';
   if (execute) {
@@ -105,6 +116,42 @@ function buildLaunchArguments(options: DbRunOptions, params: DbRunConnectionPara
   }
 
   return args;
+}
+
+/**
+ * Параметры хранилища для интерактивного конфигуратора. Конфигуратор принимает
+ * в командной строке только хранилище основной конфигурации, поэтому привязки
+ * расширений не учитываются; берётся первая cf, подключённая к хранилищу.
+ */
+export function resolveDesignerRepositoryBinding(
+  repositoryService: RepositoryService,
+  entries: readonly ConfigEntry[]
+): Promise<RepositoryBinding | null> {
+  for (const entry of entries) {
+    if (entry.kind !== 'cf') {
+      continue;
+    }
+    const target = repositoryService.resolveTargetByConfigRoot(entry.rootPath);
+    if (target && repositoryService.isConnected(target)) {
+      return repositoryService.resolveBindingForCommand(target);
+    }
+  }
+  return Promise.resolve(null);
+}
+
+/**
+ * Пароли базы и хранилища не должны попадать в канал вывода; строка для лога
+ * собирается тем же построителем, чтобы не расходиться с реальным запуском.
+ */
+function buildMaskedLaunchArguments(options: DbRunOptions, params: DbRunConnectionParams): string[] {
+  const mask = (value: string | undefined): string => (value ? '***' : '');
+  return buildLaunchArguments(
+    {
+      ...options,
+      repository: options.repository && { ...options.repository, repoPassword: mask(options.repository.repoPassword) },
+    },
+    { ...params, password: mask(params.password) }
+  );
 }
 
 function spawnDetached(command: string, args: string[], cwd: string): ChildProcess {
