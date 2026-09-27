@@ -3,7 +3,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { RepositoryLockState } from '../../infra/repository/RepositoryLockState';
+import { RepositoryLockState, toLocalTimestamp, type RepositoryLocksChangedEvent, type RepositoryServerLockSync } from '../../infra/repository/RepositoryLockState';
 import { getRootLockName } from '../../infra/repository/RepositoryObjectNames';
 import type { RepositoryTarget } from '../../infra/repository/RepositoryService';
 
@@ -616,5 +616,236 @@ suite('RepositoryLockState — applyUnlock убирает единицу из В
     assert.strictEqual(state.isLocked(target, owner), true, 'владелец остаётся захваченным.');
     assert.strictEqual(state.isLocked(target, form2), true, 'соседняя форма остаётся захваченной.');
     assert.ok(!(state.getLockGroup(target, owner) ?? []).includes(form1), 'форма обязана быть удалена из группы владельца.');
+  });
+});
+
+/**
+ * Issue #6 — статусы захватов с сервера: `foreignLocks` (чужие захваты), `serverOwnLocks`
+ * (захваты нашего пользователя по данным сервера) и `lockSync` (последний опрос).
+ * Чужой захват сильнее локальной записи: объект не редактируется, локальная запись и
+ * снимок при этом сохраняются.
+ */
+suite('RepositoryLockState — статусы захватов с сервера (issue #6)', () => {
+  const SYNCED_AT = '2026-09-27T12:00:00';
+
+  function sync(state: RepositoryLockState, overrides: Partial<RepositoryServerLockSync> = {}): RepositoryServerLockSync {
+    return {
+      user: 'Admin',
+      syncedAt: SYNCED_AT,
+      serverVersion: '8.5.1.1529',
+      basedOnRevision: state.getRevision(),
+      foreign: {},
+      own: {},
+      ...overrides,
+    };
+  }
+
+  function readStateText(workspaceRoot: string): string {
+    return fs.readFileSync(path.join(workspaceRoot, '.v8vscedit', 'repository', 'state.json'), 'utf-8');
+  }
+
+  function collectEvents(state: RepositoryLockState): RepositoryLocksChangedEvent[] {
+    const events: RepositoryLocksChangedEvent[] = [];
+    state.onDidChangeLocks((event) => events.push(event));
+    return events;
+  }
+
+  test('до опроса: локальный захват — own без подтверждения, прочее — free, версии сервера нет', () => {
+    const { state, target } = createState();
+    state.applyLock(target, { anchor: 'Справочник.А', members: ['Справочник.А'] });
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), { state: 'own' });
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.Б'), { state: 'free' });
+    assert.strictEqual(state.getServerVersion(target), undefined);
+    const fresh = createState();
+    assert.deepStrictEqual(fresh.state.getLockInfo(fresh.target, 'Справочник.А'), { state: 'free' });
+  });
+
+  test('опрос целиком заменяет чужие захваты: {A: Petrov} → {B: Ivanov}; событие несёт A и B', () => {
+    const { state, target } = createState();
+    state.applyServerLocks(target, sync(state, { foreign: { 'Справочник.А': { user: 'Petrov', lockedAt: '2026-09-27T10:00:00' } } }));
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), { state: 'foreign', user: 'Petrov', lockedAt: '2026-09-27T10:00:00', observedAt: undefined });
+    const events = collectEvents(state);
+    const result = state.applyServerLocks(target, sync(state, { foreign: { 'Справочник.Б': { user: 'Ivanov' } } }));
+    assert.ok(result);
+    assert.deepStrictEqual(result.changed, ['Справочник.А', 'Справочник.Б']);
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), { state: 'free' });
+    assert.strictEqual(state.getLockInfo(target, 'Справочник.Б').state, 'foreign');
+    assert.strictEqual(events.length, 1);
+    assert.ok(events[0].fullNames.includes('Справочник.А') && events[0].fullNames.includes('Справочник.Б'));
+    assert.ok(events[0].allObjects.includes('Справочник.Б'));
+    assert.strictEqual(state.getServerVersion(target), '8.5.1.1529');
+  });
+
+  test('повторный опрос без изменений — changed пуст', () => {
+    const { state, target } = createState();
+    const foreign = { 'Справочник.А': { user: 'Petrov' } };
+    state.applyServerLocks(target, sync(state, { foreign }));
+    assert.deepStrictEqual(state.applyServerLocks(target, sync(state, { foreign }))?.changed, []);
+  });
+
+  test('чужой захват перекрывает локальный: isLocked=false, запись и каталог снимка сохраняются; следующий опрос возвращает own', () => {
+    const { workspaceRoot, state, target } = createState();
+    state.applyLock(target, { anchor: 'Справочник.А', members: ['Справочник.А'] });
+    const snapshotDir = path.join(workspaceRoot, '.v8vscedit', 'repository', 'snapshots', 'probe');
+    fs.mkdirSync(snapshotDir, { recursive: true });
+    state.applyServerLocks(target, sync(state, { foreign: { 'Справочник.А': { user: 'Petrov' } } }));
+    assert.strictEqual(state.isLocked(target, 'Справочник.А'), false);
+    assert.strictEqual(state.getLockInfo(target, 'Справочник.А').state, 'foreign');
+    const saved = JSON.parse(readStateText(workspaceRoot)) as { scopes: Record<string, { lockedFullNames: string[] }> };
+    assert.ok(Object.values(saved.scopes)[0].lockedFullNames.includes('Справочник.А'));
+    assert.ok(fs.existsSync(snapshotDir));
+    state.applyServerLocks(target, sync(state, { own: { 'Справочник.А': { lockedAt: '2026-09-27T11:00:00' } } }));
+    assert.strictEqual(state.isLocked(target, 'Справочник.А'), true);
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), {
+      state: 'own', user: 'Admin', lockedAt: '2026-09-27T11:00:00', confirmed: true, syncedAt: SYNCED_AT,
+    });
+  });
+
+  test('рекурсивный корень + чужой объект Y: Y не захвачен; чужой корень — isRootLocked=false', () => {
+    const { state, target } = createState();
+    const root = getRootLockName(target);
+    state.applyLock(target, { anchor: root, members: [root], recursiveRoot: true });
+    assert.strictEqual(state.isRootLocked(target), true);
+    state.applyServerLocks(target, sync(state, { foreign: { 'Справочник.Y': { user: 'Petrov' }, [root]: { user: 'Petrov' } } }));
+    assert.strictEqual(state.isLocked(target, 'Справочник.Y'), false);
+    assert.strictEqual(state.isLocked(target, 'Справочник.Z'), true);
+    assert.strictEqual(state.isRootLocked(target), false);
+    assert.strictEqual(state.getLockInfo(target, root).state, 'foreign');
+  });
+
+  test('own-elsewhere: захват нашего пользователя только на сервере; узел не захвачен', () => {
+    const { state, target } = createState();
+    const result = state.applyServerLocks(target, sync(state, { own: { 'Справочник.А': { lockedAt: '2026-09-27T09:00:00' } } }));
+    assert.deepStrictEqual(result?.ownElsewhere, ['Справочник.А']);
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), { state: 'own-elsewhere', user: 'Admin', lockedAt: '2026-09-27T09:00:00' });
+    assert.strictEqual(state.isLocked(target, 'Справочник.А'), false);
+  });
+
+  test('unconfirmed: локальный захват, которого нет на сервере; запись сохраняется, чужие в него не входят', () => {
+    const { state, target } = createState();
+    state.applyLock(target, { anchor: 'Справочник.А', members: ['Справочник.А'] });
+    state.applyLock(target, { anchor: 'Справочник.Б', members: ['Справочник.Б'] });
+    const result = state.applyServerLocks(target, sync(state, { foreign: { 'Справочник.Б': { user: 'Petrov' } } }));
+    assert.deepStrictEqual(result?.unconfirmed, ['Справочник.А']);
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), { state: 'own', user: 'Admin', confirmed: false, syncedAt: SYNCED_AT });
+    assert.strictEqual(state.isLocked(target, 'Справочник.А'), true);
+  });
+
+  test('stale: ревизия изменилась во время опроса → null, файл не изменён', () => {
+    const { workspaceRoot, state, target } = createState();
+    const started = sync(state, { foreign: { 'Справочник.А': { user: 'Petrov' } } });
+    state.applyLock(target, { anchor: 'Справочник.Б', members: ['Справочник.Б'] });
+    const before = readStateText(workspaceRoot);
+    assert.strictEqual(state.applyServerLocks(target, started), null);
+    assert.strictEqual(readStateText(workspaceRoot), before);
+  });
+
+  test('applyLock после опроса: снимает чужой захват, подтверждает свой (без даты — новый, с датой — «усыновлённый»)', () => {
+    const { state, target } = createState();
+    state.applyServerLocks(target, sync(state, {
+      foreign: { 'Справочник.А': { user: 'Petrov' } },
+      own: { 'Справочник.Б': { lockedAt: '2026-09-27T08:00:00' } },
+    }));
+    state.applyLock(target, { anchor: 'Справочник.А', members: ['Справочник.А'] });
+    state.applyLock(target, { anchor: 'Справочник.Б', members: ['Справочник.Б'] });
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), { state: 'own', user: 'Admin', lockedAt: undefined, confirmed: true, syncedAt: SYNCED_AT });
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.Б'), { state: 'own', user: 'Admin', lockedAt: '2026-09-27T08:00:00', confirmed: true, syncedAt: SYNCED_AT });
+  });
+
+  test('applyUnlock и setLocked(false) убирают имена из serverOwnLocks', () => {
+    const { state, target } = createState();
+    state.applyLock(target, { anchor: 'Справочник.А', members: ['Справочник.А'] });
+    state.applyLock(target, { anchor: 'Справочник.Б', members: ['Справочник.Б'] });
+    state.applyServerLocks(target, sync(state, { own: { 'Справочник.А': {}, 'Справочник.Б': {} } }));
+    state.applyUnlock(target, { anchor: 'Справочник.А', members: ['Справочник.А'], recursive: false, isRoot: false });
+    state.setLocked(target, ['Справочник.Б'], false);
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), { state: 'free' });
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.Б'), { state: 'free' });
+  });
+
+  test('рекурсивное освобождение корня сохраняет foreignLocks и lockSync', () => {
+    const { state, target } = createState();
+    const root = getRootLockName(target);
+    state.applyLock(target, { anchor: root, members: [root, 'Справочник.А'], recursiveRoot: true });
+    state.applyServerLocks(target, sync(state, { foreign: { 'Справочник.Ч': { user: 'Petrov' } }, own: { [root]: {}, 'Справочник.А': {} } }));
+    state.applyUnlock(target, { anchor: root, members: [root], recursive: true, isRoot: true });
+    assert.strictEqual(state.getLockInfo(target, 'Справочник.Ч').state, 'foreign');
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), { state: 'free' });
+    assert.strictEqual(state.getServerVersion(target), '8.5.1.1529');
+  });
+
+  test('applyLockRefusals: новая отметка, тот же пользователь сохраняет lockedAt, другой — заменяет; событие', () => {
+    const { state, target } = createState();
+    state.applyServerLocks(target, sync(state, { foreign: { 'Справочник.А': { user: 'Petrov', lockedAt: '2026-09-27T07:00:00' }, 'Справочник.Б': { user: 'Petrov', lockedAt: '2026-09-27T07:00:00' } } }));
+    const events = collectEvents(state);
+    const changed = state.applyLockRefusals(target, [
+      { fullName: 'Справочник.В', user: 'Sidorov' },
+      { fullName: 'Справочник.А', user: 'Petrov' },
+      { fullName: 'Справочник.Б', user: 'Ivanov' },
+    ], '2026-09-27T13:00:00');
+    assert.deepStrictEqual(changed, ['Справочник.А', 'Справочник.Б', 'Справочник.В']);
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.В'), { state: 'foreign', user: 'Sidorov', lockedAt: undefined, observedAt: '2026-09-27T13:00:00' });
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), { state: 'foreign', user: 'Petrov', lockedAt: '2026-09-27T07:00:00', observedAt: '2026-09-27T13:00:00' });
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.Б'), { state: 'foreign', user: 'Ivanov', lockedAt: undefined, observedAt: '2026-09-27T13:00:00' });
+    assert.deepStrictEqual(events.map((event) => event.fullNames), [changed]);
+    assert.deepStrictEqual(state.applyLockRefusals(target, [], '2026-09-27T13:00:00'), []);
+    assert.strictEqual(events.length, 1, 'пустой перечень отказов не пишет состояние и не шлёт событие');
+  });
+
+  test('resetScope/clearScope снимают данные опроса', () => {
+    const { state, target } = createState();
+    state.applyServerLocks(target, sync(state, { foreign: { 'Справочник.А': { user: 'Petrov' } } }));
+    state.resetScope(target, true);
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), { state: 'free' });
+    assert.strictEqual(state.getServerVersion(target), undefined);
+    state.applyServerLocks(target, sync(state, { foreign: { 'Справочник.А': { user: 'Petrov' } } }));
+    state.clearScope(target);
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), { state: 'free' });
+  });
+
+  test('пустые поля опроса не пишутся; старый файл без них читается как прежде', () => {
+    const { workspaceRoot, state, target } = createState();
+    state.applyLock(target, { anchor: 'Справочник.А', members: ['Справочник.А'] });
+    const text = readStateText(workspaceRoot);
+    for (const field of ['foreignLocks', 'serverOwnLocks', 'lockSync']) {
+      assert.ok(!text.includes(field), `${field} не должен писаться до опроса`);
+    }
+    state.applyServerLocks(target, sync(state, { serverVersion: undefined }));
+    const polled = readStateText(workspaceRoot);
+    assert.ok(polled.includes('lockSync') && !polled.includes('foreignLocks') && !polled.includes('serverOwnLocks') && !polled.includes('serverVersion'));
+  });
+
+  test('мусор в новых полях отбрасывается', () => {
+    const { workspaceRoot, state, target } = createState();
+    state.applyLock(target, { anchor: 'Справочник.А', members: ['Справочник.А'] });
+    const filePath = path.join(workspaceRoot, '.v8vscedit', 'repository', 'state.json');
+    const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as { scopes: Record<string, Record<string, unknown>> };
+    const scope = Object.values(raw.scopes)[0];
+    scope.foreignLocks = {
+      'Справочник.Х': { user: 'Petrov', lockedAt: 5, observedAt: '2026-09-27T01:00:00' },
+      'Справочник.Мусор1': 'Petrov',
+      'Справочник.Мусор2': { user: 7 },
+    };
+    scope.serverOwnLocks = { 'Справочник.А': { lockedAt: '2026-09-27T02:00:00' }, 'Справочник.Б': { lockedAt: 3 }, 'Справочник.В': null };
+    scope.lockSync = { syncedAt: '2026-09-27T03:00:00', user: 'Admin', serverVersion: 42 };
+    fs.writeFileSync(filePath, JSON.stringify(raw), 'utf-8');
+    const reloaded = new RepositoryLockState(workspaceRoot);
+    assert.deepStrictEqual(reloaded.getLockInfo(target, 'Справочник.Х'), { state: 'foreign', user: 'Petrov', lockedAt: undefined, observedAt: '2026-09-27T01:00:00' });
+    assert.deepStrictEqual(reloaded.getLockInfo(target, 'Справочник.Мусор1'), { state: 'free' });
+    assert.deepStrictEqual(reloaded.getLockInfo(target, 'Справочник.Мусор2'), { state: 'free' });
+    assert.deepStrictEqual(reloaded.getLockInfo(target, 'Справочник.А'), { state: 'own', user: 'Admin', lockedAt: '2026-09-27T02:00:00', confirmed: true, syncedAt: '2026-09-27T03:00:00' });
+    assert.deepStrictEqual(reloaded.getLockInfo(target, 'Справочник.Б'), { state: 'own-elsewhere', user: 'Admin', lockedAt: undefined });
+    assert.deepStrictEqual(reloaded.getLockInfo(target, 'Справочник.В'), { state: 'free' });
+    assert.strictEqual(reloaded.getServerVersion(target), undefined);
+
+    scope.lockSync = { syncedAt: 1, user: 'Admin' };
+    fs.writeFileSync(filePath, JSON.stringify(raw), 'utf-8');
+    const withoutSync = new RepositoryLockState(workspaceRoot);
+    assert.deepStrictEqual(withoutSync.getLockInfo(target, 'Справочник.А'), { state: 'own' }, 'битый lockSync — опроса не было');
+  });
+
+  test('toLocalTimestamp — локальное время с дополнением нулями', () => {
+    assert.strictEqual(toLocalTimestamp(new Date(2026, 0, 2, 3, 4, 5)), '2026-01-02T03:04:05');
+    assert.strictEqual(toLocalTimestamp(new Date(2026, 11, 31, 23, 59, 59)), '2026-12-31T23:59:59');
   });
 });

@@ -6,7 +6,8 @@ import { findObjectXmlInFolder } from '../fs/ObjectLocation';
 import { escapeXmlAttribute as escapeXml, parseConfigXml, parseObjectXml } from '../xml';
 import { readChildObjectRefs } from '../xml/ChildObjectRefsReader';
 import { RepositoryBindingStore } from './RepositoryBindingStore';
-import { buildRepositoryScopeKey, RepositoryLockState } from './RepositoryLockState';
+import { buildRepositoryScopeKey, RepositoryLockState, type RepositoryLockInfo } from './RepositoryLockState';
+import { RepositoryLockStatusService } from './RepositoryLockStatusService';
 import { RepositoryLockSnapshotStore } from './RepositoryLockSnapshotStore';
 import {
   getRootLockName,
@@ -152,6 +153,7 @@ export class RepositoryService {
   private readonly bindings: RepositoryBindingStore;
   private readonly lockStateStore: RepositoryLockState;
   private readonly snapshotStore: RepositoryLockSnapshotStore;
+  private readonly lockStatusService: RepositoryLockStatusService;
 
   constructor(
     private readonly workspaceRoot: string,
@@ -160,6 +162,14 @@ export class RepositoryService {
     this.bindings = new RepositoryBindingStore(workspaceRoot, secrets);
     this.lockStateStore = new RepositoryLockState(workspaceRoot);
     this.snapshotStore = new RepositoryLockSnapshotStore(workspaceRoot);
+    this.lockStatusService = new RepositoryLockStatusService({
+      workspaceRoot,
+      lockState: this.lockStateStore,
+      isConnected: (target) => this.isConnected(target),
+      resolveBinding: (target) => this.resolveBindingForCommand(target),
+      readPlatformVersionHint: () => this.bindings.readPlatformVersionHint(),
+      now: () => new Date(),
+    });
   }
 
   get lockState(): RepositoryLockState {
@@ -168,6 +178,10 @@ export class RepositoryService {
 
   get snapshots(): RepositoryLockSnapshotStore {
     return this.snapshotStore;
+  }
+
+  get lockStatus(): RepositoryLockStatusService {
+    return this.lockStatusService;
   }
 
   /**
@@ -285,6 +299,15 @@ export class RepositoryService {
    */
   isRootLocked(target: RepositoryTarget): boolean {
     return this.lockStateStore.isRootLocked(target);
+  }
+
+  /** Состояние захвата объекта с учётом опроса сервера — для подсказок и декораций дерева. */
+  getLockInfo(target: RepositoryTarget, fullName: string): RepositoryLockInfo {
+    return this.lockStateStore.getLockInfo(target, fullName);
+  }
+
+  getRootLockInfo(target: RepositoryTarget): RepositoryLockInfo {
+    return this.lockStateStore.getLockInfo(target, getRootLockName(target));
   }
 
   setLocked(target: RepositoryTarget, fullNames: string[], locked: boolean): void {

@@ -547,10 +547,14 @@ export class UniversalPanelViewProvider implements vscode.WebviewViewProvider, v
       result.push(this.themeStateIcon(supportIndicator.icon, supportIndicator.title));
     }
 
-    if (contextValue.includes('-repoLocked')) {
-      result.push({ title: 'Захвачено в хранилище', icon: codicon('lock') });
+    // Подсказку (кто и когда захватил) готовит декорация дерева; без неё — прежний текст.
+    const lockTitle = node.repositoryLockTitle;
+    if (contextValue.includes('-repoForeignLocked')) {
+      result.push({ title: lockTitle ?? 'Захвачено другим пользователем', icon: codicon('account') });
+    } else if (contextValue.includes('-repoLocked')) {
+      result.push({ title: lockTitle ?? 'Захвачено в хранилище', icon: codicon('lock') });
     } else if (contextValue.includes('-repoUnlocked')) {
-      result.push({ title: 'Не захвачено в хранилище', icon: codicon('unlock') });
+      result.push({ title: lockTitle ?? 'Не захвачено в хранилище', icon: codicon('unlock') });
     } else if (contextValue.includes('-repoConnected')) {
       result.push({ title: 'Подключено к хранилищу', icon: codicon('database') });
     }
@@ -910,6 +914,7 @@ export class UniversalPanelViewProvider implements vscode.WebviewViewProvider, v
     }
     add('v8vscedit.repository.create', 'Создать хранилище', codicon('database'));
     if (!ctxValue.includes('-repoConnected')) {return;}
+    add('v8vscedit.repository.refreshLocks', 'Обновить статусы захватов', codicon('refresh'));
     add('v8vscedit.repository.disconnect', 'Отключить от хранилища', codicon('debug-disconnect'));
     add('v8vscedit.repository.addUser', 'Добавить пользователя хранилища', codicon('person-add'));
     add('v8vscedit.repository.copyUsers', 'Скопировать пользователей', codicon('organization'));

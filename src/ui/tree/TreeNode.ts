@@ -10,6 +10,12 @@ export type { AddMetadataTarget, MetaTreeNodeContext, NodeKind, TreeNodeModel } 
  * интеграцию с `TreeItem`.
  */
 export class MetadataNode extends vscode.TreeItem {
+  /**
+   * Подсказка иконки состояния захвата в хранилище (кто и когда захватил). Заполняется
+   * декорацией дерева; без неё панель показывает прежний текст состояния.
+   */
+  repositoryLockTitle?: string;
+
   constructor(
     public readonly model: TreeNodeModel,
     collapsibleState: vscode.TreeItemCollapsibleState

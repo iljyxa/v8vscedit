@@ -1,0 +1,6 @@
+"HUµh„osyŸF–UTTÿ«ø@POST  HTTP/1.1
+Content-Length: 306
+Accept: application/xml
+Content-Type: application/xml
+
+ï»¿<?xml version="1.0" encoding="UTF-8"?><crs:call xmlns:crs="http://v8.1c.ru/8.2/crs" alias="missing" name="DevDepot_devObjectsStatistic" version="8.5.1.1529"><crs:auth user="Admin" password="d41d8cd98f00b204e9800998ecf8427e"/><crs:params><crs:objRefs/><crs:removed value="false"/></crs:params></crs:call>fS²¦

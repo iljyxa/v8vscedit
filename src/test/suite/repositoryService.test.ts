@@ -8,6 +8,7 @@ import { RepositoryLockSnapshotStore } from '../../infra/repository/RepositoryLo
 import { getRootLockName } from '../../infra/repository/RepositoryObjectNames';
 import { resolveObjectScope, type ObjectScope } from '../../infra/repository/RepositoryObjectScope';
 import { getRepositoryObjectsDir } from '../../infra/repository/RepositoryTempCleanup';
+import { createLockWorkspace } from './support/repositoryLockFixtures';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import {
@@ -642,4 +643,27 @@ suite('RepositoryService — временные файлы и снимки (issu
       assert.ok(service.snapshots.readRootManifestHashes(cfe));
     });
   }
+});
+
+/** Issue #6: фасад отдаёт состояние захвата с учётом опроса сервера; чужой захват запрещает правку. */
+suite('RepositoryService — чужие захваты (issue #6)', () => {
+  test('getLockInfo/getRootLockInfo делегируют; isMetadataEditRestricted владельца с чужим захватом — true даже при локальной записи', async () => {
+    const ws = await createLockWorkspace({ repoPath: '\\\\repo\\storage', repoUser: 'Admin', repoPassword: '' });
+    try {
+      const banksXml = path.join(ws.configRoot, 'Catalogs', 'Банки.xml');
+      const root = getRootLockName(ws.target);
+      ws.service.lockState.applyLock(ws.target, { anchor: 'Справочник.Банки', members: ['Справочник.Банки'] });
+      assert.strictEqual(ws.service.isMetadataEditRestricted(ws.target, banksXml), false);
+      ws.service.lockState.applyServerLocks(ws.target, {
+        user: 'Admin', syncedAt: '2026-09-27T12:00:00', basedOnRevision: ws.service.lockState.getRevision(),
+        foreign: { 'Справочник.Банки': { user: 'Petrov' }, [root]: { user: 'Petrov', lockedAt: '2026-09-27T11:00:00' } }, own: {},
+      });
+      assert.deepStrictEqual(ws.service.getLockInfo(ws.target, 'Справочник.Банки'), { state: 'foreign', user: 'Petrov', lockedAt: undefined, observedAt: undefined });
+      assert.deepStrictEqual(ws.service.getRootLockInfo(ws.target), { state: 'foreign', user: 'Petrov', lockedAt: '2026-09-27T11:00:00', observedAt: undefined });
+      assert.strictEqual(ws.service.isMetadataEditRestricted(ws.target, banksXml), true);
+      assert.strictEqual(ws.service.isLocked(ws.target, 'Справочник.Банки'), false);
+    } finally {
+      ws.dispose();
+    }
+  });
 });

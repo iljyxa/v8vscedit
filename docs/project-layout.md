@@ -27,6 +27,8 @@ src/
 │   │   ├── ConfigurationXmlEditor.ts # редактирование Configuration.xml
 │   │   ├── MetadataXmlCreator.ts     # создание новых XML-объектов метаданных
 │   │   ├── MetadataXmlRemover.ts     # удаление XML-объектов метаданных
+│   │   ├── CrsMessageXml.ts          # конверт crs:call/crs:call_return/crs:call_exception —
+│   │   │                              # протокол crserver (см. ниже, infra/repository/crs/)
 │   │   └── format/                   # ruleset формата сериализации (см. docs/xml-format-rulesets.md)
 │   │       ├── FormatRuleset.ts      # интерфейс правил генерации одного поколения формата
 │   │       ├── baselineRuleset.ts    # правила текущего формата (2.21)
@@ -53,7 +55,13 @@ src/
 │   │                                  # хранилища и области (RepositoryObjectNames/Scope), раунды
 │   │                                  # выгрузки (RepositoryDumpPlan/Rounds), трёхстороннее слияние
 │   │                                  # (RepositoryMergePlanner/Applier), очистка временных артефактов
-│   │                                  # (RepositoryTempCleanup) — см. docs/repository-file-sync.md
+│   │                                  # (RepositoryTempCleanup); статусы захватов с сервера (issue #6,
+│   │                                  # см. docs/repository-file-sync.md#статусы-захватов-с-сервера) —
+│   │                                  # RepositoryLockStatusService/Source, два источника:
+│   │                                  # onecd/ (OneCdFile/OneCdTable — read-only формат 1cv8ddb.1CD) и
+│   │                                  # crs/ (CrsAddress/CrsTransport/CrsClient — протокол crserver
+│   │                                  # поверх tcp/http(s), тело — infra/xml/CrsMessageXml.ts) —
+│   │                                  # см. docs/repository-file-sync.md
 │   ├── git/                          # статус Git для узлов метаданных (GitMetadataStatusService,
 │   │                                  # декорации) + представление «Изменения метаданных»
 │   │                                  # (GitPorcelainReader, MetadataChangeResolver,

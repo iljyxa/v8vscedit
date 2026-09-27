@@ -1,0 +1,62 @@
+{
+  "platform": "8.5.1.1529",
+  "alias": "locks",
+  "connectString": "tcp://127.0.0.1:<port>/locks",
+  "httpConnectString": "http://127.0.0.1:<port>/repo/repo.1ccr/locks",
+  "lockedFrom": "2026-09-27T11:49:37",
+  "lockedTo": "2026-09-27T11:49:43",
+  "serverGreeting": "53f5c61a7b",
+  "pageSize": 8192,
+  "tables": {
+    "DEPOT": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "USERS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": 2
+    },
+    "OBJECTS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": 107
+    },
+    "VERSIONS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "LABELS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "HISTORY": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "LASTESTVERSIONS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "EXTERNALS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "SELFREFS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "OUTREFS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    }
+  }
+}

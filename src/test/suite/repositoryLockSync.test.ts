@@ -19,7 +19,10 @@ import type { ConfigurationDumpRequest } from '../../infra/agent';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import type { MetadataTreeProvider } from '../../ui/tree/MetadataTreeProvider';
 import type { MergeDiffPair } from '../../ui/commands/repository/RepositoryFileSyncDialogs';
-import { getRepositoryMergeRoot } from '../../infra/repository/RepositoryTempCleanup';
+import { getRepositoryMergeRoot, getRepositoryObjectsDir } from '../../infra/repository/RepositoryTempCleanup';
+import { toLocalTimestamp } from '../../infra/repository/RepositoryLockState';
+import { decodeLogFile } from '../../ui/commands/repository/RepositoryCommandRunner';
+import { lockFixturePath } from './support/repositoryLockFixtures';
 import {
   bumpAllConfigDumpInfoVersions,
   bumpConfigDumpInfoVersion,
@@ -1327,4 +1330,75 @@ suite('RepositoryLockSync — runRepositoryUpdateFlow: корень рекурс
     assert.strictEqual(outcome, 'done');
     assert.ok(harness.repositoryService.snapshots.readRootManifestHashes(harness.target), 'Манифест обязан быть создан даже для update — операция всё ещё держит корень захваченным рекурсивно.');
   });
+});
+
+/**
+ * Issue #6: отказ захвата. Вывод /Out — реальный lock-refused.out.txt (платформа 8.5.1): отказы
+ * по Банкам, макету ЗагрузкаИзФайла и корню «ТорговыйУчет» (Petrov). Отмечаются только
+ * объекты, которые пытались захватить.
+ */
+suite('RepositoryLockSync — отказ захвата помечает чужие захваты (issue #6)', () => {
+  const refusedOutput = (): string => decodeLogFile(fs.readFileSync(lockFixturePath('8.5.1', 'lock-refused.out.txt')));
+  const NOW = new Date(2026, 8, 27, 14, 30, 0);
+
+  function objectsFiles(harness: Harness): string[] {
+    const dir = getRepositoryObjectsDir(harness.workspaceRoot);
+    return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  }
+
+  test('нерекурсивный захват Банков: Банки — чужой (Petrov, время отказа), прочие из вывода не отмечены; UI обновлён; итог failed', async () => {
+    const harness = createHarness();
+    let notifyErrorCalls = 0;
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'failed', message: 'Ошибка захвата объектов в хранилище', output: refusedOutput() }),
+      notifyError: () => { notifyErrorCalls += 1; },
+      now: () => NOW,
+    });
+
+    const outcome = await runRepositoryLockFlow(catalogNode(harness, 'Банки'), false, harness.services, deps);
+
+    assert.strictEqual(outcome, 'failed');
+    assert.strictEqual(notifyErrorCalls, 1);
+    assert.deepStrictEqual(harness.repositoryService.getLockInfo(harness.target, 'Справочник.Банки'),
+      { state: 'foreign', user: 'Petrov', lockedAt: undefined, observedAt: toLocalTimestamp(NOW) });
+    assert.deepStrictEqual(harness.repositoryService.getLockInfo(harness.target, 'Справочник.Контрагенты.Макет.ЗагрузкаИзФайла'), { state: 'free' });
+    assert.deepStrictEqual(harness.repositoryService.getRootLockInfo(harness.target), { state: 'free' });
+    assert.ok(harness.treeRefreshCalls >= 1 && harness.actionsViewCalls >= 1);
+    assert.ok(harness.outputLines.some((line) => line.includes('[repository][locks]') && line.includes('Справочник.Банки')));
+    assert.deepStrictEqual(objectsFiles(harness), []);
+  });
+
+  test('рекурсивный захват Контрагентов: отмечен подчинённый макет, Банки и корень — нет', async () => {
+    const harness = createHarness();
+    const node: RepositoryNodeRef = { nodeKind: 'Catalog', label: 'Контрагенты', xmlPath: path.join(harness.configRoot, 'Catalogs', 'Контрагенты.xml') };
+    const deps = baseDeps({
+      runRepositoryCli: () => Promise.resolve({ status: 'failed', message: 'Ошибка захвата', output: refusedOutput() }),
+      now: () => NOW,
+    });
+
+    await runRepositoryLockFlow(node, true, harness.services, deps);
+
+    assert.strictEqual(harness.repositoryService.getLockInfo(harness.target, 'Справочник.Контрагенты.Макет.ЗагрузкаИзФайла').state, 'foreign');
+    assert.deepStrictEqual(harness.repositoryService.getLockInfo(harness.target, 'Справочник.Банки'), { state: 'free' });
+    assert.deepStrictEqual(harness.repositoryService.getRootLockInfo(harness.target), { state: 'free' });
+  });
+
+  const noMarks: [string, (harness: Harness, deps: RepositoryFileSyncDeps) => Promise<unknown>, RepositoryFileSyncDeps['runRepositoryCli']][] = [
+    ['получение с тем же выводом', (harness, deps) => runRepositoryUpdateFlow(catalogNode(harness, 'Банки'), { recursive: false, force: false }, harness.services, deps),
+      () => Promise.resolve({ status: 'failed', message: 'Ошибка', output: refusedOutput() })],
+    ['прерванный захват', (harness, deps) => runRepositoryLockFlow(catalogNode(harness, 'Банки'), false, harness.services, deps),
+      () => Promise.resolve({ status: 'interrupted', message: 'отменено' })],
+    ['отказ без вывода', (harness, deps) => runRepositoryLockFlow(catalogNode(harness, 'Банки'), false, harness.services, deps),
+      () => Promise.resolve({ status: 'failed', message: 'сбой сети' })],
+    ['вывод без строк отказа', (harness, deps) => runRepositoryLockFlow(catalogNode(harness, 'Банки'), false, harness.services, deps),
+      () => Promise.resolve({ status: 'failed', message: 'сбой', output: 'Ошибка захвата объектов в хранилище' })],
+  ];
+  for (const [title, act, cli] of noMarks) {
+    test(`${title} — отметок нет, UI не обновляется`, async () => {
+      const harness = createHarness();
+      await act(harness, baseDeps({ runRepositoryCli: cli, now: () => NOW }));
+      assert.deepStrictEqual(harness.repositoryService.getLockInfo(harness.target, 'Справочник.Банки'), { state: 'free' });
+      assert.strictEqual(harness.treeRefreshCalls, 0);
+    });
+  }
 });

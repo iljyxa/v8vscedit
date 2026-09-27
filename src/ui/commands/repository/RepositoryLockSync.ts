@@ -27,8 +27,11 @@ import {
 import { CONFIG_DUMP_INFO_FILE, type ObjectScope, type ScopeDepth } from '../../../infra/repository/RepositoryObjectScope';
 import type { RepositoryNodeRef, RepositoryTarget } from '../../../infra/repository/RepositoryService';
 import { disposeOnError, disposeOnErrorAsync } from '../../../infra/repository/RepositoryTempCleanup';
+import { toLocalTimestamp } from '../../../infra/repository/RepositoryLockState';
+import { parseRepositoryLockRefusals, selectAttemptedRefusals } from '../../../infra/repository/RepositoryLockOutputParser';
 import { readConfigDumpInfoFile } from '../../../infra/xml/ConfigDumpInfoReader';
 import { buildRepositoryLockRequest, buildRepositoryUpdateRequest } from './RepositoryCommandRunner';
+import { refreshRepositoryUi } from './RepositoryDatabaseSync';
 import {
   applyMergeWithPostMutation,
   buildOperationBackupDir,
@@ -132,7 +135,7 @@ async function runFetchFlow(
         : buildRepositoryUpdateRequest(target, subject.objectsFile, objectLabel, options);
       const cli = await runSubjectCli(subject, request, services, deps);
       if (cli.status !== 'done') {
-        return { cli };
+        return { cli, subject };
       }
       if (operation === 'lock') {
         applySubjectLock(services, subject, subject.members);
@@ -156,6 +159,12 @@ async function runFetchFlow(
   }
   const { cli, subject, acquisition } = leased.value;
   if (cli.status !== 'done') {
+    // Отказ захвата — единственный след чужого захвата в пакетном режиме: отмечаем его до
+    // сообщения об ошибке, чтобы дерево уже показывало держателя.
+    if (operation === 'lock' && cli.status === 'failed' && subject
+      && recordLockRefusals(services, subject, cli.output ?? '', deps.now()).length > 0) {
+      refreshRepositoryUi(services);
+    }
     return reportCliOutcome(cli, label, deps);
   }
   if (subject && acquisition) {
@@ -170,6 +179,24 @@ async function runFetchFlow(
     ? `Объекты «${objectLabel}» захвачены.`
     : `Объекты «${objectLabel}» получены из хранилища.`);
   return 'done';
+}
+
+/**
+ * Строки «захвачен другим пользователем» из вывода /Out → отметки чужого захвата, только для
+ * объектов, которые пытались захватить (члены; при рекурсии — и их подчинённые единицы).
+ */
+function recordLockRefusals(services: RepositoryFileSyncServices, subject: RepositorySubject, output: string, now: Date): string[] {
+  const refusals = selectAttemptedRefusals(parseRepositoryLockRefusals(output), subject.target, {
+    members: [subject.anchor, ...subject.members],
+    recursive: subject.mode === 'recursive',
+    isRoot: subject.isRoot,
+  });
+  const marked = services.repositoryService.lockState.applyLockRefusals(subject.target, refusals, toLocalTimestamp(now));
+  if (marked.length > 0) {
+    services.outputChannel.appendLine(`[repository][locks] захват отклонён, объекты захвачены другими пользователями: ${
+      refusals.map((refusal) => `${refusal.fullName} (${refusal.user})`).join(', ')}`);
+  }
+  return marked;
 }
 
 function applySubjectLock(services: RepositoryFileSyncServices, subject: RepositorySubject, members: readonly string[]): void {

@@ -1,0 +1,13 @@
+{
+  "method": "POST",
+  "path": "/repo/repo.1ccr",
+  "requestHeaders": {
+    "content-type": "application/xml",
+    "accept": "application/xml"
+  },
+  "status": 200,
+  "headers": {
+    "content-length": "1449",
+    "content-type": "application/xml"
+  }
+}
