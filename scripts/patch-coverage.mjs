@@ -59,12 +59,18 @@ function git(args) {
 //     исполняется только в Extension Host при активации (как Container/extension);
 //     решающая логика выбора вынесена в planExtensionChoices (100%). Ср.:
 //     инструментируется лишь ExtensionCommandRunner.ts (извлечённая логика).
+//   • src/ui/commands/CommandRegistry.ts — список вызовов register*Commands, исполняется
+//     только при активации из Container; сами регистраторы (например,
+//     registerRepositoryLockStatusCommands) проверяются тестами напрямую. Загрузить реестр
+//     в тесте нельзя: он регистрирует все команды, а наборы тестов уже регистрируют часть
+//     из них через собственные регистраторы — повторная регистрация id бросает.
 const NOT_INSTRUMENTED = new Set([
   'src/Container.ts',
   'src/extension.ts',
   'src/cli/onec-tools.ts',
   'src/cli/commands/listDbExtensions.ts',
   'src/ui/commands/ext/ExtensionCommands.ts',
+  'src/ui/commands/CommandRegistry.ts',
 ]);
 
 function isProdTs(f) {
