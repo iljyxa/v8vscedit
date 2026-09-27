@@ -92,7 +92,8 @@ export interface RepositoryFileSyncDeps {
   ) => Promise<RepositoryDumpToTempResult>;
   chooseConflictResolution: (summary: ConflictSummary) => Promise<MergeChoice>;
   confirmRollback: (summary: RollbackSummary) => Promise<boolean>;
-  openDiffs: (pairs: MergeDiffPair[]) => void | Promise<void>;
+  /** `log` — журнал синхронизации для исходов переключения readonly файла проекта. */
+  openDiffs: (pairs: MergeDiffPair[], log: (message: string) => void) => void | Promise<void>;
   notifyBusy: (message: string) => void;
   notifyInfo: (message: string, actions?: readonly NotificationAction[]) => void;
   notifyWarning: (message: string) => void;
@@ -614,13 +615,14 @@ export async function reportMergeOutcome(
   if (merge.backups.length > 0) {
     logFileSync(services, `резервные копии: ${merge.backups.map((backup) => backup.backupPath).join(', ')}`);
   }
+  const log = (message: string): void => logFileSync(services, message);
   if (choice === 'compare') {
     const pairs = selectDiffPairs(
       services,
       merge.backups.map((backup) => ({ rel: backup.rel, local: backup.backupPath, repository: backup.projectPath, projectSide: 'repository' }))
     );
     if (pairs.length > 0) {
-      await deps.openDiffs(pairs);
+      await deps.openDiffs(pairs, log);
     }
     return;
   }
@@ -633,7 +635,7 @@ export async function reportMergeOutcome(
     deps.notifyInfo(
       `«${objectLabel}»: локальные файлы оставлены без изменений (${String(merge.keptLocalFiles.length)}), ` +
         `версия хранилища сохранена рядом с резервными копиями.${hint}`,
-      pairs.length > 0 ? [{ label: 'Сравнить', run: () => { void deps.openDiffs(pairs); } }] : []
+      pairs.length > 0 ? [{ label: 'Сравнить', run: () => { void deps.openDiffs(pairs, log); } }] : []
     );
   }
 }

@@ -709,12 +709,13 @@ suite('RepositoryFileSyncShared — стороны окна сравнения (
     services: RepositoryFileSyncServices,
     scenario: Scenario,
     fixture: Fixture
-  ): Promise<{ pairs: MergeDiffPair[] | undefined; info: string | undefined; actions: string[] }> {
+  ): Promise<{ pairs: MergeDiffPair[] | undefined; info: string | undefined; actions: string[]; log: ((message: string) => void) | undefined }> {
     let pairs: MergeDiffPair[] | undefined;
+    let log: ((message: string) => void) | undefined;
     let info: string | undefined;
     let actions: { label: string; run: () => void }[] = [];
     const deps = baseDeps({
-      openDiffs: (opened) => { pairs = opened; },
+      openDiffs: (opened, openedLog) => { pairs = opened; log = openedLog; },
       notifyInfo: (message, items) => { info = message; actions = items ? [...items] : []; },
     });
     await reportMergeOutcome(services, deps, [], { merge: mergeFor(scenario.choice, fixture), changedFiles: [] }, scenario.choice, 'Товары');
@@ -722,7 +723,7 @@ suite('RepositoryFileSyncShared — стороны окна сравнения (
       assert.strictEqual(pairs, undefined, 'keep-local не открывает сравнение без нажатия кнопки.');
       actions.find((action) => action.label === 'Сравнить')?.run();
     }
-    return { pairs, info, actions: actions.map((action) => action.label) };
+    return { pairs, info, actions: actions.map((action) => action.label), log };
   }
 
   for (const scenario of scenarios) {
@@ -734,7 +735,7 @@ suite('RepositoryFileSyncShared — стороны окна сравнения (
           const restrictedPath = restricted === 'project' ? fixture.projectPath : fixture.otherPath;
           const { services, checkedPaths } = spyServices(harness, restrictedPath);
 
-          const { pairs, info, actions } = await collectPairs(services, scenario, fixture);
+          const { pairs, info, actions, log } = await collectPairs(services, scenario, fixture);
 
           const expectedLocal = scenario.projectSide === 'local' ? fixture.projectPath : fixture.otherPath;
           const expectedRepository = scenario.projectSide === 'local' ? fixture.otherPath : fixture.projectPath;
@@ -748,6 +749,10 @@ suite('RepositoryFileSyncShared — стороны окна сравнения (
           assert.strictEqual(mergeDiffProjectPath(pairs[0]), fixture.projectPath);
           assert.ok(checkedPaths.length > 0);
           assert.ok(checkedPaths.every((checked) => checked === fixture.projectPath), `проверялись посторонние пути: ${checkedPaths.join(', ')}`);
+          // Исход снятия/установки readonly в окне сравнения попадает в журнал синхронизации (issue #78).
+          assert.ok(log, 'openDiffs должен получить журнал');
+          log('[readonly][skip] активен не ObjectModule.bsl');
+          assert.strictEqual(harness.outputLines[harness.outputLines.length - 1], '[repository][file-sync] [readonly][skip] активен не ObjectModule.bsl');
           if (scenario.choice === 'keep-local') {
             assert.deepStrictEqual(actions, ['Сравнить']);
             assert.strictEqual(info?.includes('Захватите объект, чтобы перенести правки.'), restricted === 'project');
