@@ -24,6 +24,13 @@ export const REPOSITORY_LOCKS_ROOT = path.resolve(__dirname, '../../../../exampl
  */
 export const PARTIAL_LOCKS_ROOT = path.resolve(__dirname, '../../../../example/repository/2.21-partial-locks');
 export const PARTIAL_ROOT_ROOT = path.resolve(__dirname, '../../../../example/repository/2.21-partial-root');
+/**
+ * Привязка к хранилищу пользователем с уже имеющимися захватами (issue #106), тот же генератор:
+ * `bind-own-locks.out.txt` — вывод привязки пустой базы Petrov (блок непомеченных захватов),
+ * `bind-not-empty.out.txt` — отказ привязки базы с загруженной конфигурацией без -forceReplaceCfg.
+ * Ожидаемый блок — `binds[0].expect.unmarked` сценария.
+ */
+export const BIND_LOCKS_ROOT = path.resolve(__dirname, '../../../../example/repository/2.21-bind');
 export const REPOSITORY_TLS_DIR = path.resolve(__dirname, '../../../../example/repository/tls');
 export const EXAMPLE_CF_221 = path.resolve(__dirname, '../../../../example/2.21/src/cf');
 
@@ -66,6 +73,14 @@ export function readScenarioAt(root: string): LockScenario & { steps: { log?: st
   return JSON.parse(fs.readFileSync(path.join(root, 'scenario.json'), 'utf-8')) as LockScenario & {
     steps: { log?: string; expect?: LockStepExpectation }[];
   };
+}
+
+export interface BindScenario {
+  binds: { user: string; log: string; expect: { unmarked?: string[]; contains?: string } }[];
+}
+
+export function readBindScenario(): BindScenario {
+  return JSON.parse(fs.readFileSync(path.join(BIND_LOCKS_ROOT, 'scenario.json'), 'utf-8')) as BindScenario;
 }
 
 export function scenarioFixturePath(root: string, version: LockFixtureVersion, ...parts: string[]): string {

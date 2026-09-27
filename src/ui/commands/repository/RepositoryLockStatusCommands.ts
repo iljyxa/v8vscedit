@@ -128,10 +128,8 @@ async function syncTargets(
   let changed = false;
   for (const target of targets) {
     const result = await services.repositoryService.lockStatus.syncTarget(target);
-    const described = describeLockStatusResult(target, result);
-    services.outputChannel.appendLine(`${LOG_PREFIX} ${described.message}`);
+    const described = logLockStatusResult(services, target, result);
     if (result.status === 'synced') {
-      logSyncDetails(services, target, result);
       changed ||= result.changed.length > 0;
     }
     report(described.level, described.message);
@@ -141,8 +139,25 @@ async function syncTargets(
   }
 }
 
+/**
+ * Исход опроса одной цели — в журнал: описание и, при успехе, подробности (свои захваты вне
+ * проекта, неподтверждённые локальные). Общая для ручного обновления и привязки к хранилищу.
+ */
+export function logLockStatusResult(
+  services: Pick<CommandServices, 'outputChannel'>,
+  target: RepositoryTarget,
+  result: RepositoryLockStatusSyncResult
+): { level: 'info' | 'warning' | 'error'; message: string } {
+  const described = describeLockStatusResult(target, result);
+  services.outputChannel.appendLine(`${LOG_PREFIX} ${described.message}`);
+  if (result.status === 'synced') {
+    logSyncDetails(services, target, result);
+  }
+  return described;
+}
+
 function logSyncDetails(
-  services: RepositoryLockStatusServices,
+  services: Pick<CommandServices, 'outputChannel'>,
   target: RepositoryTarget,
   result: Extract<RepositoryLockStatusSyncResult, { status: 'synced' }>
 ): void {

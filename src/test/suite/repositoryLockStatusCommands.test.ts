@@ -7,6 +7,7 @@ import type { RepositoryTarget } from '../../infra/repository/RepositoryService'
 import type { CommandServices } from '../../ui/commands/_shared';
 import {
   describeLockStatusResult,
+  logLockStatusResult,
   refreshRepositoryLockStatuses,
   registerRepositoryLockStatusCommands,
   syncRepositoryLockStatusesOnStartup,
@@ -82,6 +83,20 @@ suite('RepositoryLockStatusCommands — описание исхода (issue #6)
     }
     const plain = describeLockStatusResult(TARGET, { ...result, unmatched: 0, ownElsewhere: [], unconfirmed: [] }).message;
     assert.ok(!plain.includes('не найдено') && !plain.includes('вне проекта') && !plain.includes('не подтверждено'), plain);
+  });
+
+  test('logLockStatusResult: описание и подробности synced — в журнал, возвращает описание (issue #106)', () => {
+    const log: string[] = [];
+    const services = { outputChannel: { appendLine: (line: string) => log.push(line) } as unknown as vscode.OutputChannel };
+    const result: RepositoryLockStatusSyncResult = { status: 'synced', foreign: 1, own: 2, unmatched: 0, changed: [], ownElsewhere: ['Справочник.А'], unconfirmed: ['Справочник.Б'] };
+    const described = logLockStatusResult(services, TARGET, result);
+    assert.deepStrictEqual(described, describeLockStatusResult(TARGET, result));
+    assert.strictEqual(log.length, 3);
+    assert.strictEqual(log[0], `[repository][locks] ${described.message}`);
+    assert.ok(log[1].includes('вне проекта') && log[1].includes('Справочник.А'));
+    assert.ok(log[2].includes('[warn]') && log[2].includes('Справочник.Б'));
+    assert.strictEqual(logLockStatusResult(services, TARGET, { status: 'stale' }).level, 'warning');
+    assert.strictEqual(log.length, 4);
   });
 
   test('not-connected и stale — предупреждения', () => {

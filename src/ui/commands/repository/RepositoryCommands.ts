@@ -1,12 +1,18 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import type { RepositoryBinding, RepositoryNodeRef, RepositoryService, RepositoryTarget } from '../../../infra/repository/RepositoryService';
+import type { RepositoryNodeRef, RepositoryService, RepositoryTarget } from '../../../infra/repository/RepositoryService';
 import type { CommandServices, NodeArg } from '../_shared';
 import {
   ensureTargetUpdatedBeforeCommit,
   refreshRepositoryUi,
-  runPostRepositorySync,
 } from './RepositoryDatabaseSync';
+import {
+  completeRepositoryBind,
+  DEFAULT_REPOSITORY_BIND_DEPS,
+  describeBindFailureHint,
+  type RepositoryBindDeps,
+  validateBindingForm,
+} from './RepositoryBindFlow';
 import {
   askRecursiveMode,
   pickDisconnectForce,
@@ -47,7 +53,8 @@ type RepositoryCommandNode = NodeArg & RepositoryNodeRef;
 export function registerRepositoryCommands(
   context: vscode.ExtensionContext,
   services: CommandServices,
-  deps: RepositoryFileSyncDeps = DEFAULT_REPOSITORY_FILE_SYNC_DEPS
+  deps: RepositoryFileSyncDeps = DEFAULT_REPOSITORY_FILE_SYNC_DEPS,
+  bindDeps: RepositoryBindDeps = DEFAULT_REPOSITORY_BIND_DEPS
 ): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('v8vscedit.repository.connect', async (node: NodeArg) => {
@@ -74,6 +81,7 @@ export function registerRepositoryCommands(
         return;
       }
 
+      let bindOutput = '';
       const ok = await runRepositoryCliCommand({
         command: 'repository-bind',
         target,
@@ -87,7 +95,9 @@ export function registerRepositoryCommands(
         successMessage: `Конфигурация "${target.displayName}" подключена к хранилищу.`,
         errorTitle: `Ошибка подключения "${target.displayName}" к хранилищу.`,
         failureOperation: 'подключении к хранилищу',
-        afterSuccess: async () => {
+        failureHint: describeBindFailureHint,
+        afterSuccess: async (output) => {
+          bindOutput = output;
           await services.repositoryService.saveBinding(target, validation.binding);
           services.repositoryService.setConnected(target, true);
           refreshRepositoryUi(services);
@@ -95,7 +105,7 @@ export function registerRepositoryCommands(
       }, toCliServices(services), deps.runRepositoryCli, deps.notifyBusy);
 
       if (ok) {
-        void runPostRepositorySync(target, services);
+        await completeRepositoryBind({ target, repoUser: validation.binding.repoUser, bindOutput }, services, bindDeps);
       }
     }),
 
@@ -123,6 +133,7 @@ export function registerRepositoryCommands(
         return;
       }
 
+      let bindOutput = '';
       const ok = await runRepositoryCliCommand({
         command: 'repository-create',
         target,
@@ -138,7 +149,8 @@ export function registerRepositoryCommands(
         successMessage: `Хранилище для "${target.displayName}" создано.`,
         errorTitle: `Ошибка создания хранилища для "${target.displayName}".`,
         failureOperation: 'создании хранилища',
-        afterSuccess: async () => {
+        afterSuccess: async (output) => {
+          bindOutput = output;
           await services.repositoryService.saveBinding(target, validation.binding);
           services.repositoryService.setConnected(target, !formData.noBind);
           refreshRepositoryUi(services);
@@ -146,7 +158,7 @@ export function registerRepositoryCommands(
       }, toCliServices(services), deps.runRepositoryCli, deps.notifyBusy);
 
       if (ok && !formData.noBind) {
-        void runPostRepositorySync(target, services);
+        await completeRepositoryBind({ target, repoUser: validation.binding.repoUser, bindOutput }, services, bindDeps);
       }
     }),
 
@@ -638,33 +650,6 @@ function ensureConnected(repositoryService: RepositoryService, target: Repositor
     return false;
   }
   return true;
-}
-
-function validateBindingForm(
-  formData: { repoPath: string; repoUser: string; repoPassword: string }
-): { ok: true; binding: RepositoryBinding } | { ok: false; errorMessage: string } {
-  const repoPath = formData.repoPath.trim();
-  const repoUser = formData.repoUser.trim();
-  if (!repoPath) {
-    return {
-      ok: false,
-      errorMessage: '\u041d\u0443\u0436\u043d\u043e \u0443\u043a\u0430\u0437\u0430\u0442\u044c \u043f\u0443\u0442\u044c \u043a \u0445\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0443 \u0438\u043b\u0438 \u0430\u0434\u0440\u0435\u0441 \u0441\u0435\u0440\u0432\u0435\u0440\u0430.',
-    };
-  }
-  if (!repoUser) {
-    return {
-      ok: false,
-      errorMessage: '\u041d\u0443\u0436\u043d\u043e \u0443\u043a\u0430\u0437\u0430\u0442\u044c \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f \u0445\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0430.',
-    };
-  }
-  return {
-    ok: true,
-    binding: {
-      repoPath,
-      repoUser,
-      repoPassword: formData.repoPassword,
-    },
-  };
 }
 
 async function pickBoolean(

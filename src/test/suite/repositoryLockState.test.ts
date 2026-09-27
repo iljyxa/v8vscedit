@@ -948,3 +948,73 @@ suite('RepositoryLockState — applyLock с отказанными единиц�
     }
   });
 });
+
+suite('RepositoryLockState — applyReportedOwnLocks: свои захваты из вывода привязки (issue #106)', () => {
+  const OBSERVED_AT = '2026-09-27T13:00:00';
+  const report = (fullNames: readonly string[]): { user: string; observedAt: string; fullNames: readonly string[] } =>
+    ({ user: 'Petrov', observedAt: OBSERVED_AT, fullNames });
+
+  function collectEvents(state: RepositoryLockState): RepositoryLocksChangedEvent[] {
+    const events: RepositoryLocksChangedEvent[] = [];
+    state.onDidChangeLocks((event) => events.push(event));
+    return events;
+  }
+
+  test('свежая привязка: own-elsewhere с пользователем отчёта, без захвата и версии сервера; возврат отсортирован, событие', () => {
+    const { state, target } = createState();
+    state.resetScope(target, true);
+    const events = collectEvents(state);
+    const changed = state.applyReportedOwnLocks(target, report(['Справочник.Б', 'Справочник.А']));
+    assert.deepStrictEqual(changed, ['Справочник.А', 'Справочник.Б']);
+    for (const fullName of changed) {
+      assert.deepStrictEqual(state.getLockInfo(target, fullName), { state: 'own-elsewhere', user: 'Petrov', lockedAt: undefined });
+      assert.strictEqual(state.isLocked(target, fullName), false);
+    }
+    assert.strictEqual(state.getServerVersion(target), undefined);
+    assert.strictEqual(state.isConnected(target), true);
+    assert.strictEqual(events.length, 1);
+    assert.deepStrictEqual(events[0].fullNames, ['Справочник.А', 'Справочник.Б']);
+  });
+
+  test('после опроса: lockSync и время захвата сохраняются, чужая отметка сообщённого снята, прочие чужие целы', () => {
+    const { state, target } = createState();
+    state.applyServerLocks(target, {
+      user: 'Admin',
+      syncedAt: '2026-09-27T12:00:00',
+      serverVersion: '8.5.1.1529',
+      basedOnRevision: state.getRevision(),
+      foreign: { 'Справочник.Б': { user: 'Ivanov' }, 'Справочник.В': { user: 'Ivanov', lockedAt: '2026-09-27T09:00:00' } },
+      own: { 'Справочник.А': { lockedAt: '2026-09-27T10:00:00' } },
+    });
+    const changed = state.applyReportedOwnLocks(target, report(['Справочник.А', 'Справочник.Б']));
+    assert.deepStrictEqual(changed, ['Справочник.Б']);
+    assert.strictEqual(state.getServerVersion(target), '8.5.1.1529');
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), { state: 'own-elsewhere', user: 'Admin', lockedAt: '2026-09-27T10:00:00' });
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.Б'), { state: 'own-elsewhere', user: 'Admin', lockedAt: undefined });
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.В'), { state: 'foreign', user: 'Ivanov', lockedAt: '2026-09-27T09:00:00', observedAt: undefined });
+  });
+
+  test('пустой отчёт — [], без записи и события', () => {
+    const { workspaceRoot, state, target } = createState();
+    const events = collectEvents(state);
+    const revision = state.getRevision();
+    assert.deepStrictEqual(state.applyReportedOwnLocks(target, report([])), []);
+    assert.strictEqual(state.getRevision(), revision);
+    assert.strictEqual(events.length, 0);
+    assert.strictEqual(fs.existsSync(path.join(workspaceRoot, '.v8vscedit', 'repository', 'state.json')), false);
+  });
+
+  test('штатный захват сообщённого — own, подтверждён; следующий опрос целиком заменяет записи запасного пути', () => {
+    const { state, target } = createState();
+    state.applyReportedOwnLocks(target, report(['Справочник.А', 'Справочник.Б']));
+    state.applyLock(target, { anchor: 'Справочник.Б', members: ['Справочник.Б'] });
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.Б'), {
+      state: 'own', user: 'Petrov', lockedAt: undefined, confirmed: true, syncedAt: OBSERVED_AT,
+    });
+    state.applyServerLocks(target, {
+      user: 'Petrov', syncedAt: '2026-09-27T14:00:00', basedOnRevision: state.getRevision(), foreign: {}, own: {},
+    });
+    assert.deepStrictEqual(state.getLockInfo(target, 'Справочник.А'), { state: 'free' });
+    assert.strictEqual(state.getLockInfo(target, 'Справочник.Б').state, 'own');
+  });
+});
