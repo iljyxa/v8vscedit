@@ -303,6 +303,13 @@ Readonly-команды VS Code (`set/resetActiveEditorReadonlyInSession`, `ui/r
 при пропуске и `[readonly] временная вкладка оставлена (несохранённые изменения): <файл>`, если временную
 вкладку не удалось закрыть из-за несохранённых правок.
 
+Окно сравнения слияния (`openMergeDiffs`, `RepositoryFileSyncDialogs.ts`) тем же маршрутом явно выставляет
+readonly файла проекта в обе стороны (issue #78): `writable` — `reset…ReadonlyInSession`, иначе
+`set…ReadonlyInSession` — иначе незахваченный файл, не открывавшийся раньше, был бы редактируем в сравнении.
+Исход, отличный от применения, через `describeActivationOutcome` пишется в журнал синхронизации
+(`deps.openDiffs(pairs, log)` → `[repository][file-sync] [readonly]…`): при `skipped` readonly файла проекта
+остаётся прежним.
+
 Дерево (`MetadataTreeProvider.resolveRepositoryState`), панель свойств
 (`ui/views/properties/propertyEditLock.ts:resolveRepositoryEditProbePath`) и MCP-шлюз
 (`McpMutationGate.assertNodeContentEditable`) проверяют захват формы/макета по **её собственному**
