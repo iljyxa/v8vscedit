@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { isInsideWorkspaceServiceDir } from '../../infra/fs/WorkspaceTempDir';
 import { getRepositoryUnitAncestors, isRootLockName } from '../../infra/repository/RepositoryObjectNames';
 import { resolveLockUnitByRelativePath } from '../../infra/repository/RepositoryObjectScope';
 import type { RepositoryLocksChangedNotice, RepositoryService, RepositoryTarget } from '../../infra/repository/RepositoryService';
@@ -132,7 +133,10 @@ export class EditorReadonlyController {
   }
 
   private planTransitions(event: RepositoryLocksChangedNotice): { tabs: OpenTab[]; applyNow: ReadonlyTransition[] } {
-    const tabs = collectOpenTabs();
+    // Служебный `.v8vscedit/` попадает внутрь configRoot, когда тот совпадает с корнем
+    // рабочей области; его файлы (бэкапы слияния в сравнениях) иначе сошли бы за
+    // файлы корня и переключались бы вместе с ним.
+    const tabs = collectOpenTabs().filter((tab) => !isInsideWorkspaceServiceDir(event.target.configRoot, tab.path));
     const dirtyUris = new Set(
       vscode.workspace.textDocuments.filter((document) => document.isDirty).map((document) => document.uri.toString())
     );
