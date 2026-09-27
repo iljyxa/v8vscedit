@@ -17,6 +17,7 @@ import {
   saveHashCache,
 } from '../cache/HashCache';
 import { saveMetadataCacheForEntry } from '../cache/MetadataCache';
+import { buildAgentDumpSessionId } from './AgentDumpCleanup';
 import { AgentWorkspaceService } from './AgentWorkspaceService';
 import { collectConfigFilesForLoad, detectPotentialRename } from './ConfigLoadFileCollector';
 import {
@@ -156,7 +157,7 @@ export class AgentOperationService {
   ): Promise<ConfigurationDumpHandle> {
     return this.runInfoBaseOperation(hooks, async () => {
       dumpSequence += 1;
-      const sessionId = `${buildSessionKey(target)}-dump-${String(Date.now())}-${String(dumpSequence)}`;
+      const sessionId = buildAgentDumpSessionId(buildSessionKey(target), Date.now(), dumpSequence);
       const workspace = this.workspaceService.ensureWorkspace(sessionId, target);
       const listFile = request.mode === 'partial'
         ? this.workspaceService.writeObjectNamesFile(sessionId, request.fullNames)

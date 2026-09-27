@@ -22,6 +22,7 @@ import {
   runProcess,
 } from '../../../infra/process';
 import { readExtensionListFromDumpFile, resolveDbPassword, type ProjectSecretStorage } from '../../../infra/environment';
+import { createImportTempDir as createWorkspaceTempDir } from '../../../infra/fs/WorkspaceTempDir';
 
 type NodeArg = MetadataNode | { xmlPath?: string; nodeKind?: string; label?: string };
 
@@ -656,12 +657,6 @@ async function runBatchApplyDatabaseConfiguration(
     workspaceFolder,
     outputChannel
   );
-}
-
-function createWorkspaceTempDir(workspaceRoot: string, prefix: string): string {
-  const tempParent = path.join(workspaceRoot, '.v8vscedit', 'import-temp');
-  fs.mkdirSync(tempParent, { recursive: true });
-  return fs.mkdtempSync(path.join(tempParent, prefix));
 }
 
 const FULL_SYNC_CONFIRM_BUTTON = 'Выполнить полную загрузку';
