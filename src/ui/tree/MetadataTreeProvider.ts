@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import type { ConfigEntry } from '../../infra/fs/ConfigLocator';
-import { isSubordinateUnitNode, type RepositoryService } from '../../infra/repository/RepositoryService';
+import { isSubordinateUnitNode, type RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { parseConfigXml } from '../../infra/xml';
 import { getObjectLocationFromXml } from '../../infra/fs/MetaPathResolver';
 import type { SupportInfoService } from '../../infra/support/SupportInfoService';
@@ -285,6 +285,8 @@ export class MetadataTreeProvider implements vscode.TreeDataProvider<MetadataNod
       return;
     }
 
+    // contextValue узла задаётся в конструкторе MetadataNode всегда; `?? ''` — страховка типа TreeItem.
+    /* c8 ignore next */
     const baseContextValue = (element.contextValue ?? '').replace(REPOSITORY_CONTEXT_SUFFIX_RE, '');
     element.contextValue = `${baseContextValue}-${state.connected ? 'repoConnected' : 'repoDisconnected'}`;
     element.repositoryLockTitle = state.lock ? formatRepositoryLockTitle(state.lock) : undefined;
@@ -358,7 +360,7 @@ export class MetadataTreeProvider implements vscode.TreeDataProvider<MetadataNod
       return { connected: false };
     }
 
-    const lock = this.resolveRepositoryLockState(element);
+    const lock = this.resolveRepositoryLockState(this.repositoryService, element, target);
     // Форма/макет объекта — отдельная единица хранилища: нерекурсивный захват владельца
     // её не захватывает, а захват самой единицы разрешает правку без захвата владельца.
     if (isSubordinateUnitNode(element)) {
@@ -376,37 +378,23 @@ export class MetadataTreeProvider implements vscode.TreeDataProvider<MetadataNod
     };
   }
 
-  private resolveRepositoryLockState(element: MetadataNode): RepositoryLockInfo | undefined {
-    if (!this.repositoryService) {
-      return undefined;
-    }
-
+  /** Цель уже разрешена вызывающим по тому же якорю узла — повторно её не ищем. */
+  private resolveRepositoryLockState(
+    repositoryService: RepositoryService,
+    element: MetadataNode,
+    target: RepositoryTarget
+  ): RepositoryLockInfo | undefined {
     if (this.isRootRepositoryNode(element)) {
-      const target = element.xmlPath ? this.repositoryService.resolveTargetByXmlPath(element.xmlPath) : null;
-      return target ? this.repositoryService.getRootLockInfo(target) : undefined;
+      return repositoryService.getRootLockInfo(target);
     }
 
-    const fullName = this.repositoryService.resolveFullName({
+    const fullName = repositoryService.resolveFullName({
       nodeKind: element.nodeKind,
       label: typeof element.label === 'string' ? element.label : element.label?.label,
       xmlPath: element.xmlPath,
       metaContext: element.metaContext,
     });
-    if (!fullName) {
-      return undefined;
-    }
-
-    const anchorXmlPath = element.metaContext?.ownerObjectXmlPath ?? element.xmlPath;
-    if (!anchorXmlPath) {
-      return undefined;
-    }
-
-    const target = this.repositoryService.resolveTargetByXmlPath(anchorXmlPath);
-    if (!target) {
-      return undefined;
-    }
-
-    return this.repositoryService.getLockInfo(target, fullName);
+    return fullName ? repositoryService.getLockInfo(target, fullName) : undefined;
   }
 
   private isRootRepositoryNode(element: MetadataNode): boolean {

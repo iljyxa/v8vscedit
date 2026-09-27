@@ -125,13 +125,17 @@ suite('MetadataTreeProvider — чужие захваты с сервера (iss
     assert.match(String(node.repositoryLockTitle), /^Захвачено: Admin, \d{2}\.\d{2}\.\d{4}/);
   });
 
-  test('после отключения подсказка захвата снимается', () => {
+  test('после отключения подсказка захвата снимается — у объекта и у группы добавления в корень', () => {
     const { treeProvider, ws } = harness;
     const node = decorate(treeProvider, findPath(treeProvider, 'ТорговыйУчет', 'Справочники', 'Контрагенты'));
-    assert.ok(node.repositoryLockTitle);
+    const catalogs = decorate(treeProvider, findPath(treeProvider, 'ТорговыйУчет', 'Справочники'));
+    assert.ok(node.repositoryLockTitle && catalogs.repositoryLockTitle);
     ws.service.setConnected(ws.target, false);
-    decorate(treeProvider, node);
-    assert.strictEqual(node.repositoryLockTitle, undefined);
-    assert.ok(String(node.contextValue).includes('-repoDisconnected'));
+    for (const item of [node, catalogs]) {
+      decorate(treeProvider, item);
+      assert.strictEqual(item.repositoryLockTitle, undefined);
+      assert.ok(String(item.contextValue).includes('-repoDisconnected'), String(item.contextValue));
+      assert.ok(!String(item.contextValue).includes('-repoForeignLocked'), String(item.contextValue));
+    }
   });
 });
