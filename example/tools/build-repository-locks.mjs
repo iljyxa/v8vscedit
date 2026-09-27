@@ -7,7 +7,12 @@
 // документирует, и тест на выдуманных байтах подтверждал бы только сам себя.
 //
 // Сценарий — example/repository/2.21-locks/scenario.json (шаги захвата, ожидаемые захваты по имени
-// записи ConfigDumpInfo.xml, ожидаемые отказы). Результат — каталог версии платформы
+// записи ConfigDumpInfo.xml, ожидаемые отказы). Сценарии частичного отказа рекурсивного захвата
+// (issue #87) — example/repository/2.21-partial-locks и 2.21-partial-root (запуск с --out <каталог>,
+// без --network). Элемент шага: строка — объект без подчинённых, { root: true } — корень,
+// { fullName } — объект; recursive: true — вместе с подчинёнными. expect шага — ожидаемые строки
+// успеха (grants) и отказа (refusals) его /Out; locks принимает { allUnitsExcept, user } — все
+// единицы ConfigDumpInfo.xml, кроме перечисленных. Результат — каталог версии платформы
 // (`8.5.1`, `8.3.27`) рядом со сценарием:
 //   1cv8ddb.1CD; lock-refused.out.txt — вывод /Out отказа захвата (не .log: их исключает .gitignore);
 //   run.json — платформа, окно времени захватов, адрес, alias, размер страницы, инвентаризация
@@ -23,7 +28,8 @@
 //   2. хранилище: каталог <work>/repo или (--network) crserver этой платформы на свободном порту;
 //      Admin без пароля создаёт хранилище, добавляет Petrov/123 (LockObjects); база B привязывается
 //      под Petrov;
-//   3. шаги захвата из сценария; последний шаг Admin — ожидаемый отказ (код 1), /Out сохраняется;
+//   3. шаги захвата из сценария; шаг с expectRefusal — ожидаемый отказ (код 1), /Out шага с log
+//      сохраняется и сверяется с expect;
 //   4. (--network) обмены собственным минимальным клиентом этого скрипта (он написан независимо от
 //      продуктового TypeScript — байты продукта обязаны совпасть с ним); запрос Конфигуратора
 //      снимается записывающим tcp-прокси при /ConfigurationRepositoryReport;
@@ -140,11 +146,18 @@ async function main() {
     if (item.log) {
       copyFileSync(log, path.join(outDir, item.log));
     }
+    if (item.expect) {
+      verifyStepLog(readFileSync(log), item.expect, item.log ?? `шаг ${String(index + 1)}`);
+    }
   }
   // REVISEDATE хранится с точностью до секунды: запас в секунду с обеих сторон окна.
   await delay(1100);
   run.lockedTo = localTimestamp(new Date());
-  verifyRefusals(readFileSync(path.join(outDir, 'lock-refused.out.txt')));
+  // Верхнеуровневые отказы — формат первого сценария (2.21-locks); новые сценарии сверяют
+  // каждый шаг своим expect.
+  if (scenario.refusals) {
+    verifyRefusals(readFileSync(path.join(outDir, 'lock-refused.out.txt')));
+  }
 
   let designerRequest;
   if (crserver) {
@@ -191,10 +204,17 @@ async function main() {
 function buildObjectsXml(items) {
   const lines = ['<?xml version="1.0" encoding="UTF-8"?>',
     '<Objects xmlns="http://v8.1c.ru/8.3/config/objects" version="1.0">'];
+  // Элемент шага: строка — объект без подчинённых; { root: true } — корень конфигурации;
+  // { fullName } — объект; recursive: true — вместе с подчинёнными (includeChildObjects).
   for (const item of items) {
-    lines.push(typeof item === 'string'
-      ? `  <Object fullName="${item}" includeChildObjects="false"/>`
-      : '  <Configuration includeChildObjects="false"/>');
+    const recursive = typeof item === 'object' && item.recursive === true ? 'true' : 'false';
+    if (typeof item === 'string') {
+      lines.push(`  <Object fullName="${item}" includeChildObjects="false"/>`);
+    } else if (item.root === true) {
+      lines.push(`  <Configuration includeChildObjects="${recursive}"/>`);
+    } else {
+      lines.push(`  <Object fullName="${item.fullName}" includeChildObjects="${recursive}"/>`);
+    }
   }
   lines.push('</Objects>', '');
   return lines.join('\n');
@@ -211,7 +231,14 @@ function readDumpInfoIds() {
 }
 
 function expectedLocks() {
-  return scenario.locks.map((lock) => `${lock.dumpName}=${lock.user}`).sort();
+  // { allUnitsExcept, user } — рекурсивный захват корня: все единицы хранилища, кроме перечисленных.
+  return scenario.locks.flatMap((lock) => {
+    if (!lock.allUnitsExcept) {
+      return [`${lock.dumpName}=${lock.user}`];
+    }
+    const excluded = new Set(lock.allUnitsExcept);
+    return [...readDumpInfoIds().values()].filter((name) => !excluded.has(name)).map((name) => `${name}=${lock.user}`);
+  }).sort();
 }
 
 function verifyLockSet(actual, what) {
@@ -233,6 +260,24 @@ function verifyRefusals(raw) {
     fail(`отказы захвата не совпадают со сценарием\n  ожидалось: ${expected.join(', ')}\n  получено:  ${refusals.join(', ')}\n${text}`);
   }
   console.log(`  отказы захвата: ${refusals.join(', ')}`);
+}
+
+/** Сверка /Out шага с expect: строки успеха и отказа захвата — ровно ожидаемые. */
+function verifyStepLog(raw, expect, what) {
+  const text = decodeDesignerLog(raw);
+  const grants = [...text.matchAll(/^Объект захвачен для редактирования: (.+?) ?$/gm)].map((match) => match[1]).sort();
+  const refusals = [...text.matchAll(/^Объект захвачен для редактирования другим пользователем: (.+) \((.+)\) ?$/gm)]
+    .map((match) => `${match[1]}=${match[2]}`)
+    .sort();
+  const expectedGrants = [...expect.grants].sort();
+  const expectedRefusals = expect.refusals.map((item) => `${item.objectName}=${item.user}`).sort();
+  if (JSON.stringify(grants) !== JSON.stringify(expectedGrants)
+    || JSON.stringify(refusals) !== JSON.stringify(expectedRefusals)) {
+    fail(`${what}: вывод захвата не совпадает со сценарием\n  ожидались захваты: ${expectedGrants.join(', ')}\n`
+      + `  получены захваты:  ${grants.join(', ')}\n  ожидались отказы:  ${expectedRefusals.join(', ')}\n`
+      + `  получены отказы:   ${refusals.join(', ')}\n${text}`);
+  }
+  console.log(`  ${what}: захваты [${grants.join(', ')}], отказы [${refusals.join(', ')}]`);
 }
 
 function verifyDatabaseLocks(database, run) {
