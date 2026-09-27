@@ -1,6 +1,8 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
+import { builtinModules } from 'module';
+import { parse } from 'acorn';
 
 const ROOT = path.resolve(__dirname, '../../..');
 
@@ -73,12 +75,46 @@ suite('Package manifest', () => {
     }
   });
 
-  test('внешние зависимости node-бандла не вырезаются из VSIX', () => {
-    const ignore = fs.readFileSync(path.join(ROOT, '.vscodeignore'), 'utf-8');
+  /*
+   * VSIX не содержит node_modules: `vsce package --no-dependencies` отбрасывает их
+   * независимо от исключений в .vscodeignore, и тогда первый require пакета из
+   * node_modules роняет активацию. Поэтому собранный node-бандл обязан требовать только
+   * то, что даёт среда выполнения.
+   */
+  test('node-бандл dist/ не требует пакетов из node_modules', () => {
+    const bundleFiles = listFiles(path.join(ROOT, 'dist')).filter(
+      (file) => file.endsWith('.js') && !file.startsWith(path.join(ROOT, 'dist', 'ui') + path.sep)
+    );
+    assert.ok(
+      bundleFiles.includes(path.join(ROOT, 'dist', 'extension.js')),
+      'Не найден dist/extension.js — node-бандл не собран'
+    );
 
-    for (const dependency of ['ssh2', 'asn1', 'bcrypt-pbkdf', 'safer-buffer', 'tweetnacl']) {
-      assert.match(ignore, new RegExp(`!node_modules/${dependency}/\\*\\*`));
+    const builtins = new Set(builtinModules);
+    // Опциональные нативные аддоны ssh2: он загружает их в try/catch и без них работает на чистом JS.
+    const optionalNative = new Set(['cpu-features', './crypto/build/Release/sshcrypto.node']);
+    const violations: string[] = [];
+    for (const file of bundleFiles) {
+      // Разбор AST, а не поиск по тексту: кодогенератор ajv держит `require("ajv/...")` в строках-шаблонах.
+      for (const specifier of collectRequireSpecifiers(fs.readFileSync(file, 'utf-8'))) {
+        const bare = specifier.replace(/^node:/, '');
+        const allowed = specifier === 'vscode'
+          || builtins.has(bare)
+          || optionalNative.has(specifier)
+          || (specifier.startsWith('.') && fs.existsSync(path.resolve(path.dirname(file), specifier)));
+        if (!allowed) {
+          violations.push(`${path.relative(ROOT, file)}: require('${specifier}')`);
+        }
+      }
     }
+    assert.deepStrictEqual(violations, []);
+  });
+
+  test('.vscodeignore не пропускает node_modules в VSIX', () => {
+    const lines = fs.readFileSync(path.join(ROOT, '.vscodeignore'), 'utf-8').split(/\r?\n/).map((line) => line.trim());
+
+    assert.ok(lines.includes('node_modules/**'), 'node_modules обязан исключаться из VSIX целиком');
+    assert.deepStrictEqual(lines.filter((line) => line.startsWith('!node_modules')), []);
   });
 
   test('прямые webview-импорты указаны как прямые зависимости', () => {
@@ -87,6 +123,53 @@ suite('Package manifest', () => {
     assert.ok(manifest.dependencies?.['@vscode/codicons'], '@vscode/codicons нужен для universal webview');
   });
 });
+
+interface RequireArgument {
+  type: string;
+  value?: unknown;
+  expressions?: unknown[];
+  quasis?: { value: { cooked?: string } }[];
+}
+
+/** Аргументы вызовов `require('<литерал>')` в модуле; строки, похожие на вызов, не считаются. */
+function collectRequireSpecifiers(source: string): string[] {
+  const specifiers: string[] = [];
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (!node || typeof node !== 'object') {
+      return;
+    }
+    const record = node as Record<string, unknown>;
+    if (record.type === 'CallExpression') {
+      const callee = record.callee as { type?: string; name?: string };
+      const argument = (record.arguments as RequireArgument[]).at(0);
+      if (callee.type === 'Identifier' && callee.name === 'require' && argument) {
+        if (argument.type === 'Literal' && typeof argument.value === 'string') {
+          specifiers.push(argument.value);
+        } else if (argument.type === 'TemplateLiteral' && argument.expressions?.length === 0) {
+          specifiers.push(argument.quasis?.[0]?.value.cooked ?? '');
+        }
+      }
+    }
+    for (const [key, value] of Object.entries(record)) {
+      if (key !== 'type' && value && typeof value === 'object') {
+        visit(value);
+      }
+    }
+  };
+  visit(parse(source, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true }));
+  return specifiers;
+}
+
+function listFiles(dir: string): string[] {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name);
+    return entry.isDirectory() ? listFiles(full) : [full];
+  });
+}
 
 function readJson(relativePath: string): unknown {
   return JSON.parse(fs.readFileSync(path.join(ROOT, relativePath), 'utf-8')) as unknown;
