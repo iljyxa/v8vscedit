@@ -1,0 +1,60 @@
+{
+  "platform": "8.3.27.2342",
+  "alias": "locks",
+  "connectString": "<каталог хранилища>",
+  "lockedFrom": "2026-09-27T20:33:54",
+  "lockedTo": "2026-09-27T20:33:59",
+  "pageSize": 8192,
+  "tables": {
+    "DEPOT": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "USERS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": 2
+    },
+    "OBJECTS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": 107
+    },
+    "VERSIONS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "LABELS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "HISTORY": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "LASTESTVERSIONS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "EXTERNALS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "SELFREFS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    },
+    "OUTREFS": {
+      "recordLock": "0",
+      "dataFatLevel": 0,
+      "rows": null
+    }
+  }
+}

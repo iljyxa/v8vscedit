@@ -9,6 +9,7 @@ import {
   buildRepositoryCommitRequest,
   buildRepositoryUnlockRequest,
   buildRepositoryUpdateRequest,
+  decodeLogFile,
   executeRepositoryCli,
   runRepositoryCliCommand,
   type RepositoryCliCommandServices,
@@ -17,6 +18,8 @@ import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOp
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
+import { describeBindFailureHint } from '../../ui/commands/repository/RepositoryBindFlow';
+import { BIND_LOCKS_ROOT, LOCK_FIXTURE_VERSIONS, lockFixturePath, scenarioFixturePath } from './support/repositoryLockFixtures';
 
 /**
  * Issue #1 — переписано под новый контракт: `maybeRestoreLockSnapshot*` удалены
@@ -543,6 +546,62 @@ suite('RepositoryCommandRunner — runRepositoryCliCommand: внедрение e
     assert.strictEqual(result, false);
     assert.strictEqual(errorMessageCalls.length, 1);
     assert.ok(String(errorMessageCalls[0][0]).includes('сбой сети'));
+  });
+
+  test('afterSuccess получает вывод /Out из done, без вывода — пустую строку (issue #106)', async () => {
+    const outputs: string[] = [];
+    const options = { ...baseOptions(), afterSuccess: (output: string) => { outputs.push(output); } };
+    await runRepositoryCliCommand(options, services, () => Promise.resolve({ status: 'done', output: 'вывод привязки' }));
+    await runRepositoryCliCommand(options, services, () => Promise.resolve({ status: 'done' }));
+    assert.deepStrictEqual(outputs, ['вывод привязки', '']);
+  });
+
+  for (const version of LOCK_FIXTURE_VERSIONS) {
+    test(`failed с выводом отказа непустой конфигурации (${version}) + failureHint — одно сообщение с подсказкой про -ForceReplaceCfg (issue #106)`, async () => {
+      const output = decodeLogFile(fs.readFileSync(scenarioFixturePath(BIND_LOCKS_ROOT, version, 'bind-not-empty.out.txt')));
+      const result = await runRepositoryCliCommand(
+        { ...baseOptions(), failureHint: describeBindFailureHint },
+        services,
+        () => Promise.resolve({ status: 'failed', message: 'Ошибка при подключении: Ошибка подключения информационной базы к хранилищу', output })
+      );
+      assert.strictEqual(result, false);
+      assert.strictEqual(errorMessageCalls.length, 1);
+      const message = String(errorMessageCalls[0][0]);
+      assert.ok(message.startsWith('Ошибка привязки\nОшибка при подключении'), message);
+      assert.ok(message.includes('«Принудительно заменить конфигурацию» (-ForceReplaceCfg)'), message);
+    });
+
+    test(`failed с выводом отказа захвата (${version}) + failureHint — без подсказки (issue #106)`, async () => {
+      const output = decodeLogFile(fs.readFileSync(lockFixturePath(version, 'lock-refused.out.txt')));
+      await runRepositoryCliCommand(
+        { ...baseOptions(), failureHint: describeBindFailureHint },
+        services,
+        () => Promise.resolve({ status: 'failed', message: 'сбой', output })
+      );
+      assert.deepStrictEqual(errorMessageCalls.map((call) => call[0]), ['Ошибка привязки\nсбой']);
+    });
+  }
+
+  test('failed без failureHint — прежнее сообщение, даже при выводе отказа непустой конфигурации (issue #106)', async () => {
+    const output = decodeLogFile(fs.readFileSync(scenarioFixturePath(BIND_LOCKS_ROOT, '8.5.1', 'bind-not-empty.out.txt')));
+    await runRepositoryCliCommand(baseOptions(), services, () => Promise.resolve({ status: 'failed', message: 'сбой', output }));
+    assert.deepStrictEqual(errorMessageCalls.map((call) => call[0]), ['Ошибка привязки\nсбой']);
+  });
+
+  test('failureHint видит и сообщение, когда вывода нет (issue #106)', async () => {
+    const inputs: string[] = [];
+    await runRepositoryCliCommand(
+      { ...baseOptions(), failureHint: (text) => { inputs.push(text); return undefined; } },
+      services,
+      () => Promise.resolve({ status: 'failed', message: 'Конфигурация не пустая!' })
+    );
+    assert.deepStrictEqual(inputs, ['\nКонфигурация не пустая!']);
+  });
+
+  test('describeBindFailureHint: подсказка на отказе непустой конфигурации, иначе undefined (issue #106)', () => {
+    const notEmpty = decodeLogFile(fs.readFileSync(scenarioFixturePath(BIND_LOCKS_ROOT, '8.3.27', 'bind-not-empty.out.txt')));
+    assert.match(describeBindFailureHint(notEmpty) ?? '', /изменения базы, не помещённые в хранилище, будут потеряны/);
+    assert.strictEqual(describeBindFailureHint(decodeLogFile(fs.readFileSync(scenarioFixturePath(BIND_LOCKS_ROOT, '8.3.27', 'bind-own-locks.out.txt')))), undefined);
   });
 
   test('execute не передан — по умолчанию используется executeRepositoryCli (совпадает с прежним поведением: нет env.json → failed)', async () => {

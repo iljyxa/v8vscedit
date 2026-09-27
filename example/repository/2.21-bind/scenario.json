@@ -1,0 +1,50 @@
+{
+  "description": "Подключение к хранилищу пользователем, у которого уже есть захваты (issue #106), для example/tools/build-repository-locks.mjs. Petrov держит корень (без подчинённых) и две формы, Admin — Справочник.Банки; затем Petrov привязывает к хранилищу пустую базу (вывод перечисляет его захваты, непомеченные в конфигурации) и базу с загруженной конфигурацией без -forceReplaceCfg (отказ «Конфигурация не пустая!»).",
+  "alias": "locks",
+  "users": [
+    { "name": "Admin", "password": "" },
+    { "name": "Petrov", "password": "123", "rights": "LockObjects" }
+  ],
+  "steps": [
+    {
+      "user": "Petrov",
+      "lock": [
+        { "root": true },
+        "Справочник.Контрагенты.Форма.ФормаЭлемента",
+        "Справочник.Контрагенты.Форма.ФормаСписка"
+      ]
+    },
+    {
+      "user": "Admin",
+      "lock": ["Справочник.Банки"]
+    }
+  ],
+  "binds": [
+    {
+      "user": "Petrov",
+      "base": "empty",
+      "log": "bind-own-locks.out.txt",
+      "expect": {
+        "unmarked": [
+          "Справочник.Контрагенты.Форма.ФормаЭлемента",
+          "ТорговыйУчет",
+          "Справочник.Контрагенты.Форма.ФормаСписка"
+        ]
+      }
+    },
+    {
+      "user": "Petrov",
+      "base": "loaded",
+      "forceReplaceCfg": false,
+      "expectFailure": true,
+      "log": "bind-not-empty.out.txt",
+      "expect": { "contains": "Конфигурация не пустая!" }
+    }
+  ],
+  "locks": [
+    { "dumpName": "Configuration.ТорговыйУчет", "user": "Petrov" },
+    { "dumpName": "Catalog.Контрагенты.Form.ФормаЭлемента", "user": "Petrov" },
+    { "dumpName": "Catalog.Контрагенты.Form.ФормаСписка", "user": "Petrov" },
+    { "dumpName": "Catalog.Банки", "user": "Admin" }
+  ]
+}

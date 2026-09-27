@@ -40,7 +40,8 @@ export interface RepositoryCliRequest {
 }
 
 export type RepositoryCliResult =
-  | { status: 'done' }
+  /** `output` — вывод /Out успешной команды: по нему привязка находит свои захваты (issue #106). */
+  | { status: 'done'; output?: string }
   | { status: 'interrupted'; message: string }
   /** `output` — вывод /Out Конфигуратора: по нему распознаются отказы захвата. */
   | { status: 'failed'; message: string; output?: string };
@@ -56,7 +57,13 @@ interface RepositoryCliRunOptions {
   errorTitle: string;
   failureOperation?: string;
   showSuccessMessage?: boolean;
-  afterSuccess?: () => void | Promise<void>;
+  /** Получает вывод /Out успешной команды (пустая строка, если его нет). */
+  afterSuccess?: (output: string) => void | Promise<void>;
+  /**
+   * Подсказка к ошибке по выводу /Out и сообщению: причина ошибки берётся из последней строки
+   * вывода, а распознаваемый случай (например, непустая конфигурация при привязке) бывает выше.
+   */
+  failureHint?: (output: string) => string | undefined;
 }
 
 let statusBarItem: vscode.StatusBarItem | undefined;
@@ -201,7 +208,7 @@ async function runRepositoryDesigner(
 
     services.outputChannel.appendLine(`[repository] Завершено: ${commandAsText}`);
     endRepositoryOperationStatus(title, 'завершено');
-    return { status: 'done' };
+    return { status: 'done', output: logContent };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     services.outputChannel.appendLine(`[repository][error] ${message}`);
@@ -251,11 +258,12 @@ export async function runRepositoryCliCommand(
     return false;
   }
   if (result.status === 'failed') {
-    await vscode.window.showErrorMessage(`${options.errorTitle}\n${result.message}`);
+    const hint = options.failureHint?.([result.output, result.message].join('\n'));
+    await vscode.window.showErrorMessage(`${options.errorTitle}\n${result.message}${hint ? `\n${hint}` : ''}`);
     return false;
   }
   try {
-    await options.afterSuccess?.();
+    await options.afterSuccess?.(result.output ?? '');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     services.outputChannel.appendLine(`[repository][error] ${message}`);

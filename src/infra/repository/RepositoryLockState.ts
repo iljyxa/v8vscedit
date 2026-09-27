@@ -94,6 +94,13 @@ export interface RepositoryServerLockSync {
   readonly own: Readonly<Record<string, { lockedAt?: string }>>;
 }
 
+/** Свои захваты, сообщённые платформой вне опроса сервера (вывод привязки к хранилищу). */
+export interface RepositoryReportedOwnLocks {
+  readonly user: string;
+  readonly observedAt: string;
+  readonly fullNames: readonly string[];
+}
+
 export interface RepositoryServerLockApplyResult {
   changed: string[];
   ownElsewhere: string[];
@@ -373,6 +380,35 @@ export class RepositoryLockState {
       return { ...scope, foreignLocks };
     });
     const changed = sortNames([...new Set(refusals.map((refusal) => refusal.fullName))]);
+    this.emit(target, changed);
+    return changed;
+  }
+
+  /**
+   * Запасной источник своих серверных захватов — вывод привязки к хранилищу (issue #106), когда
+   * опрос сервера недоступен. Записи сливаются без времени захвата, сообщённые имена перестают
+   * быть «чужими» (вывод относится к нашему пользователю); lockSync ставится, только если его не
+   * было — иначе затёрлись бы время и версия сервера настоящего опроса. Ревизию не сверяет: вывод
+   * получен от платформы только что. Возвращает fullName с новой записью; пустой отчёт — [] без
+   * записи и события.
+   */
+  applyReportedOwnLocks(target: RepositoryTarget, report: RepositoryReportedOwnLocks): string[] {
+    if (report.fullNames.length === 0) {
+      return [];
+    }
+    let changed: string[] = [];
+    this.updateScope(target, (scope) => {
+      const serverOwnLocks = { ...(scope.serverOwnLocks ?? {}) };
+      changed = sortNames(report.fullNames.filter((fullName) =>
+        !(fullName in serverOwnLocks) || isForeignLocked(scope, fullName)));
+      report.fullNames.forEach((fullName) => { serverOwnLocks[fullName] = serverOwnLocks[fullName] ?? {}; });
+      return {
+        ...scope,
+        foreignLocks: withoutKeys(scope.foreignLocks, report.fullNames),
+        serverOwnLocks,
+        lockSync: scope.lockSync ?? { syncedAt: report.observedAt, user: report.user },
+      };
+    });
     this.emit(target, changed);
     return changed;
   }
