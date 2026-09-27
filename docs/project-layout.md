@@ -106,8 +106,13 @@ src/
 │
 ├── lsp/                              # LspManager + analyzer/ (внешний bsl-analyzer; встроенного сервера нет)
 ├── cli/                             # Node entry onec-tools.ts + commands/ + core/ (адаптеры)
-└── test/                            # runTests.ts + suite/
+└── test/                            # runTests.ts + suite/; runnerTempDir.ts — временный каталог прогона
 ```
+
+Оба раннера (`runTests.ts`, `e2e/runE2ETests.ts`) запускают VS Code с `TMPDIR`/`TMP`/`TEMP`, указывающими на
+собственный каталог прогона `v8t-run-*`, и удаляют его после прогона, в том числе упавшего (issue #82).
+Поэтому всё, что тесты и код расширения создают в `os.tmpdir()`, не копится между прогонами. Это страховка,
+а не замена уборки: тест по-прежнему удаляет свои каталоги в `teardown`.
 
 `cli/` — отдельный потребитель `domain/` и `infra/`. Если код нужен и расширению, и CLI — он живёт в `infra/<подпапка>/`, а `cli/core/*` даёт тонкий re-export.
 

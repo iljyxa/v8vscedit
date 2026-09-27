@@ -1,6 +1,7 @@
 import * as path from 'path';
 import { runTests } from '@vscode/test-electron';
 import { takeRunnerSettingsAndSanitize } from '../runnerEnv';
+import { withIsolatedTempDir } from '../runnerTempDir';
 
 /**
  * Запуск E2E-набора: открывает проект-выгрузку 1С как workspace и гоняет
@@ -18,12 +19,13 @@ async function main(): Promise<void> {
     const extensionTestsPath = path.resolve(__dirname, './index');
     const workspace = process.env.E2E_WORKSPACE ?? path.resolve(__dirname, '../../../example/2.20');
 
-    await runTests({
+    await withIsolatedTempDir((extensionTestsEnv) => runTests({
       extensionDevelopmentPath,
       extensionTestsPath,
+      extensionTestsEnv,
       launchArgs: [workspace, '--disable-extensions'],
       version,
-    });
+    }));
   } catch (err) {
     console.error('E2E завершились с ошибкой:', err);
     process.exit(1);
