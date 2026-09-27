@@ -56,6 +56,7 @@ import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOp
 import type { CommandServices, NodeArg } from '../../ui/commands/_shared';
 import { RepositoryService, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
+import { createArgsRecordingDesigner } from './support/argsRecordingDesigner';
 import {
   DEFAULT_REPOSITORY_FILE_SYNC_DEPS,
   type RepositoryFileSyncDeps,
@@ -1370,6 +1371,51 @@ suite('ConfigurationOperationGuard — интеграция ExtensionCommands/Re
         false,
         'при неуспешном исходе (failed) тонкий клиент не должен даже пытаться запуститься'
       );
+    });
+
+    test('runConfigurator: хранилище подключённой cf из дерева передаётся конфигуратору (issue #8)', async function () {
+      if (process.platform === 'win32') {
+        // Процесс-заглушка — shell-скрипт; на Windows запускать нечем.
+        this.skip();
+      }
+      const designer = createArgsRecordingDesigner(workspaceRoot);
+      fs.writeFileSync(path.join(workspaceRoot, 'env.json'), JSON.stringify({
+        default: {
+          '--ibconnection': '/F/tmp/v8-db-run-база',
+          '--path': designer.executablePath,
+          '--repo-path': '/srv/хранилище',
+          '--repo-user': 'Разработчик',
+        },
+      }), 'utf-8');
+      const secretMap = new Map<string, string>();
+      const projectSecretStorage = new ProjectSecretStorage({
+        get: (key: string) => Promise.resolve(secretMap.get(key)),
+        store: (key: string, value: string) => { secretMap.set(key, value); return Promise.resolve(); },
+        delete: (key: string) => { secretMap.delete(key); return Promise.resolve(); },
+      }, workspaceRoot);
+      const repositoryService = new RepositoryService(workspaceRoot, projectSecretStorage);
+      const target = repositoryService.resolveTargetByConfigRoot(EXAMPLE_CF);
+      assert.ok(target);
+      repositoryService.setConnected(target, true);
+      servicesBox.current = createDbServices({
+        projectSecretStorage,
+        repositoryService,
+        treeProvider: { getEntries: () => [{ kind: 'cf', rootPath: EXAMPLE_CF }] } as unknown as CommandServices['treeProvider'],
+      });
+      const originalShowInformationMessage = vscode.window.showInformationMessage;
+      (vscode.window as Pick<typeof vscode.window, 'showInformationMessage'>).showInformationMessage =
+        () => Promise.resolve(undefined);
+      try {
+        await vscode.commands.executeCommand('v8vscedit.runConfigurator');
+      } finally {
+        (vscode.window as Pick<typeof vscode.window, 'showInformationMessage'>).showInformationMessage = originalShowInformationMessage;
+      }
+
+      assert.deepStrictEqual(await designer.waitForArgs(), [
+        'DESIGNER', '/F', '/tmp/v8-db-run-база',
+        '/ConfigurationRepositoryF', '/srv/хранилище',
+        '/ConfigurationRepositoryN', 'Разработчик',
+      ]);
     });
   });
 
