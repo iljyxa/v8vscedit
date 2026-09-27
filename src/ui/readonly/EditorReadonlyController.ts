@@ -53,7 +53,10 @@ export class EditorReadonlyController {
     const close = vscode.workspace.onDidCloseTextDocument((document) => { this.onDocumentClosed(document); });
     // Событие изменения приходит и при смене признака isDirty — сохранении и откате.
     const change = vscode.workspace.onDidChangeTextDocument((event) => { this.onDocumentChanged(event.document); });
-    return vscode.Disposable.from({ dispose: () => locks.dispose() }, active, close, change);
+    // Guard не ставит readonly несохранённому документу при открытии — ждать сохранения
+    // или отката здесь же, чтобы не держать второй механизм ожидания.
+    const skipped = this.bslReadonlyGuard.onDidSkipDirty((document) => { this.awaitClean(document.uri.toString()); });
+    return vscode.Disposable.from({ dispose: () => locks.dispose() }, active, close, change, skipped);
   }
 
   /**
@@ -168,9 +171,7 @@ export class EditorReadonlyController {
       this.awaitingClean.delete(vscode.Uri.file(transition.path).toString());
     }
     for (const transition of plan.afterSave) {
-      const key = vscode.Uri.file(transition.path).toString();
-      this.pending.delete(key);
-      this.awaitingClean.add(key);
+      this.awaitClean(vscode.Uri.file(transition.path).toString());
     }
     for (const transition of plan.defer) {
       const route = selectReadonlyApplyRoute(tabs, transition.path);
@@ -179,6 +180,11 @@ export class EditorReadonlyController {
       }
     }
     return { tabs, applyNow: plan.applyNow };
+  }
+
+  private awaitClean(key: string): void {
+    this.pending.delete(key);
+    this.awaitingClean.add(key);
   }
 
   private async applyToVisibleTabs(tabs: readonly OpenTab[], transitions: readonly ReadonlyTransition[]): Promise<void> {

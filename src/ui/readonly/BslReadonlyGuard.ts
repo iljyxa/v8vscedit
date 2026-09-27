@@ -6,6 +6,9 @@ import type { SupportInfoService } from '../../infra/support/SupportInfoService'
 /**
  * Переводит file:// BSL-файлы в readonly, если редактирование запрещено
  * поддержкой или объект не захвачен в хранилище.
+ * Несохранённый документ (например, буфер, восстановленный hot exit после перезапуска)
+ * не переводится: readonly сессии запрещает сохранение. Guard сообщает о нём событием
+ * `onDidSkipDirty`, и переход откладывается до сохранения или отката правок.
  */
 export class BslReadonlyGuard {
   // Отслеживает документы, для которых readonly-статус уже применён в этой
@@ -16,6 +19,9 @@ export class BslReadonlyGuard {
   // файла VS Code создаёт новый объект документа — трекинг для него сбрасывается
   // сам собой, readonly-статус применится заново (это корректно и нужно).
   private readonly appliedTo = new WeakSet<vscode.TextDocument>();
+  private readonly skipDirtyEmitter = new vscode.EventEmitter<vscode.TextDocument>();
+  /** Документ требует readonly, но не переведён из-за несохранённых правок. */
+  readonly onDidSkipDirty = this.skipDirtyEmitter.event;
 
   constructor(
     private readonly supportService: SupportInfoService,
@@ -25,7 +31,7 @@ export class BslReadonlyGuard {
 
   /** Подписывается на открытия BSL-файлов и помечает редактор readonly в текущей сессии. */
   register(): vscode.Disposable {
-    return vscode.workspace.onDidOpenTextDocument(async (doc) => {
+    const open = vscode.workspace.onDidOpenTextDocument(async (doc) => {
       if (doc.uri.scheme !== 'file') {
         return;
       }
@@ -66,6 +72,7 @@ export class BslReadonlyGuard {
         watcher.dispose();
       }, 5_000);
     });
+    return vscode.Disposable.from(open, this.skipDirtyEmitter);
   }
 
   /**
@@ -83,6 +90,14 @@ export class BslReadonlyGuard {
   /** Делает указанный видимый редактор readonly в текущей сессии. */
   private async applyReadonly(editor: vscode.TextEditor): Promise<void> {
     if (this.appliedTo.has(editor.document)) {
+      return;
+    }
+    // Признак проверяется в момент применения, а не при открытии: к этому моменту
+    // восстановленный буфер уже получил свои правки. В `appliedTo` документ не попадает:
+    // readonly для него ещё не применён, и следующий вызов после отката должен его применить.
+    if (editor.document.isDirty) {
+      this.log.appendLine(`[readonly] Только чтение отложено до сохранения правок: ${path.basename(editor.document.fileName)}`);
+      this.skipDirtyEmitter.fire(editor.document);
       return;
     }
     this.appliedTo.add(editor.document);
