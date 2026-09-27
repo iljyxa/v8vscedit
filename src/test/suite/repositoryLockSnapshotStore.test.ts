@@ -7,6 +7,7 @@ import { RepositoryLockSnapshotStore, diffOwnersAgainstBaseline } from '../../in
 import { resolveObjectScope, type ObjectScope } from '../../infra/repository/RepositoryObjectScope';
 import { computeFileHash } from '../../infra/cache/HashCache';
 import type { RepositoryTarget } from '../../infra/repository/RepositoryService';
+import { removePathWithRetries } from '../../infra/repository/RepositoryTempCleanup';
 import { fixtureUuid, writeConfigurationXml, writeObjectXml } from './support/flatMetadataFixtures';
 
 /**
@@ -585,4 +586,221 @@ suite('RepositoryLockSnapshotStore — diffOwnersAgainstBaseline: группир
   function cfTargetForDiff(): RepositoryTarget {
     return { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'ТорговыйУчет' };
   }
+});
+
+/**
+ * Issue #103 — «manifest-first»: снимок без манифеста не читается, поэтому манифест
+ * удаляется первым и пишется последним. Сбой удаления каталога (на Windows — EPERM от
+ * антивируса/индексатора, на Linux не воспроизводим) моделируется внедрённым примитивом
+ * RemoveTree: остальные операции ФС — настоящие, на реальной копии example/2.21/src/cf.
+ */
+suite('RepositoryLockSnapshotStore — удаление через RemoveTree, manifest-first (issue #103)', () => {
+  const FORM = 'Справочник.Контрагенты.Форма.ФормаСписка';
+  type Hook = (targetPath: string) => void;
+
+  interface StoreHarness {
+    workspaceRoot: string;
+    target: RepositoryTarget;
+    store: RepositoryLockSnapshotStore;
+    calls: string[];
+    /** Поведение для конкретного пути; без записи — настоящее удаление. */
+    hooks: Map<string, Hook>;
+    scope: ObjectScope;
+  }
+
+  const roots: string[] = [];
+  teardown(() => { roots.splice(0).forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })); });
+
+  function epermError(): Error {
+    return Object.assign(new Error("EPERM: operation not permitted, rmdir '\\\\?\\c:\\Ïðîåêòû\\x'"), { code: 'EPERM' });
+  }
+
+  function failRemove(): Hook {
+    return () => { throw epermError(); };
+  }
+
+  function createStoreHarness(): StoreHarness {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-snap-remove-'));
+    roots.push(workspaceRoot);
+    const configRoot = path.join(workspaceRoot, 'src', 'cf');
+    fs.cpSync(EXAMPLE_CF, configRoot, { recursive: true });
+    const target: RepositoryTarget = { configRoot, configKind: 'cf', displayName: 'ТорговыйУчет' };
+    const calls: string[] = [];
+    const hooks = new Map<string, Hook>();
+    const store = new RepositoryLockSnapshotStore(workspaceRoot, (targetPath) => {
+      calls.push(targetPath);
+      const hook = hooks.get(path.resolve(targetPath));
+      if (hook) {
+        hook(targetPath);
+        return;
+      }
+      removePathWithRetries(targetPath);
+    });
+    const scope = resolveObjectScope(configRoot, FORM, target, 'unit');
+    assert.ok(scope, 'предпосылка: область формы ФормаСписка резолвится в реальной фикстуре.');
+    return { workspaceRoot, target, store, calls, hooks, scope };
+  }
+
+  function manifestOf(harness: StoreHarness, fullName = FORM): string {
+    return path.join(harness.store.resolveSnapshotDir(harness.target, fullName), 'manifest.json');
+  }
+
+  test('resolve*-методы совпадают с фактической раскладкой снимков', () => {
+    const harness = createStoreHarness();
+    const { store, target } = harness;
+    const scopeDir = path.join(harness.workspaceRoot, '.v8vscedit', 'repository', 'snapshots', buildScopeKey(target));
+    assert.strictEqual(store.resolveScopeDir(target), scopeDir);
+    assert.strictEqual(store.resolveSnapshotDir(target, FORM), legacySnapshotDir(harness.workspaceRoot, target, FORM));
+    assert.strictEqual(store.resolveRootManifestPath(target), path.join(scopeDir, 'root-manifest.json'));
+    store.captureFromProject(target, FORM, harness.scope);
+    store.captureRootManifest(target);
+    assert.ok(fs.existsSync(manifestOf(harness)));
+    assert.ok(fs.existsSync(store.resolveRootManifestPath(target)));
+  });
+
+  const captures: { name: string; capture: (harness: StoreHarness) => void }[] = [
+    { name: 'captureFromDirectory', capture: (h) => { h.store.captureFromDirectory(h.target, FORM, h.target.configRoot, h.scope); } },
+    { name: 'captureEmpty', capture: (h) => { h.store.captureEmpty(h.target, FORM); } },
+  ];
+
+  for (const item of captures) {
+    test(`${item.name}: сначала удаляется manifest.json, затем каталог снимка`, () => {
+      const harness = createStoreHarness();
+      item.capture(harness);
+      const snapshotDir = harness.store.resolveSnapshotDir(harness.target, FORM);
+      assert.deepStrictEqual(harness.calls, [manifestOf(harness), snapshotDir]);
+      assert.ok(harness.store.readSnapshotInfo(harness.target, FORM));
+    });
+
+    test(`${item.name}: сбой удаления каталога старого снимка — исключение, снимок помечен отсутствием манифеста`, () => {
+      const harness = createStoreHarness();
+      harness.store.captureFromProject(harness.target, FORM, harness.scope);
+      const snapshotDir = harness.store.resolveSnapshotDir(harness.target, FORM);
+      harness.hooks.set(path.resolve(snapshotDir), failRemove());
+
+      assert.throws(() => item.capture(harness), (error: NodeJS.ErrnoException) => error.code === 'EPERM');
+
+      assert.strictEqual(harness.store.readSnapshotInfo(harness.target, FORM), undefined);
+      assert.strictEqual(fs.existsSync(manifestOf(harness)), false);
+      assert.ok(fs.existsSync(snapshotDir), 'каталог недоудалён — но без манифеста он не снимок.');
+    });
+
+    test(`${item.name}: не удалось удалить даже manifest.json — исключение, старый снимок остаётся читаемым`, () => {
+      const harness = createStoreHarness();
+      harness.store.captureFromProject(harness.target, FORM, harness.scope);
+      const before = harness.store.readSnapshotInfo(harness.target, FORM);
+      harness.hooks.set(path.resolve(manifestOf(harness)), failRemove());
+      harness.hooks.set(path.resolve(harness.store.resolveSnapshotDir(harness.target, FORM)), failRemove());
+
+      assert.throws(() => item.capture(harness), (error: NodeJS.ErrnoException) => error.code === 'EPERM');
+
+      assert.deepStrictEqual(harness.store.readSnapshotInfo(harness.target, FORM), before);
+    });
+  }
+
+  test('captureFromDirectory: сбой копирования (файл на месте files/) — исключение, манифеста нет', () => {
+    const harness = createStoreHarness();
+    harness.store.captureFromProject(harness.target, FORM, harness.scope);
+    const snapshotDir = harness.store.resolveSnapshotDir(harness.target, FORM);
+    harness.hooks.set(path.resolve(snapshotDir), (targetPath) => {
+      removePathWithRetries(targetPath);
+      fs.mkdirSync(targetPath, { recursive: true });
+      fs.writeFileSync(path.join(targetPath, 'files'), 'не каталог', 'utf-8');
+    });
+
+    assert.throws(() => harness.store.captureFromDirectory(harness.target, FORM, harness.target.configRoot, harness.scope));
+
+    assert.strictEqual(fs.existsSync(manifestOf(harness)), false);
+    assert.strictEqual(harness.store.readSnapshotInfo(harness.target, FORM), undefined);
+  });
+
+  test('discard: manifest.json удаляется первым; сбой на каталоге — исключение, снимок не читается', () => {
+    const harness = createStoreHarness();
+    harness.store.captureFromProject(harness.target, FORM, harness.scope);
+    const snapshotDir = harness.store.resolveSnapshotDir(harness.target, FORM);
+    harness.hooks.set(path.resolve(snapshotDir), failRemove());
+    harness.calls.length = 0;
+
+    assert.throws(() => harness.store.discard(harness.target, FORM), (error: NodeJS.ErrnoException) => error.code === 'EPERM');
+
+    assert.deepStrictEqual(harness.calls, [manifestOf(harness), snapshotDir]);
+    assert.strictEqual(harness.store.readSnapshotInfo(harness.target, FORM), undefined);
+  });
+
+  test('discardAll: манифест корня и манифесты единиц удаляются до каталога цели; сбой на нём — ничего не читается', () => {
+    const harness = createStoreHarness();
+    const other = 'Справочник.Контрагенты.Форма.ФормаЭлемента';
+    const otherScope = resolveObjectScope(harness.target.configRoot, other, harness.target, 'unit');
+    assert.ok(otherScope);
+    harness.store.captureFromProject(harness.target, FORM, harness.scope);
+    harness.store.captureFromProject(harness.target, other, otherScope);
+    harness.store.captureRootManifest(harness.target);
+    const scopeDir = harness.store.resolveScopeDir(harness.target);
+    harness.hooks.set(path.resolve(scopeDir), failRemove());
+    harness.calls.length = 0;
+
+    assert.throws(() => harness.store.discardAll(harness.target), (error: NodeJS.ErrnoException) => error.code === 'EPERM');
+
+    assert.strictEqual(harness.calls[0], harness.store.resolveRootManifestPath(harness.target));
+    assert.deepStrictEqual([...harness.calls.slice(1, 3)].sort(), [manifestOf(harness), manifestOf(harness, other)].sort());
+    assert.strictEqual(harness.calls[3], scopeDir);
+    assert.strictEqual(harness.calls.length, 4);
+    assert.strictEqual(harness.store.readSnapshotInfo(harness.target, FORM), undefined);
+    assert.strictEqual(harness.store.readSnapshotInfo(harness.target, other), undefined);
+    assert.strictEqual(harness.store.readRootManifestHashes(harness.target), undefined);
+  });
+
+  test('discardAll: каталога снимков цели нет — без исключения', () => {
+    const harness = createStoreHarness();
+    assert.doesNotThrow(() => harness.store.discardAll(harness.target));
+    assert.strictEqual(fs.existsSync(harness.store.resolveScopeDir(harness.target)), false);
+  });
+
+  test('captureRootManifest: старый манифест удаляется первым', () => {
+    const harness = createStoreHarness();
+    harness.store.captureRootManifest(harness.target);
+    harness.calls.length = 0;
+    harness.store.captureRootManifest(harness.target);
+    assert.deepStrictEqual(harness.calls, [harness.store.resolveRootManifestPath(harness.target)]);
+    assert.ok(harness.store.readRootManifestHashes(harness.target));
+  });
+
+  test('captureRootManifest: запись упала (EISDIR) — исключение, манифеста нет', () => {
+    const harness = createStoreHarness();
+    harness.store.captureRootManifest(harness.target);
+    const manifestPath = harness.store.resolveRootManifestPath(harness.target);
+    harness.hooks.set(path.resolve(manifestPath), (targetPath) => {
+      removePathWithRetries(targetPath);
+      fs.mkdirSync(targetPath);
+    });
+
+    assert.throws(() => harness.store.captureRootManifest(harness.target), (error: NodeJS.ErrnoException) => error.code === 'EISDIR');
+
+    assert.strictEqual(harness.store.readRootManifestHashes(harness.target), undefined);
+  });
+
+  test('captureRootManifest: сбой удаления старого манифеста — исключение, старый манифест остался', () => {
+    const harness = createStoreHarness();
+    harness.store.captureRootManifest(harness.target);
+    const before = harness.store.readRootManifestHashes(harness.target);
+    harness.hooks.set(path.resolve(harness.store.resolveRootManifestPath(harness.target)), failRemove());
+
+    assert.throws(() => harness.store.captureRootManifest(harness.target), (error: NodeJS.ErrnoException) => error.code === 'EPERM');
+
+    assert.deepStrictEqual(harness.store.readRootManifestHashes(harness.target), before);
+  });
+
+  test('restoreToProject: лишний файл области удаляется через внедрённый RemoveTree', () => {
+    const harness = createStoreHarness();
+    harness.store.captureFromProject(harness.target, FORM, harness.scope);
+    const extra = path.join(harness.target.configRoot, 'Catalogs', 'Контрагенты', 'Forms', 'ФормаСписка', 'Ext', 'Лишний.txt');
+    fs.writeFileSync(extra, 'появился после захвата', 'utf-8');
+    harness.calls.length = 0;
+
+    const result = harness.store.restoreToProject(harness.target, FORM, harness.scope, path.join(harness.workspaceRoot, 'backup'));
+
+    assert.deepStrictEqual(result.deleted, [extra]);
+    assert.deepStrictEqual(harness.calls, [extra]);
+    assert.strictEqual(fs.existsSync(extra), false);
+  });
 });

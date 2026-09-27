@@ -667,3 +667,25 @@ suite('RepositoryService — чужие захваты (issue #6)', () => {
     }
   });
 });
+
+suite('RepositoryService — внедрение RemoveTree в хранилище снимков (issue #103)', () => {
+  test('options.removeTree получает пути удаления снимка при snapshots.discard', () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-repo-service-remove-'));
+    try {
+      const removed: string[] = [];
+      const service = new RepositoryService(
+        workspaceRoot,
+        new ProjectSecretStorage(createFakeSecretStore(), workspaceRoot),
+        { removeTree: (targetPath) => { removed.push(targetPath); } }
+      );
+      const target: RepositoryTarget = { configRoot: EXAMPLE_CF, configKind: 'cf', displayName: 'Тест' };
+      const snapshotDir = service.snapshots.resolveSnapshotDir(target, 'Справочник.Валюты');
+
+      service.snapshots.discard(target, 'Справочник.Валюты');
+
+      assert.deepStrictEqual(removed, [path.join(snapshotDir, 'manifest.json'), snapshotDir]);
+    } finally {
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});

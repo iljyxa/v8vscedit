@@ -80,7 +80,16 @@
   `disposeOnError`/`disposeOnErrorAsync` (там же), а не голым `try/catch`; каталог выгрузки создавать
   только через `createImportTempDir` (`infra/fs/WorkspaceTempDir.ts`), а сессию выгрузки агента — через
   `buildAgentDumpSessionId`, иначе хвосты после краха не подметёт `sweepStaleOperationTemp` — см.
-  [repository-file-sync.md](./repository-file-sync.md#временные-файлы-и-очистка). Окна сравнения —
+  [repository-file-sync.md](./repository-file-sync.md#временные-файлы-и-очистка). Любое удаление файла/
+  каталога хранилища — только через `removePathWithRetries` (`RepositoryTempCleanup.ts`), никогда голым
+  `fs.rmSync`/`fs.rmdirSync` — на Windows временные `EPERM`/`EBUSY` при удалении требуют повтора. Шаги
+  снимков после того, как операция на сервере уже состоялась (захват/получение/отмена/помещение), —
+  только через best-effort-обёртки `ui/commands/repository/RepositorySnapshotSteps.ts`
+  (`trySnapshotStep`/`captureUnitSnapshotStep`/`captureRootManifestStep` + сводное
+  `reportSnapshotFailures`), а не прямым вызовом `RepositoryLockSnapshotStore` — сбой снимка не должен
+  рвать уже выполненную операцию хранилища, только логироваться и попадать в одно немодальное
+  предупреждение после аренды. См.
+  [repository-file-sync.md](./repository-file-sync.md#шаги-снимков--best-effort-issue-103). Окна сравнения —
   единая конвенция сторон (слева локальное состояние, справа версия хранилища, `MergeDiffPair` +
   `formatMergeDiffTitle` в `RepositoryFileSyncDialogs.ts`); снятие/применение readonly сессии к ресурсу
   файла проекта (в т.ч. когда он открыт только левой стороной diff) — через

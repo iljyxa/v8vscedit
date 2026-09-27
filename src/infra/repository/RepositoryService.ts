@@ -25,7 +25,7 @@ import {
   resolveUnitSuffixByRelativePath,
   resolveUnitXmlRel,
 } from './RepositoryObjectScope';
-import { getRepositoryObjectsDir } from './RepositoryTempCleanup';
+import { getRepositoryObjectsDir, type RemoveTree } from './RepositoryTempCleanup';
 
 export interface RepositoryBinding {
   repoPath: string;
@@ -133,6 +133,11 @@ export function isSubordinateUnitNode(node: Pick<RepositoryNodeRef, 'nodeKind' |
     && Boolean(node.metaContext?.ownerObjectXmlPath);
 }
 
+export interface RepositoryServiceOptions {
+  /** Примитив удаления для снимков захвата; по умолчанию — удаление с повторами. */
+  removeTree?: RemoveTree;
+}
+
 /**
  * Фасад хранилища для команд и UI: резолвинг цели по файлам выгрузки, привязка
  * (`RepositoryBindingStore`), состояние захватов (`RepositoryLockState`), снимки
@@ -157,11 +162,12 @@ export class RepositoryService {
 
   constructor(
     private readonly workspaceRoot: string,
-    secrets: ProjectSecretStorage
+    secrets: ProjectSecretStorage,
+    options: RepositoryServiceOptions = {}
   ) {
     this.bindings = new RepositoryBindingStore(workspaceRoot, secrets);
     this.lockStateStore = new RepositoryLockState(workspaceRoot);
-    this.snapshotStore = new RepositoryLockSnapshotStore(workspaceRoot);
+    this.snapshotStore = new RepositoryLockSnapshotStore(workspaceRoot, options.removeTree);
     this.lockStatusService = new RepositoryLockStatusService({
       workspaceRoot,
       lockState: this.lockStateStore,

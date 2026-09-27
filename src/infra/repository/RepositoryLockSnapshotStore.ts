@@ -14,6 +14,7 @@ import {
   type ScopeDepth,
 } from './RepositoryObjectScope';
 import type { RepositoryTarget } from './RepositoryService';
+import { readDirOrEmpty, removePathWithRetries, type RemoveTree } from './RepositoryTempCleanup';
 
 /**
  * Снимок объекта на момент захвата — «версия хранилища», к которой можно откатить
@@ -64,10 +65,14 @@ export interface SnapshotRestoreResult {
 
 const SNAPSHOT_MANIFEST_VERSION = 3;
 const ROOT_MANIFEST_FILE = 'root-manifest.json';
+const SNAPSHOT_MANIFEST_FILE = 'manifest.json';
 const ALL_SCOPE: ObjectScope = { kind: 'all' };
 
 export class RepositoryLockSnapshotStore {
-  constructor(private readonly workspaceRoot: string) {}
+  constructor(
+    private readonly workspaceRoot: string,
+    private readonly removeTree: RemoveTree = removePathWithRetries
+  ) {}
 
   /**
    * Снимок из каталога выгрузки (версия хранилища, полученная при захвате).
@@ -88,9 +93,9 @@ export class RepositoryLockSnapshotStore {
     depth: ScopeDepth = 'unit',
     subordinates?: readonly string[]
   ): Record<string, string> {
-    const snapshotDir = this.getSnapshotDir(target, fullName);
+    const snapshotDir = this.resolveSnapshotDir(target, fullName);
     // Актуален только снимок последнего захвата — предыдущий затирается.
-    fs.rmSync(snapshotDir, { recursive: true, force: true });
+    this.invalidateSnapshot(snapshotDir);
     const sources = new Map<string, string>();
     collectScopeFiles(sourceDir, scope).forEach((rel) => sources.set(rel, path.join(sourceDir, rel)));
     keepFromProject
@@ -120,14 +125,24 @@ export class RepositoryLockSnapshotStore {
    * при отмене захвата удаляет все его файлы.
    */
   captureEmpty(target: RepositoryTarget, fullName: string): void {
-    const snapshotDir = this.getSnapshotDir(target, fullName);
-    fs.rmSync(snapshotDir, { recursive: true, force: true });
+    const snapshotDir = this.resolveSnapshotDir(target, fullName);
+    this.invalidateSnapshot(snapshotDir);
     this.writeManifest(snapshotDir, { version: SNAPSHOT_MANIFEST_VERSION, files: [], hashes: {}, depth: 'unit' });
+  }
+
+  /**
+   * «Manifest-first»: каталог без манифеста снимком не считается, поэтому манифест
+   * удаляется первым (и пишется последним). Если каталог удалить не удалось, недоснятый
+   * снимок не примут за эталон — отмена захвата возьмёт версию хранилища свежей выгрузкой.
+   */
+  private invalidateSnapshot(snapshotDir: string): void {
+    this.removeTree(path.join(snapshotDir, SNAPSHOT_MANIFEST_FILE));
+    this.removeTree(snapshotDir);
   }
 
   private writeManifest(snapshotDir: string, manifest: SnapshotManifest): void {
     fs.mkdirSync(snapshotDir, { recursive: true });
-    fs.writeFileSync(path.join(snapshotDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8');
+    fs.writeFileSync(path.join(snapshotDir, SNAPSHOT_MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8');
   }
 
   /** Пересъём снимка из проекта — после помещения с сохранением захвата версия хранилища = проект. */
@@ -148,7 +163,7 @@ export class RepositoryLockSnapshotStore {
 
   /** Хеши, глубина и подчинённые снимка; `undefined` — снимка нет или манифест не читается. */
   readSnapshotInfo(target: RepositoryTarget, fullName: string): SnapshotInfo | undefined {
-    const snapshotDir = this.getSnapshotDir(target, fullName);
+    const snapshotDir = this.resolveSnapshotDir(target, fullName);
     const manifest = readSnapshotManifest(snapshotDir);
     if (!manifest) {
       return undefined;
@@ -181,7 +196,7 @@ export class RepositoryLockSnapshotStore {
     backupDir: string
   ): SnapshotRestoreResult {
     const result: SnapshotRestoreResult = { restored: [], deleted: [], backups: [] };
-    const snapshotDir = this.getSnapshotDir(target, fullName);
+    const snapshotDir = this.resolveSnapshotDir(target, fullName);
     const manifest = readSnapshotManifest(snapshotDir);
     if (!manifest) {
       return result;
@@ -213,7 +228,7 @@ export class RepositoryLockSnapshotStore {
       }
       const projectPath = path.join(target.configRoot, rel);
       this.backup(rel, projectPath, backupDir, result);
-      fs.rmSync(projectPath, { force: true });
+      this.removeTree(projectPath);
       removeEmptyParentDirs(target.configRoot, rel, scope);
       result.deleted.push(projectPath);
     }
@@ -221,12 +236,20 @@ export class RepositoryLockSnapshotStore {
   }
 
   discard(target: RepositoryTarget, fullName: string): void {
-    fs.rmSync(this.getSnapshotDir(target, fullName), { recursive: true, force: true });
+    this.invalidateSnapshot(this.resolveSnapshotDir(target, fullName));
   }
 
-  /** Удаляет все снимки и манифест корня цели (отмена захвата корня, отвязка). */
+  /**
+   * Удаляет все снимки и манифест корня цели (отмена захвата корня, отвязка). Манифесты
+   * удаляются до каталога цели: если он недоудалится, ни один снимок не останется читаемым.
+   */
   discardAll(target: RepositoryTarget): void {
-    fs.rmSync(this.getScopeDir(target), { recursive: true, force: true });
+    const scopeDir = this.resolveScopeDir(target);
+    this.removeTree(this.resolveRootManifestPath(target));
+    readDirOrEmpty(scopeDir)
+      .filter((entry) => entry.isDirectory())
+      .forEach((entry) => this.removeTree(path.join(scopeDir, entry.name, SNAPSHOT_MANIFEST_FILE)));
+    this.removeTree(scopeDir);
   }
 
   /**
@@ -242,12 +265,14 @@ export class RepositoryLockSnapshotStore {
     overrides: Readonly<Record<string, string>> = {},
     excludeRels: readonly string[] = []
   ): void {
+    const filePath = this.resolveRootManifestPath(target);
+    // Старый манифест описывает прошлый захват: при сбое записи он не должен остаться эталоном.
+    this.removeTree(filePath);
     const excluded = new Set(excludeRels);
     const hashes = Object.fromEntries(
       Object.entries({ ...hashScopeFiles(target.configRoot, ALL_SCOPE), ...overrides }).filter(([rel]) => !excluded.has(rel))
     );
     const manifest: RootManifest = { version: 1, hashes };
-    const filePath = path.join(this.getScopeDir(target), ROOT_MANIFEST_FILE);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, `${JSON.stringify(manifest)}\n`, 'utf-8');
   }
@@ -263,7 +288,7 @@ export class RepositoryLockSnapshotStore {
 
   /** Хеши манифеста корня; `undefined` — манифеста нет или он не читается. */
   readRootManifestHashes(target: RepositoryTarget): Record<string, string> | undefined {
-    return readRootManifest(path.join(this.getScopeDir(target), ROOT_MANIFEST_FILE))?.hashes;
+    return readRootManifest(this.resolveRootManifestPath(target))?.hashes;
   }
 
   private backup(rel: string, projectPath: string, backupDir: string, result: SnapshotRestoreResult): void {
@@ -276,13 +301,18 @@ export class RepositoryLockSnapshotStore {
     result.backups.push({ rel, backupPath, projectPath });
   }
 
-  private getScopeDir(target: RepositoryTarget): string {
+  /** Каталог всех снимков цели — для сообщений о сбое и для `discardAll`. */
+  resolveScopeDir(target: RepositoryTarget): string {
     return path.join(this.workspaceRoot, '.v8vscedit', 'repository', 'snapshots', buildRepositoryScopeKey(target));
   }
 
-  private getSnapshotDir(target: RepositoryTarget, fullName: string): string {
+  resolveSnapshotDir(target: RepositoryTarget, fullName: string): string {
     const fullNameHash = crypto.createHash('sha1').update(fullName).digest('hex');
-    return path.join(this.getScopeDir(target), fullNameHash);
+    return path.join(this.resolveScopeDir(target), fullNameHash);
+  }
+
+  resolveRootManifestPath(target: RepositoryTarget): string {
+    return path.join(this.resolveScopeDir(target), ROOT_MANIFEST_FILE);
   }
 }
 
@@ -340,7 +370,7 @@ function hashIfExists(filePath: string): string | undefined {
 }
 
 function readSnapshotManifest(snapshotDir: string): SnapshotManifest | null {
-  const parsed = readJson(path.join(snapshotDir, 'manifest.json'));
+  const parsed = readJson(path.join(snapshotDir, SNAPSHOT_MANIFEST_FILE));
   if (!parsed || !Array.isArray(parsed.files)) {
     return null;
   }

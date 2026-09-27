@@ -37,8 +37,41 @@ export function getRepositoryMergeRoot(workspaceRoot: string): string {
   return path.join(getRepositoryTempRoot(workspaceRoot), 'merge');
 }
 
+/** Примитив удаления файла/каталога; внедряется ради сбоев совместного доступа Windows. */
+export type RemoveTree = (targetPath: string) => void;
+
+/**
+ * На Windows EPERM/EBUSY/ENOTEMPTY при удалении обычно временные — файл держит антивирус,
+ * индексатор или LSP-сервер; `rmSync` повторяет попытку только при заданных `maxRetries`.
+ */
+export const REPOSITORY_RM_MAX_RETRIES = 3;
+export const REPOSITORY_RM_RETRY_DELAY_MS = 100;
+
+/** Удаление файла или каталога целиком; отсутствие пути — не ошибка. */
+export function removePathWithRetries(targetPath: string): void {
+  fs.rmSync(targetPath, {
+    recursive: true,
+    force: true,
+    maxRetries: REPOSITORY_RM_MAX_RETRIES,
+    retryDelay: REPOSITORY_RM_RETRY_DELAY_MS,
+  });
+}
+
+/**
+ * Код ошибки ФС ('EPERM') вместо message: в message Node путь приходит в неверной кодировке
+ * (`\\?\c:\Ïðîåêòû\…`), поэтому вызывающий подставляет свой путь. Error без строкового
+ * code — message; не-Error — String().
+ */
+export function describeFsError(error: unknown): string {
+  if (error instanceof Error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return typeof code === 'string' ? code : error.message;
+  }
+  return String(error);
+}
+
 /** Отсутствие каталога — нормальное состояние «чистить нечего»; прочие сбои — наружу. */
-function readDirOrEmpty(dir: string): fs.Dirent[] {
+export function readDirOrEmpty(dir: string): fs.Dirent[] {
   try {
     return fs.readdirSync(dir, { withFileTypes: true });
   } catch (error) {
@@ -60,7 +93,7 @@ export function pruneRepositoryObjectsFiles(workspaceRoot: string): string[] {
   for (const entry of readDirOrEmpty(dir)) {
     if (entry.isFile() && entry.name.toLowerCase().endsWith('.xml')) {
       const filePath = path.join(dir, entry.name);
-      fs.rmSync(filePath, { force: true });
+      removePathWithRetries(filePath);
       removed.push(filePath);
     }
   }
@@ -105,7 +138,7 @@ export function pruneMergeBackups(
       .sort((left, right) => right.time - left.time);
     backups.forEach((backup, index) => {
       if (nowMs - backup.time > retention.maxAgeMs || index >= retention.maxPerScope) {
-        fs.rmSync(backup.dir, { recursive: true, force: true });
+        removePathWithRetries(backup.dir);
         removed.push(backup.dir);
       }
     });
