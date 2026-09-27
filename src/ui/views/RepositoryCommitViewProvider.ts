@@ -10,7 +10,8 @@ export interface RepositoryCommitFormData {
 
 type RepositoryCommitMessage =
   | { readonly type: 'command'; readonly command: 'submit'; readonly payload: RepositoryCommitFormData }
-  | { readonly type: 'command'; readonly command: 'cancel' };
+  | { readonly type: 'command'; readonly command: 'cancel' }
+  | { readonly type: 'ready' };
 
 /**
  * Провайдер панели помещения изменений в хранилище 1С.
@@ -28,6 +29,8 @@ export class RepositoryCommitViewProvider implements vscode.Disposable {
 
   /**
    * Показывает панель коммита в хранилище.
+   * Повторный вызов при открытой панели перерисовывает форму под новый узел, а прежний
+   * вызов получает `undefined`: иначе его промис навсегда остался бы неразрешённым.
    * @returns Promise с данными формы или undefined при отмене.
    */
   show(
@@ -35,27 +38,47 @@ export class RepositoryCommitViewProvider implements vscode.Disposable {
     initiallyLocked: boolean
   ): Promise<RepositoryCommitFormData | undefined> {
     if (this.panel) {
+      this.settle(undefined);
+      this.renderHtml(this.panel, targetLabel, initiallyLocked);
       this.panel.reveal(vscode.ViewColumn.Active);
-      return new Promise((resolve) => {
-        this.resolvePromise = resolve;
-      });
+      return this.waitForResult();
     }
 
-    this.panel = vscode.window.createWebviewPanel(
+    const panel = vscode.window.createWebviewPanel(
       RepositoryCommitViewProvider.viewType,
       'Помещение в хранилище',
       vscode.ViewColumn.Active,
       { enableScripts: true, retainContextWhenHidden: false }
     );
+    this.panel = panel;
 
-    this.panel.webview.options = {
+    panel.webview.options = {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'dist', 'ui')],
     };
 
+    this.renderHtml(panel, targetLabel, initiallyLocked);
+
+    panel.webview.onDidReceiveMessage((message: RepositoryCommitMessage) => {
+      this.handleMessage(message);
+    });
+
+    panel.onDidDispose(() => {
+      this.settle(undefined);
+      this.panel = undefined;
+    });
+
+    return this.waitForResult();
+  }
+
+  dispose(): void {
+    this.panel?.dispose();
+  }
+
+  private renderHtml(panel: vscode.WebviewPanel, targetLabel: string, initiallyLocked: boolean): void {
     const factory = new WebviewHtmlFactory(this.extensionUri);
-    this.panel.webview.html = factory.renderVueWebviewHtml({
-      webview: this.panel.webview,
+    panel.webview.html = factory.renderVueWebviewHtml({
+      webview: panel.webview,
       title: 'Помещение в хранилище',
       entry: 'repository-commit',
       viewKind: 'repository-commit',
@@ -65,27 +88,38 @@ export class RepositoryCommitViewProvider implements vscode.Disposable {
       },
       csp: { allowStyles: true },
     });
+  }
 
-    this.panel.webview.onDidReceiveMessage((message: RepositoryCommitMessage) => {
-      this.handleMessage(message);
-    });
-
-    this.panel.onDidDispose(() => {
-      this.resolvePromise?.(undefined);
-      this.panel = undefined;
-    });
-
+  private waitForResult(): Promise<RepositoryCommitFormData | undefined> {
     return new Promise((resolve) => {
       this.resolvePromise = resolve;
     });
   }
 
-  dispose(): void {
-    this.panel?.dispose();
+  private settle(value: RepositoryCommitFormData | undefined): void {
+    const resolve = this.resolvePromise;
+    this.resolvePromise = undefined;
+    resolve?.(value);
   }
 
+  /**
+   * Форму закрывают только `submit`/`cancel`. Webview после монтирования шлёт `ready`,
+   * и прежняя трактовка «всё, кроме submit, — отмена» закрывала форму сразу (issue #102).
+   */
   private handleMessage(message: RepositoryCommitMessage): void {
-    this.resolvePromise?.(message.command === 'submit' ? message.payload : undefined);
+    if (message.type !== 'command') {
+      return;
+    }
+    switch (message.command) {
+      case 'submit':
+        this.settle(message.payload);
+        break;
+      case 'cancel':
+        this.settle(undefined);
+        break;
+      default:
+        return;
+    }
     this.panel?.dispose();
     this.panel = undefined;
   }
