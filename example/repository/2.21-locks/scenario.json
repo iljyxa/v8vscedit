@@ -1,0 +1,50 @@
+{
+  "description": "Сценарий захватов хранилища для example/tools/build-repository-locks.mjs. Имена объектов в шагах — fullName хранилища (-Objects), ожидаемые захваты — по имени записи ConfigDumpInfo.xml; корень конфигурации — {\"root\": true}.",
+  "alias": "locks",
+  "users": [
+    { "name": "Admin", "password": "" },
+    { "name": "Petrov", "password": "123", "rights": "LockObjects" }
+  ],
+  "steps": [
+    {
+      "user": "Admin",
+      "lock": ["Справочник.Контрагенты", "Справочник.Контрагенты.Форма.ФормаСписка"]
+    },
+    {
+      "user": "Petrov",
+      "lock": [
+        { "root": true },
+        "Справочник.Банки",
+        "Справочник.Контрагенты.Форма.ФормаЭлемента",
+        "Справочник.Контрагенты.Макет.ЗагрузкаИзФайла",
+        "Подсистема.Продажи.Подсистема.Розница"
+      ]
+    },
+    {
+      "user": "Admin",
+      "lock": [
+        "Справочник.Банки",
+        "Справочник.Контрагенты.Макет.ЗагрузкаИзФайла",
+        { "root": true },
+        "Справочник.Валюты"
+      ],
+      "expectRefusal": true,
+      "log": "lock-refused.out.txt"
+    }
+  ],
+  "locks": [
+    { "dumpName": "Catalog.Контрагенты", "user": "Admin" },
+    { "dumpName": "Catalog.Контрагенты.Form.ФормаСписка", "user": "Admin" },
+    { "dumpName": "Catalog.Валюты", "user": "Admin" },
+    { "dumpName": "Configuration.ТорговыйУчет", "user": "Petrov" },
+    { "dumpName": "Catalog.Банки", "user": "Petrov" },
+    { "dumpName": "Catalog.Контрагенты.Form.ФормаЭлемента", "user": "Petrov" },
+    { "dumpName": "Catalog.Контрагенты.Template.ЗагрузкаИзФайла", "user": "Petrov" },
+    { "dumpName": "Subsystem.Продажи.Subsystem.Розница", "user": "Petrov" }
+  ],
+  "refusals": [
+    { "objectName": "Справочник.Банки", "user": "Petrov" },
+    { "objectName": "Справочник.Контрагенты.Макет.ЗагрузкаИзФайла", "user": "Petrov" },
+    { "objectName": "ТорговыйУчет", "user": "Petrov" }
+  ]
+}
