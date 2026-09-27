@@ -11,7 +11,8 @@
 //     Закоммиченный в ветке новый файл при явной базе целиком попадает в дифф — эквивалент «нового».
 //   • Чисто-типовой файл и composition root (Container/extension) — вне гейта.
 //
-// Источник данных — `coverage/lcov.info` (те же цифры, что и `coverage:report`).
+// Источник данных — `coverage/lcov.info` (те же цифры, что и `coverage:report`). Отсутствующий,
+// не обновлённый этим прогоном или пустой lcov — ошибка (exit 1), а не «нет данных» по файлам.
 // Использование: `npm run coverage:changed` (стадия qa-e2e TDD-конвейера).
 //
 // Параметры:
@@ -27,6 +28,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import * as path from 'node:path';
+import { parseLcov } from './lcov.mjs';
 
 const ROOT = process.cwd();
 const IGNORE_TEST_FAILURES =
@@ -186,32 +188,15 @@ if (statSync(lcovPath).mtimeMs < runStartedAt) {
   process.exit(1);
 }
 
-// Разбор lcov в карту: absPath → { da: Map<line,hits>, brda: Map<line,taken[]> }.
-function parseLcov(text) {
-  const files = new Map();
-  let cur = null;
-  for (const raw of text.split('\n')) {
-    const line = raw.trim();
-    if (line.startsWith('SF:')) {
-      const p = line.slice(3);
-      cur = { da: new Map(), brda: new Map() };
-      files.set(path.resolve(ROOT, p), cur);
-    } else if (cur && line.startsWith('DA:')) {
-      const [ln, hits] = line.slice(3).split(',');
-      cur.da.set(Number(ln), Number(hits));
-    } else if (cur && line.startsWith('BRDA:')) {
-      const [ln, , , taken] = line.slice(5).split(',');
-      const arr = cur.brda.get(Number(ln)) ?? [];
-      arr.push(taken);
-      cur.brda.set(Number(ln), arr);
-    } else if (line === 'end_of_record') {
-      cur = null;
-    }
-  }
-  return files;
+const lcov = parseLcov(readFileSync(lcovPath, 'utf-8'), ROOT);
+// Пустой lcov при завершённом прогоне означает, что c8 не смог записать данные (например,
+// кончилось место на диске): без этой проверки отчёт выглядел бы как десятки файлов
+// «без данных покрытия», то есть как пропавшие тесты (issue #49).
+if (lcov.size === 0) {
+  console.error(`[coverage:changed] Покрытие не собрано: ${lcovPath} не содержит ни одной записи — проверьте свободное место на диске и вывод c8.`);
+  process.exit(1);
 }
 
-const lcov = parseLcov(readFileSync(lcovPath, 'utf-8'));
 const offenders = [];
 
 for (const rel of changed) {
