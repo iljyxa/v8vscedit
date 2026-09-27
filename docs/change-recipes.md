@@ -87,6 +87,23 @@
   `ui/readonly/sessionReadonly.ts` (`runWithResourceActive`) и `ui/readonly/readonlyTabSelection.ts`
   (`selectReadonlyApplyRoute`), а не напрямую командой `resetActiveEditorReadonlyInSession` — см.
   [repository-file-sync.md](./repository-file-sync.md#readonly).
+- **Новый источник статусов захвата хранилища** (аналог файлового `1cv8ddb.1CD`/сетевого crserver, см.
+  [repository-file-sync.md](./repository-file-sync.md#статусы-захватов-с-сервера)): реализация в
+  `infra/repository/<Имя>RepositoryLockStatusSource.ts` — класс без `vscode`, реализующий
+  `RepositoryLockStatusSource` (`supports(location)` + `readLocks(location, context)` из
+  `RepositoryLockStatusSource.ts`), ошибки — только через `RepositoryLockStatusError` с кодом из
+  `RepositoryLockStatusErrorCode`, никогда не бросать наружу произвольное исключение → регистрация ТОЛЬКО
+  добавлением в список источников по умолчанию `RepositoryLockStatusService` (конструктор принимает
+  `sources?: readonly RepositoryLockStatusSource[]`) → `classifyRepositoryLocation`
+  (`RepositoryLockStatusSource.ts`) при новом виде адреса привязки получает новый вариант
+  `RepositoryLocation['kind']`. Модель (`RepositoryLockState`, `state.json`), сопоставление uuid→fullName
+  (`mapServerLocksToUnits`/`ConfigDumpInfo.xml`) и UI (дерево, меню, команда `refreshLocks`) новый источник
+  не трогает — вся зависимость от вида хранилища заперта в самом источнике и в `classifyRepositoryLocation`.
+  Разбор бинарного/XML-формата ответа — отдельный чистый модуль без `vscode` (образец —
+  `onecd/OneCdFile.ts`+`OneCdTable.ts` для 1CD, `crs/CrsClient.ts`+`infra/xml/CrsMessageXml.ts` для
+  crserver), а не встроенный парсинг внутри класса источника. Тест — на реальных байтах/файлах,
+  снятых с платформы (генератор `example/tools/build-repository-locks.mjs`), синтетика недопустима —
+  формат недокументирован платформой.
 - **Новая операция, запускающая Конфигуратор для полного импорта/обновления/применения конфигурации к
   базе** (аналог `importConfigurations`/`updateChangedConfigurations`/`runPostRepositorySync`): захват —
   через `services.configurationOperationGuard` (`runExclusive(title, op)` для одной атомарной цепочки
