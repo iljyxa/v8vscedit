@@ -22,7 +22,8 @@ import type { MergeDiffPair } from '../../ui/commands/repository/RepositoryFileS
 import { getRepositoryMergeRoot, getRepositoryObjectsDir } from '../../infra/repository/RepositoryTempCleanup';
 import { toLocalTimestamp } from '../../infra/repository/RepositoryLockState';
 import { decodeLogFile } from '../../ui/commands/repository/RepositoryCommandRunner';
-import { lockFixturePath } from './support/repositoryLockFixtures';
+import { lockFixturePath, PARTIAL_LOCKS_ROOT, PARTIAL_ROOT_ROOT, scenarioFixturePath } from './support/repositoryLockFixtures';
+import { createPartialDumpFixture, type PartialDumpFixture } from './support/partialDumpFixture';
 import {
   bumpAllConfigDumpInfoVersions,
   bumpConfigDumpInfoVersion,
@@ -1401,4 +1402,388 @@ suite('RepositoryLockSync — отказ захвата помечает чуж�
       assert.strictEqual(harness.treeRefreshCalls, 0);
     });
   }
+});
+
+/**
+ * Issue #87: частичный отказ захвата. Код 1, но в /Out есть строки успеха по попытанным
+ * единицам — сервер их захватил. Вывод — реальный /Out платформы 8.5.1 (фикстуры
+ * 2.21-partial-locks, 2.21-partial-root); выгрузка — createPartialDumpFixture над копией
+ * example/2.21/src/cf (Конфигуратор с базой в тестах недоступен).
+ */
+suite('RepositoryLockSync — частичный отказ захвата (issue #87)', () => {
+  const NOW = new Date(2026, 8, 27, 14, 30, 0);
+  const OBSERVED_AT = toLocalTimestamp(NOW);
+  const PRICHINY = 'Справочник.ПричиныВозврата';
+  const PRICHINY_FORM = 'Справочник.ПричиныВозврата.Форма.ФормаЭлемента';
+  const ROLI = 'Справочник.РолиКонтактныхЛиц';
+  const ROLI_FORM = 'Справочник.РолиКонтактныхЛиц.Форма.ФормаЭлемента';
+  const PRICHINY_FORM_MODULE = path.join('Catalogs', 'ПричиныВозврата', 'Forms', 'ФормаЭлемента', 'Ext', 'Form', 'Module.bsl');
+
+  const partialOutput = (log: string): string => decodeLogFile(fs.readFileSync(scenarioFixturePath(PARTIAL_LOCKS_ROOT, '8.5.1', log)));
+  const refusedCli = (output: string): RepositoryFileSyncDeps['runRepositoryCli'] =>
+    () => Promise.resolve({ status: 'failed', message: 'Ошибка захвата объектов в хранилище', output });
+
+  interface Notifications { info: string[]; warning: string[]; error: string[] }
+  function notifications(): Notifications & Pick<RepositoryFileSyncDeps, 'notifyInfo' | 'notifyWarning' | 'notifyError'> {
+    const info: string[] = [];
+    const warning: string[] = [];
+    const error: string[] = [];
+    return {
+      info, warning, error,
+      notifyInfo: (message: string) => { info.push(message); },
+      notifyWarning: (message: string) => { warning.push(message); },
+      notifyError: (message: string) => { error.push(message); },
+    };
+  }
+
+  /** Источник выгрузки — копия эталона; `edit` меняет версию хранилища относительно проекта. */
+  function createSource(edit: (sourceRoot: string) => void = () => undefined): { root: string; dispose: () => void } {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-partial-lock-source-'));
+    fs.cpSync(EXAMPLE_CF, root, { recursive: true });
+    edit(root);
+    return { root, dispose: () => fs.rmSync(root, { recursive: true, force: true }) };
+  }
+
+  function recursiveCatalog(harness: Harness, name: string): RepositoryNodeRef {
+    return catalogNode(harness, name);
+  }
+
+  function snapshotExists(harness: Harness, fullName: string): boolean {
+    return harness.repositoryService.snapshots.readSnapshotInfo(harness.target, fullName) !== undefined;
+  }
+
+  function withFixture(harness: Harness, fixture: PartialDumpFixture): RepositoryFileSyncDeps['dumpToTemp'] {
+    fixture.probeBusy = () => harness.guard.isBusy;
+    return (target, request, services) => fixture.dumpToTemp(target, request, services);
+  }
+
+  test('lock-refused при нерекурсивном захвате Валют: полный успех — info, без предупреждений и чужих отметок', async () => {
+    const harness = createHarness();
+    const fixture = createPartialDumpFixture(EXAMPLE_CF, 'ТорговыйУчет');
+    const notes = notifications();
+    try {
+      const deps = baseDeps({
+        runRepositoryCli: refusedCli(decodeLogFile(fs.readFileSync(lockFixturePath('8.5.1', 'lock-refused.out.txt')))),
+        dumpToTemp: withFixture(harness, fixture),
+        now: () => NOW,
+        ...notes,
+      });
+
+      const outcome = await runRepositoryLockFlow(catalogNode(harness, 'Валюты'), false, harness.services, deps);
+
+      assert.strictEqual(outcome, 'done');
+      assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Валюты'), true);
+      assert.deepStrictEqual(fixture.calls.map((call) => [call.names, call.busy]), [[['Справочник.Валюты'], true]]);
+      assert.ok(snapshotExists(harness, 'Справочник.Валюты'));
+      assert.deepStrictEqual(notes.info, ['Объекты «Валюты» захвачены.']);
+      assert.deepStrictEqual([notes.warning, notes.error], [[], []]);
+      assert.deepStrictEqual(harness.repositoryService.getLockInfo(harness.target, 'Справочник.Банки'), { state: 'free' });
+      assert.ok(!harness.outputLines.some((line) => line.includes('частичный захват')));
+      assert.strictEqual(harness.guard.isBusy, false);
+    } finally {
+      fixture.disposeAll();
+    }
+  });
+
+  test('рекурсивно ПричиныВозврата, отказ по форме: якорь захвачен, форма — чужая, файлы формы не тронуты, одно предупреждение', async () => {
+    const harness = createHarness();
+    const source = createSource((root) => fs.appendFileSync(path.join(root, PRICHINY_FORM_MODULE), '\n// версия хранилища Petrov\n'));
+    const fixture = createPartialDumpFixture(source.root, 'ТорговыйУчет');
+    const projectFormModule = path.join(harness.configRoot, PRICHINY_FORM_MODULE);
+    const formBefore = fs.readFileSync(projectFormModule, 'utf-8');
+    const notes = notifications();
+    try {
+      const deps = baseDeps({
+        runRepositoryCli: refusedCli(partialOutput('lock-recursive-subordinate-refused.out.txt')),
+        dumpToTemp: withFixture(harness, fixture),
+        now: () => NOW,
+        ...notes,
+      });
+
+      const outcome = await runRepositoryLockFlow(recursiveCatalog(harness, 'ПричиныВозврата'), true, harness.services, deps);
+
+      assert.strictEqual(outcome, 'done');
+      assert.strictEqual(harness.repositoryService.isLocked(harness.target, PRICHINY), true);
+      assert.strictEqual(harness.repositoryService.isLocked(harness.target, PRICHINY_FORM), false);
+      assert.deepStrictEqual(harness.repositoryService.getLockInfo(harness.target, PRICHINY_FORM),
+        { state: 'foreign', user: 'Petrov', lockedAt: undefined, observedAt: OBSERVED_AT });
+      assert.strictEqual(harness.repositoryService.lockState.getLockGroup(harness.target, PRICHINY), undefined);
+      assert.ok(fixture.calls.length > 0 && fixture.calls.every((call) => call.busy), 'выгрузка — в той же аренде');
+      assert.strictEqual(fs.readFileSync(projectFormModule, 'utf-8'), formBefore, 'версия чужого захвата не сливается в проект');
+      assert.ok(snapshotExists(harness, PRICHINY));
+      assert.ok(!snapshotExists(harness, PRICHINY_FORM));
+      assert.strictEqual(notes.warning.length, 1);
+      assert.ok(notes.warning[0].includes(`${PRICHINY_FORM} (Petrov)`), notes.warning[0]);
+      assert.deepStrictEqual([notes.info, notes.error], [[], []]);
+      assert.ok(harness.outputLines.some((line) => line.startsWith('[repository][locks] частичный захват') && line.includes(PRICHINY_FORM)));
+    } finally {
+      fixture.disposeAll();
+      source.dispose();
+    }
+  });
+
+  test('рекурсивно РолиКонтактныхЛиц, отказ по якорю: форма захвачена, якорь — чужой и не записан', async () => {
+    const harness = createHarness();
+    const fixture = createPartialDumpFixture(EXAMPLE_CF, 'ТорговыйУчет');
+    const notes = notifications();
+    try {
+      const deps = baseDeps({
+        runRepositoryCli: refusedCli(partialOutput('lock-recursive-anchor-refused.out.txt')),
+        dumpToTemp: withFixture(harness, fixture),
+        now: () => NOW,
+        ...notes,
+      });
+
+      const outcome = await runRepositoryLockFlow(recursiveCatalog(harness, 'РолиКонтактныхЛиц'), true, harness.services, deps);
+
+      assert.strictEqual(outcome, 'done');
+      assert.strictEqual(harness.repositoryService.isLocked(harness.target, ROLI_FORM), true);
+      assert.strictEqual(harness.repositoryService.isLocked(harness.target, ROLI), false);
+      assert.deepStrictEqual(harness.repositoryService.getLockInfo(harness.target, ROLI),
+        { state: 'foreign', user: 'Petrov', lockedAt: undefined, observedAt: OBSERVED_AT });
+      assert.strictEqual(harness.repositoryService.lockState.getLockGroup(harness.target, ROLI), undefined);
+      assert.ok(snapshotExists(harness, ROLI_FORM));
+      assert.ok(!snapshotExists(harness, ROLI));
+      assert.strictEqual(notes.warning.length, 1);
+      assert.ok(notes.warning[0].includes(`${ROLI} (Petrov)`));
+      assert.deepStrictEqual(notes.error, []);
+    } finally {
+      fixture.disposeAll();
+    }
+  });
+
+  test('повторный захват уже своего якоря при чужой форме: строк успеха нет — отказ, якорь остаётся захваченным, форма чужая', async () => {
+    const harness = createHarness();
+    harness.repositoryService.lockState.applyLock(harness.target, { anchor: PRICHINY, members: [PRICHINY], mode: 'recursive' });
+    const notes = notifications();
+    const deps = baseDeps({
+      runRepositoryCli: refusedCli(partialOutput('lock-recursive-own-and-refused.out.txt')),
+      now: () => NOW,
+      ...notes,
+    });
+
+    const outcome = await runRepositoryLockFlow(recursiveCatalog(harness, 'ПричиныВозврата'), true, harness.services, deps);
+
+    assert.strictEqual(outcome, 'failed');
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, PRICHINY), true);
+    assert.strictEqual(harness.repositoryService.getLockInfo(harness.target, PRICHINY_FORM).state, 'foreign');
+    assert.strictEqual(notes.error.length, 1);
+    assert.deepStrictEqual([notes.info, notes.warning], [[], []]);
+  });
+
+  function configurationNode(harness: Harness): RepositoryNodeRef {
+    return { nodeKind: 'configuration', label: 'Конфигурация', xmlPath: path.join(harness.configRoot, 'Configuration.xml') };
+  }
+
+  const rootOutput = (): string => decodeLogFile(fs.readFileSync(scenarioFixturePath(PARTIAL_ROOT_ROOT, '8.5.1', 'lock-root-recursive-refused.out.txt')));
+
+  test('корень рекурсивно, отказ по Банкам: корень захвачен рекурсивно, Банки — чужие и вне слияния, манифест снят', async () => {
+    const harness = createHarness();
+    const banksXml = path.join(harness.configRoot, 'Catalogs', 'Банки.xml');
+    const banksBefore = fs.readFileSync(banksXml, 'utf-8');
+    const source = createSource((root) => {
+      fs.appendFileSync(path.join(root, 'Catalogs', 'Банки.xml'), '<!-- версия хранилища Petrov -->\n');
+      fs.appendFileSync(path.join(root, 'Catalogs', 'Валюты', 'Ext', 'ObjectModule.bsl'), '\n// версия хранилища\n');
+    });
+    const fixture = createPartialDumpFixture(source.root, 'ТорговыйУчет');
+    const projectInfo = fs.readFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), 'utf-8');
+    const nextInfo = bumpConfigDumpInfoVersion(
+      bumpConfigDumpInfoVersion(projectInfo, 'Catalog.Валюты.ObjectModule', '0000000000000000000000000000000000000a'),
+      'Catalog.Банки', '0000000000000000000000000000000000000b'
+    );
+    const infoDump = makeTempDump({ 'ConfigDumpInfo.xml': nextInfo });
+    const notes = notifications();
+    try {
+      const fixtureDump = withFixture(harness, fixture);
+      const deps = baseDeps({
+        runRepositoryCli: refusedCli(rootOutput()),
+        // Валюты: локальная и версия хранилища различаются при пустом хеш-кэше — законный конфликт.
+        chooseConflictResolution: () => Promise.resolve('replace'),
+        dumpToTemp: (target, request, services) => (request.mode === 'update-info'
+          ? Promise.resolve({ ok: true, dir: infoDump.dir, dispose: infoDump.dispose })
+          : fixtureDump(target, request, services)),
+        now: () => NOW,
+        ...notes,
+      });
+
+      const outcome = await runRepositoryLockFlow(configurationNode(harness), true, harness.services, deps);
+
+      assert.strictEqual(outcome, 'done');
+      const { repositoryService, target } = harness;
+      assert.strictEqual(repositoryService.lockState.isRootRecursiveLocked(target), true);
+      assert.strictEqual(repositoryService.isRootLocked(target), true, 'строка успеха корня в выводе есть');
+      assert.strictEqual(repositoryService.isLocked(target, 'Справочник.Банки'), false);
+      assert.strictEqual(repositoryService.getLockInfo(target, 'Справочник.Банки').state, 'foreign');
+      assert.strictEqual(repositoryService.isLocked(target, 'Справочник.Валюты'), true);
+      assert.ok(repositoryService.snapshots.readRootManifestHashes(target));
+      assert.strictEqual(fs.readFileSync(banksXml, 'utf-8'), banksBefore);
+      assert.ok(fs.readFileSync(path.join(harness.configRoot, 'Catalogs', 'Валюты', 'Ext', 'ObjectModule.bsl'), 'utf-8').includes('версия хранилища'));
+      assert.strictEqual(notes.warning.length, 1);
+      assert.ok(notes.warning[0].includes('Справочник.Банки (Petrov)'));
+      assert.deepStrictEqual(notes.error, []);
+    } finally {
+      fixture.disposeAll();
+      source.dispose();
+      infoDump.dispose();
+    }
+  });
+
+  test('корень рекурсивно без проектного ConfigDumpInfo.xml: полная выгрузка сливается областью all без фильтра', async () => {
+    const harness = createHarness();
+    fs.rmSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'));
+    const full = createSource();
+    const requests: string[] = [];
+    const notes = notifications();
+    try {
+      const deps = baseDeps({
+        runRepositoryCli: refusedCli(rootOutput()),
+        dumpToTemp: (_target, request) => {
+          requests.push(request.mode);
+          return Promise.resolve({ ok: true, dir: full.root, dispose: full.dispose });
+        },
+        now: () => NOW,
+        ...notes,
+      });
+
+      const outcome = await runRepositoryLockFlow(configurationNode(harness), true, harness.services, deps);
+
+      assert.strictEqual(outcome, 'done');
+      assert.deepStrictEqual(requests, ['full']);
+      assert.ok(fs.existsSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml')), 'полная выгрузка слита целиком');
+      assert.strictEqual(harness.repositoryService.isLocked(harness.target, 'Справочник.Банки'), false);
+      assert.strictEqual(notes.warning.length, 1);
+    } finally {
+      full.dispose();
+    }
+  });
+
+  test('синхронизация файлов выключена: состояние и отметки записаны, выгрузки нет, предупреждение, done', async () => {
+    const harness = createHarness();
+    const notes = notifications();
+    const deps = baseDeps({
+      runRepositoryCli: refusedCli(partialOutput('lock-recursive-subordinate-refused.out.txt')),
+      isFileSyncEnabled: () => false,
+      now: () => NOW,
+      ...notes,
+    });
+
+    const outcome = await runRepositoryLockFlow(recursiveCatalog(harness, 'ПричиныВозврата'), true, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, PRICHINY), true);
+    assert.strictEqual(harness.repositoryService.getLockInfo(harness.target, PRICHINY_FORM).state, 'foreign');
+    assert.strictEqual(notes.warning.length, 1);
+    assert.deepStrictEqual([notes.info, notes.error], [[], []]);
+  });
+
+  test('выгрузка не удалась: состояние записано, предупреждения о синхронизации и о частичном захвате, done', async () => {
+    const harness = createHarness();
+    const notes = notifications();
+    const deps = baseDeps({
+      runRepositoryCli: refusedCli(partialOutput('lock-recursive-subordinate-refused.out.txt')),
+      dumpToTemp: () => Promise.resolve({ ok: false, reason: 'база недоступна' }),
+      now: () => NOW,
+      ...notes,
+    });
+
+    const outcome = await runRepositoryLockFlow(recursiveCatalog(harness, 'ПричиныВозврата'), true, harness.services, deps);
+
+    assert.strictEqual(outcome, 'done');
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, PRICHINY), true);
+    assert.strictEqual(harness.repositoryService.getLockInfo(harness.target, PRICHINY_FORM).state, 'foreign');
+    assert.strictEqual(notes.warning.length, 2);
+    assert.ok(notes.warning.some((message) => message.startsWith('Не удалось синхронизировать файлы') && message.includes('база недоступна')));
+    assert.ok(notes.warning.some((message) => message.includes(`${PRICHINY_FORM} (Petrov)`)));
+    assert.deepStrictEqual(notes.error, []);
+  });
+
+  test('получение с выводом частичного захвата: failed, состояние захвата не меняется', async () => {
+    const harness = createHarness();
+    const notes = notifications();
+    const deps = baseDeps({
+      runRepositoryCli: refusedCli(partialOutput('lock-recursive-subordinate-refused.out.txt')),
+      now: () => NOW,
+      ...notes,
+    });
+
+    const outcome = await runRepositoryUpdateFlow(recursiveCatalog(harness, 'ПричиныВозврата'), { recursive: true, force: false }, harness.services, deps);
+
+    assert.strictEqual(outcome, 'failed');
+    assert.strictEqual(harness.repositoryService.isLocked(harness.target, PRICHINY), false);
+    assert.deepStrictEqual(harness.repositoryService.getLockInfo(harness.target, PRICHINY_FORM), { state: 'free' });
+    assert.strictEqual(notes.error.length, 1);
+  });
+
+  /** Форма есть только в выгрузке: проект не знает её — она приходит extraMembers раундов. */
+  function removeFormFromProject(harness: Harness): void {
+    const catalogXml = path.join(harness.configRoot, 'Catalogs', 'ПричиныВозврата.xml');
+    fs.writeFileSync(catalogXml, removeChildObjectEntry(fs.readFileSync(catalogXml, 'utf-8'), 'Form', 'ФормаЭлемента'), 'utf-8');
+    const formsDir = path.join(harness.configRoot, 'Catalogs', 'ПричиныВозврата', 'Forms');
+    fs.rmSync(path.join(formsDir, 'ФормаЭлемента.xml'));
+    fs.rmSync(path.join(formsDir, 'ФормаЭлемента'), { recursive: true, force: true });
+  }
+
+  test('отказанная форма среди extraMembers раундов не записывается и не восстанавливается в проекте', async () => {
+    const harness = createHarness();
+    removeFormFromProject(harness);
+    const fixture = createPartialDumpFixture(EXAMPLE_CF, 'ТорговыйУчет');
+    const notes = notifications();
+    try {
+      const deps = baseDeps({
+        runRepositoryCli: refusedCli(partialOutput('lock-recursive-subordinate-refused.out.txt')),
+        dumpToTemp: withFixture(harness, fixture),
+        now: () => NOW,
+        ...notes,
+      });
+
+      const outcome = await runRepositoryLockFlow(recursiveCatalog(harness, 'ПричиныВозврата'), true, harness.services, deps);
+
+      assert.strictEqual(outcome, 'done');
+      assert.ok(fixture.calls.some((call) => call.names.includes(PRICHINY_FORM)), 'форма пришла раундом выгрузки');
+      assert.strictEqual(harness.repositoryService.isLocked(harness.target, PRICHINY), true);
+      assert.strictEqual(harness.repositoryService.isLocked(harness.target, PRICHINY_FORM), false);
+      assert.strictEqual(harness.repositoryService.lockState.getLockGroup(harness.target, PRICHINY), undefined);
+      assert.strictEqual(harness.repositoryService.getLockInfo(harness.target, PRICHINY_FORM).state, 'foreign');
+      assert.strictEqual(fs.existsSync(path.join(harness.configRoot, 'Catalogs', 'ПричиныВозврата', 'Forms', 'ФормаЭлемента.xml')), false);
+      assert.strictEqual(notes.warning.length, 1);
+    } finally {
+      fixture.disposeAll();
+    }
+  });
+
+  test('сбой записи состояния после выгрузки в частичном пути: каталоги выгрузки удалены, failed, guard свободен', async () => {
+    const harness = createHarness();
+    removeFormFromProject(harness);
+    const fixture = createPartialDumpFixture(EXAMPLE_CF, 'ТорговыйУчет');
+    const dumpDirs: string[] = [];
+    const stateFile = path.join(harness.workspaceRoot, '.v8vscedit', 'repository', 'state.json');
+    const notes = notifications();
+    try {
+      const deps = baseDeps({
+        runRepositoryCli: refusedCli(partialOutput('lock-recursive-subordinate-refused.out.txt')),
+        dumpToTemp: async (target, request, services) => {
+          const result = await fixture.dumpToTemp(target, request, services);
+          if (result.ok) {
+            dumpDirs.push(result.dir);
+          }
+          // Каталог на месте state.json: следующая запись состояния (extraMembers) падает с EISDIR.
+          fs.rmSync(stateFile, { recursive: true, force: true });
+          fs.mkdirSync(stateFile, { recursive: true });
+          return result;
+        },
+        now: () => NOW,
+        ...notes,
+      });
+
+      const outcome = await runRepositoryLockFlow(recursiveCatalog(harness, 'ПричиныВозврата'), true, harness.services, deps);
+
+      assert.strictEqual(outcome, 'failed');
+      assert.strictEqual(harness.guard.isBusy, false);
+      assert.ok(dumpDirs.length > 0);
+      assert.ok(dumpDirs.every((dir) => !fs.existsSync(dir)), 'выгрузка освобождена при сбое записи состояния');
+      assert.strictEqual(notes.error.length, 1);
+    } finally {
+      fixture.disposeAll();
+    }
+  });
 });

@@ -28,7 +28,13 @@ import { CONFIG_DUMP_INFO_FILE, type ObjectScope, type ScopeDepth } from '../../
 import type { RepositoryNodeRef, RepositoryTarget } from '../../../infra/repository/RepositoryService';
 import { disposeOnError, disposeOnErrorAsync } from '../../../infra/repository/RepositoryTempCleanup';
 import { toLocalTimestamp } from '../../../infra/repository/RepositoryLockState';
-import { parseRepositoryLockRefusals, selectAttemptedRefusals } from '../../../infra/repository/RepositoryLockOutputParser';
+import {
+  parseRepositoryLockRefusals,
+  selectAttemptedRefusals,
+  selectLockedMembers,
+  summarizeRepositoryLockOutput,
+  type RepositoryLockOutputSummary,
+} from '../../../infra/repository/RepositoryLockOutputParser';
 import { readConfigDumpInfoFile } from '../../../infra/xml/ConfigDumpInfoReader';
 import { buildRepositoryLockRequest, buildRepositoryUpdateRequest } from './RepositoryCommandRunner';
 import { refreshRepositoryUi } from './RepositoryDatabaseSync';
@@ -83,6 +89,8 @@ interface LeaseResult {
   cli: Awaited<ReturnType<RepositoryFileSyncDeps['runRepositoryCli']>>;
   subject?: RepositorySubject;
   acquisition?: DumpAcquisition;
+  /** Частичный захват (issue #87): код 1, но сервер выдал часть единиц. */
+  partial?: RepositoryLockOutputSummary;
 }
 
 type RepositoryFetchOperation = 'lock' | 'update';
@@ -134,22 +142,31 @@ async function runFetchFlow(
         ? buildRepositoryLockRequest(target, subject.objectsFile, objectLabel)
         : buildRepositoryUpdateRequest(target, subject.objectsFile, objectLabel, options);
       const cli = await runSubjectCli(subject, request, services, deps);
-      if (cli.status !== 'done') {
+      // Код 1 не значит «ничего не захвачено»: сервер выдаёт всё, что может, и отказывает
+      // только по чужим единицам. Выданное записывается в той же аренде, что и при успехе.
+      const partial = operation === 'lock' && cli.status === 'failed' ? summarizePartialLock(subject, cli.output ?? '') : undefined;
+      if (cli.status !== 'done' && !partial) {
         return { cli, subject };
       }
+      const refused = partial?.refused.map((item) => item.fullName) ?? [];
+      const lockedMembers = (candidates: readonly string[]): readonly string[] =>
+        (partial ? selectLockedMembers(candidates, partial) : candidates);
       if (operation === 'lock') {
-        applySubjectLock(services, subject, subject.members);
+        applySubjectLock(services, subject, lockedMembers(subject.members), refused);
+        if (partial) {
+          services.repositoryService.lockState.applyLockRefusals(subject.target, partial.refused, toLocalTimestamp(deps.now()));
+        }
       }
       if (!syncEnabled) {
-        return { cli, subject };
+        return { cli, subject, partial };
       }
       const acquisition = await acquireRepositoryDump(subject, baseHashes, services, deps);
       if (operation === 'lock' && acquisition.status === 'acquired' && acquisition.dump.extraMembers.length > 0) {
         const { dump } = acquisition;
         // Выгрузка уже принадлежит потоку: если запись состояния упадёт, её никто не освободит.
-        disposeOnError(dump, () => applySubjectLock(services, subject, [...subject.members, ...dump.extraMembers]));
+        disposeOnError(dump, () => applySubjectLock(services, subject, lockedMembers([...subject.members, ...dump.extraMembers]), refused));
       }
-      return { cli, subject, acquisition };
+      return { cli, subject, acquisition, partial };
     });
   } catch (error) {
     return reportFlowError(services, deps, label, error);
@@ -157,8 +174,8 @@ async function runFetchFlow(
   if (!leased.acquired) {
     return 'busy';
   }
-  const { cli, subject, acquisition } = leased.value;
-  if (cli.status !== 'done') {
+  const { cli, subject, acquisition, partial } = leased.value;
+  if (cli.status !== 'done' && !partial) {
     // Отказ захвата — единственный след чужого захвата в пакетном режиме: отмечаем его до
     // сообщения об ошибке, чтобы дерево уже показывало держателя.
     if (operation === 'lock' && cli.status === 'failed' && subject
@@ -167,18 +184,56 @@ async function runFetchFlow(
     }
     return reportCliOutcome(cli, label, deps);
   }
+  const refusedList = (partial?.refused ?? []).map((item) => `${item.fullName} (${item.user})`).join(', ');
+  if (refusedList) {
+    services.outputChannel.appendLine(`[repository][locks] частичный захват «${objectLabel}», объекты захвачены другими пользователями: ${refusedList}`);
+  }
   if (subject && acquisition) {
     try {
-      await completeFetchSync(operation, subject, acquisition, objectLabel, services, deps);
+      const refused = new Set((partial?.refused ?? []).map((item) => item.fullName));
+      await completeFetchSync(operation, subject, acquisition, objectLabel, services, deps, refused);
     } catch (error) {
       // Сбой синхронизации файлов не отменяет уже выполненную операцию хранилища.
       reportFlowError(services, deps, `${label}: синхронизация файлов`, error);
     }
   }
-  deps.notifyInfo(operation === 'lock'
-    ? `Объекты «${objectLabel}» захвачены.`
-    : `Объекты «${objectLabel}» получены из хранилища.`);
+  if (refusedList) {
+    deps.notifyWarning(`Объекты «${objectLabel}» захвачены частично: захвачены другими пользователями ${refusedList}.`);
+  } else {
+    deps.notifyInfo(operation === 'lock'
+      ? `Объекты «${objectLabel}» захвачены.`
+      : `Объекты «${objectLabel}» получены из хранилища.`);
+  }
   return 'done';
+}
+
+/**
+ * Разбор вывода захвата с кодом 1. `undefined` — сервер не выдал ни одной попытанной
+ * единицы: это полный отказ, его обрабатывает прежний путь ошибки.
+ */
+function summarizePartialLock(subject: RepositorySubject, output: string): RepositoryLockOutputSummary | undefined {
+  const summary = summarizeRepositoryLockOutput(output, subject.target, {
+    members: [subject.anchor, ...subject.members],
+    recursive: subject.mode === 'recursive',
+    isRoot: subject.isRoot,
+  });
+  return summary.granted.length > 0 ? summary : undefined;
+}
+
+/**
+ * Выгрузка без отказанных единиц: версия чужого захвата не сливается в проект и не
+ * вызывает диалог конфликта. Область `all` полной выгрузки не фильтруется — она
+ * описывает конфигурацию целиком, а не единицу.
+ */
+function withoutRefusedUnits(dump: AcquiredRepositoryDump, refused: ReadonlySet<string>): AcquiredRepositoryDump {
+  return {
+    ...dump,
+    sources: dump.sources.map((source) => ({
+      ...source,
+      entries: source.entries.filter((entry) => entry.scope.kind === 'all' || !refused.has(entry.fullName)),
+    })),
+    added: dump.added.filter((fullName) => !refused.has(fullName)),
+  };
 }
 
 /**
@@ -199,13 +254,19 @@ function recordLockRefusals(services: RepositoryFileSyncServices, subject: Repos
   return marked;
 }
 
-function applySubjectLock(services: RepositoryFileSyncServices, subject: RepositorySubject, members: readonly string[]): void {
+function applySubjectLock(
+  services: RepositoryFileSyncServices,
+  subject: RepositorySubject,
+  members: readonly string[],
+  refused: readonly string[]
+): void {
   services.repositoryService.lockState.applyLock(subject.target, {
     anchor: subject.anchor,
     members,
     recursiveRoot: subject.isRoot && subject.plan.kind === 'root-incremental',
     // Корень описывается rootRecursive, режим для него не пишется.
     mode: subject.isRoot ? undefined : subject.mode,
+    refused,
   });
 }
 
@@ -462,7 +523,8 @@ async function completeFetchSync(
   acquisition: DumpAcquisition,
   objectLabel: string,
   services: RepositoryFileSyncServices,
-  deps: RepositoryFileSyncDeps
+  deps: RepositoryFileSyncDeps,
+  refused: ReadonlySet<string>
 ): Promise<void> {
   const { target } = subject;
   if (acquisition.status === 'failed') {
@@ -476,7 +538,7 @@ async function completeFetchSync(
     }
     return;
   }
-  const { dump } = acquisition;
+  const dump = withoutRefusedUnits(acquisition.dump, refused);
   try {
     const planned = planMergeSources(services, deps, target, dump.sources);
     const choice = await resolveConflictChoice(deps, planned, operation === 'lock' ? 'Захват' : 'Получение', objectLabel);

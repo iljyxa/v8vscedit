@@ -16,6 +16,14 @@ import { RepositoryService, type RepositoryBinding, type RepositoryTarget } from
  * захватов, alias, размер страницы 1CD).
  */
 export const REPOSITORY_LOCKS_ROOT = path.resolve(__dirname, '../../../../example/repository/2.21-locks');
+/**
+ * Фикстуры частичного отказа рекурсивного захвата (issue #87), тот же генератор:
+ * `2.21-partial-locks` — отказы по подчинённой форме и по якорю справочника,
+ * `2.21-partial-root` — рекурсивный захват корня при чужом захвате Справочник.Банки.
+ * Ожидаемые строки успеха/отказа /Out — `expect` шага сценария.
+ */
+export const PARTIAL_LOCKS_ROOT = path.resolve(__dirname, '../../../../example/repository/2.21-partial-locks');
+export const PARTIAL_ROOT_ROOT = path.resolve(__dirname, '../../../../example/repository/2.21-partial-root');
 export const REPOSITORY_TLS_DIR = path.resolve(__dirname, '../../../../example/repository/tls');
 export const EXAMPLE_CF_221 = path.resolve(__dirname, '../../../../example/2.21/src/cf');
 
@@ -47,6 +55,21 @@ export interface LockRun {
 
 export function readScenario(): LockScenario {
   return JSON.parse(fs.readFileSync(path.join(REPOSITORY_LOCKS_ROOT, 'scenario.json'), 'utf-8')) as LockScenario;
+}
+
+export interface LockStepExpectation {
+  grants: string[];
+  refusals: { objectName: string; user: string }[];
+}
+
+export function readScenarioAt(root: string): LockScenario & { steps: { log?: string; expect?: LockStepExpectation }[] } {
+  return JSON.parse(fs.readFileSync(path.join(root, 'scenario.json'), 'utf-8')) as LockScenario & {
+    steps: { log?: string; expect?: LockStepExpectation }[];
+  };
+}
+
+export function scenarioFixturePath(root: string, version: LockFixtureVersion, ...parts: string[]): string {
+  return path.join(root, version, ...parts);
 }
 
 export function readRun(version: LockFixtureVersion): LockRun {

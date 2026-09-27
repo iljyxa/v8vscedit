@@ -57,6 +57,11 @@ export interface RepositoryLockRequest {
   recursiveRoot?: boolean;
   /** Режим захвата для всех `members`; без него запись ведёт себя как старая. */
   mode?: RepositoryLockMode;
+  /**
+   * Единицы, в захвате которых сервер отказал (частичный отказ, issue #87): не
+   * записываются даже якорем; при recursiveRoot — в releasedUnderRoot.
+   */
+  refused?: readonly string[];
 }
 
 export interface RepositoryUnlockRequest {
@@ -165,7 +170,8 @@ export class RepositoryLockState {
   }
 
   applyLock(target: RepositoryTarget, request: RepositoryLockRequest): void {
-    const members = [...new Set([request.anchor, ...request.members])];
+    const refused = new Set(request.refused ?? []);
+    const members = [...new Set([request.anchor, ...request.members])].filter((fullName) => !refused.has(fullName));
     this.updateScope(target, (scope) => {
       const locked = new Set(scope.lockedFullNames);
       members.forEach((fullName) => locked.add(fullName));
@@ -173,9 +179,14 @@ export class RepositoryLockState {
       if (members.length > 1) {
         lockGroups[request.anchor] = sortNames(members);
       }
-      const released = request.recursiveRoot
-        ? []
-        : (scope.releasedUnderRoot ?? []).filter((fullName) => !members.includes(fullName));
+      const kept = (scope.releasedUnderRoot ?? []).filter((fullName) => !members.includes(fullName));
+      // Рекурсивный корень покрывает всё, кроме освобождённых: отказанные сервером единицы
+      // обязаны остаться вне захвата, поэтому прежний список не обнуляется, а дополняется.
+      const released = !request.recursiveRoot
+        ? kept
+        : refused.size === 0
+          ? []
+          : sortNames([...new Set([...kept, ...[...refused].filter((fullName) => !isRootLockName(fullName))])]);
       const lockModes = withoutKeys(scope.lockModes, members);
       if (request.mode) {
         const mode = request.mode;
