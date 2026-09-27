@@ -1,7 +1,13 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { selectReadonlyApplyRoute } from '../../readonly/readonlyTabSelection';
-import { collectOpenTabs, RESET_READONLY_COMMAND, runWithResourceActive } from '../../readonly/sessionReadonly';
+import {
+  collectOpenTabs,
+  describeActivationOutcome,
+  RESET_READONLY_COMMAND,
+  runWithResourceActive,
+  SET_READONLY_COMMAND,
+} from '../../readonly/sessionReadonly';
 import type { MergeChoice } from '../../../infra/repository/RepositoryMergeApplier';
 
 /** Сводка конфликтов слияния для единственного модального диалога операции. */
@@ -83,12 +89,15 @@ export function showNotification(
 }
 
 /**
- * Файл мог быть открыт как readonly до захвата — сессионный флаг снимается явно,
- * иначе перенести правки нельзя. Команда действует только на правую сторону активного
- * сравнения, поэтому файл проекта слева снимается через временную обычную вкладку,
- * а сравнение затем снова делается активным.
+ * Readonly сессии на файле проекта выставляется явно в обе стороны: файл мог быть
+ * открыт как readonly до захвата (иначе правки не перенести), а незахваченный файл,
+ * не открывавшийся раньше, без явной установки оказался бы редактируемым в сравнении.
+ * Команда действует только на правую сторону активного сравнения, поэтому файл
+ * проекта слева переключается через временную обычную вкладку, а сравнение затем
+ * снова делается активным. Исход, отличный от применения, пишется в `log`: при
+ * `skipped` readonly файла проекта остаётся прежним.
  */
-export async function openMergeDiffs(pairs: readonly MergeDiffPair[]): Promise<void> {
+export async function openMergeDiffs(pairs: readonly MergeDiffPair[], log: (message: string) => void): Promise<void> {
   for (const pair of pairs) {
     const showDiff = (): Thenable<unknown> => vscode.commands.executeCommand(
       'vscode.diff',
@@ -98,16 +107,19 @@ export async function openMergeDiffs(pairs: readonly MergeDiffPair[]): Promise<v
       { preview: false }
     );
     await showDiff();
-    if (pair.writable) {
-      const projectPath = mergeDiffProjectPath(pair);
-      await runWithResourceActive(
-        selectReadonlyApplyRoute(collectOpenTabs(), projectPath),
-        vscode.Uri.file(projectPath),
-        () => Promise.resolve(vscode.commands.executeCommand(RESET_READONLY_COMMAND))
-      );
-      if (pair.projectSide === 'local') {
-        await showDiff();
-      }
+    const projectUri = vscode.Uri.file(mergeDiffProjectPath(pair));
+    const command = pair.writable ? RESET_READONLY_COMMAND : SET_READONLY_COMMAND;
+    const outcome = await runWithResourceActive(
+      selectReadonlyApplyRoute(collectOpenTabs(), projectUri.fsPath),
+      projectUri,
+      () => Promise.resolve(vscode.commands.executeCommand(command))
+    );
+    const note = describeActivationOutcome(outcome, projectUri);
+    if (note) {
+      log(note);
+    }
+    if (pair.projectSide === 'local') {
+      await showDiff();
     }
   }
 }
