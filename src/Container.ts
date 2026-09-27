@@ -11,6 +11,7 @@ import {
 import { formatPerfLine, measurePerfPhase } from './infra/support/PerfLog';
 import { ConfigurationCleanWindow } from './infra/fs/ConfigurationCleanWindow';
 import { ConfigurationOperationGuard } from './infra/process/ConfigurationOperationGuard';
+import { sweepStaleOperationTemp } from './infra/process/StaleOperationTempSweep';
 import { MetadataTreeProvider } from './ui/tree/MetadataTreeProvider';
 import { registerCommands } from './ui/commands/CommandRegistry';
 import type { CommandServices } from './ui/commands/_shared';
@@ -371,7 +372,22 @@ export class Container {
     c.startMcpServer();
     c.wireLsp();
     c.startBslAnalyzerMcpServers();
+    void c.sweepStaleOperationTemp();
     return c;
+  }
+
+  /**
+   * Хвосты временных каталогов после аварийного завершения прошлой сессии. Асинхронно
+   * и без ожидания: удаление забытой полной выгрузки не должно задерживать активацию.
+   */
+  private async sweepStaleOperationTemp(): Promise<void> {
+    const { removed, failures } = await sweepStaleOperationTemp(this.workspaceFolder.uri.fsPath, new Date());
+    if (removed.length > 0) {
+      this.outputChannel.appendLine(`[init] удалены устаревшие временные каталоги операций: ${String(removed.length)}`);
+    }
+    for (const failure of failures) {
+      this.outputChannel.appendLine(`[init][warn] очистка устаревших временных каталогов не удалась: ${failure}`);
+    }
   }
 
   /** Перечитывает список конфигураций в рабочей области */

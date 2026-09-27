@@ -22,6 +22,7 @@ import {
   runProcess,
 } from '../../../infra/process';
 import { readExtensionListFromDumpFile, resolveDbPassword, type ProjectSecretStorage } from '../../../infra/environment';
+import { createImportTempDir } from '../../../infra/fs/WorkspaceTempDir';
 
 type NodeArg = MetadataNode | { xmlPath?: string; nodeKind?: string; label?: string };
 
@@ -460,7 +461,7 @@ async function runBatchDecompileExtension(
 ): Promise<boolean> {
   const settingsPath = resolveSettingsPath(workspaceFolder.uri.fsPath, extensionRoot);
   const connection = await resolveConnectionFromSettings(settingsPath);
-  const tempRoot = createWorkspaceTempDir(workspaceFolder.uri.fsPath, 'import-ext-');
+  const tempRoot = createImportTempDir(workspaceFolder.uri.fsPath, 'import-ext-');
   const tempConfigDir = path.join(tempRoot, 'cfe', extensionName);
   fs.mkdirSync(tempConfigDir, { recursive: true });
   const cliArgs = [
@@ -529,7 +530,7 @@ export async function listConnectedDatabaseExtensions(
     return undefined;
   }
 
-  const tempRoot = createWorkspaceTempDir(workspaceFolder.uri.fsPath, 'list-ext-');
+  const tempRoot = createImportTempDir(workspaceFolder.uri.fsPath, 'list-ext-');
   const resultFile = path.join(tempRoot, 'extensions.txt');
   try {
     const cliArgs = [
@@ -574,7 +575,7 @@ async function runBatchDecompileMainConfiguration(
 ): Promise<boolean> {
   const settingsPath = resolveSettingsPath(workspaceFolder.uri.fsPath, configRoot);
   const connection = await resolveConnectionFromSettings(settingsPath);
-  const tempRoot = createWorkspaceTempDir(workspaceFolder.uri.fsPath, 'import-cf-');
+  const tempRoot = createImportTempDir(workspaceFolder.uri.fsPath, 'import-cf-');
   const tempConfigDir = path.join(tempRoot, 'cf');
   fs.mkdirSync(tempConfigDir, { recursive: true });
   const cliArgs = [
@@ -656,12 +657,6 @@ async function runBatchApplyDatabaseConfiguration(
     workspaceFolder,
     outputChannel
   );
-}
-
-function createWorkspaceTempDir(workspaceRoot: string, prefix: string): string {
-  const tempParent = path.join(workspaceRoot, '.v8vscedit', 'import-temp');
-  fs.mkdirSync(tempParent, { recursive: true });
-  return fs.mkdtempSync(path.join(tempParent, prefix));
 }
 
 const FULL_SYNC_CONFIRM_BUTTON = 'Выполнить полную загрузку';
@@ -1931,6 +1926,6 @@ export const configurationProcessPort = {
   resolveSettingsPath,
   resolveConnectionFromSettings,
   buildConnectionCliArgs,
-  createWorkspaceTempDir,
+  createWorkspaceTempDir: createImportTempDir,
   removeTempDir,
 };
