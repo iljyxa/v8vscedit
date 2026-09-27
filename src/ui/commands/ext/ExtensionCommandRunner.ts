@@ -23,6 +23,7 @@ import {
 } from '../../../infra/process';
 import { readExtensionListFromDumpFile, resolveDbPassword, type ProjectSecretStorage } from '../../../infra/environment';
 import { createImportTempDir as createWorkspaceTempDir } from '../../../infra/fs/WorkspaceTempDir';
+import { describeFsError, removePathWithRetries } from '../../../infra/fs/PathRemoval';
 
 type NodeArg = MetadataNode | { xmlPath?: string; nodeKind?: string; label?: string };
 
@@ -1606,12 +1607,15 @@ function copyAllEntries(sourceDir: string, targetDir: string): void {
   }
 }
 
+/**
+ * Повторы — потому что на Windows каталог держит watcher bsl-analyzer или антивирус
+ * (ENOTEMPTY/EPERM); код ошибки вместо message — путь в message Node приходит в неверной кодировке.
+ */
 function removeTempDir(tempRoot: string, outputChannel: vscode.OutputChannel): void {
   try {
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    removePathWithRetries(tempRoot);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    outputChannel.appendLine(`[actions][warn] Не удалось удалить временный каталог ${tempRoot}: ${message}`);
+    outputChannel.appendLine(`[actions][warn] Не удалось удалить временный каталог ${tempRoot}: ${describeFsError(error)}`);
   }
 }
 

@@ -9,7 +9,8 @@ import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOp
 import { buildRepositoryScopeKey } from '../../infra/repository/RepositoryLockState';
 import { buildMergeBackupDir } from '../../infra/repository/RepositoryMergeApplier';
 import { RepositoryService, type RepositoryNodeRef, type RepositoryTarget } from '../../infra/repository/RepositoryService';
-import { getRepositoryMergeRoot, removePathWithRetries } from '../../infra/repository/RepositoryTempCleanup';
+import { removePathWithRetries } from '../../infra/fs/PathRemoval';
+import { getRepositoryMergeRoot } from '../../infra/repository/RepositoryTempCleanup';
 import type { MergeDiffPair } from '../../ui/commands/repository/RepositoryFileSyncDialogs';
 import type { RepositoryFileSyncDeps, RepositoryFileSyncServices } from '../../ui/commands/repository/RepositoryFileSyncShared';
 import { runRepositoryLockFlow, runRepositoryUpdateFlow } from '../../ui/commands/repository/RepositoryLockSync';
