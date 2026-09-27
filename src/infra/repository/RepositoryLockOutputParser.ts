@@ -93,6 +93,11 @@ export function selectAttemptedRefusals(
   return selected;
 }
 
+/**
+ * Итог вывода захвата по попытанным единицам: строки успеха → fullName (голое имя
+ * конфигурации/расширения → сентинел корня), нераспознанные виды и посторонние
+ * единицы отброшены; отказы — как selectAttemptedRefusals.
+ */
 export function summarizeRepositoryLockOutput(
   output: string,
   target: RepositoryTarget,

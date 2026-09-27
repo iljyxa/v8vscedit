@@ -13,7 +13,9 @@ import { ConfigurationOperationGuard } from '../../infra/process/ConfigurationOp
 import { RepositoryService, type RepositoryNodeRef, type RepositoryTarget } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import { buildScopeKey, computeFileHash, saveHashCache, loadHashCache } from '../../infra/cache/HashCache';
-import { buildRootDumpListName, getRootLockName, subordinateUnitFullName } from '../../infra/repository/RepositoryObjectNames';
+import { buildRootDumpListName, dumpInfoOwnerToRepositoryFullName, getRootLockName, subordinateUnitFullName } from '../../infra/repository/RepositoryObjectNames';
+import { diffConfigDumpInfo, extractDumpInfoUnit } from '../../infra/repository/ConfigDumpInfoDiff';
+import { parseConfigDumpInfo } from '../../infra/xml/ConfigDumpInfoReader';
 import { MAX_DUMP_ROUNDS } from '../../infra/repository/RepositoryDumpRounds';
 import type { ConfigurationDumpRequest } from '../../infra/agent';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
@@ -1618,6 +1620,12 @@ suite('RepositoryLockSync — частичный отказ захвата (issu
       assert.ok(repositoryService.snapshots.readRootManifestHashes(target));
       assert.strictEqual(fs.readFileSync(banksXml, 'utf-8'), banksBefore);
       assert.ok(fs.readFileSync(path.join(harness.configRoot, 'Catalogs', 'Валюты', 'Ext', 'ObjectModule.bsl'), 'utf-8').includes('версия хранилища'));
+      // Базовая линия проекта не сдвигается на версии отказанных единиц: иначе следующий
+      // инкремент корня не увидел бы Банки изменёнными, а их файлы так и не были бы слиты.
+      const projectInfoAfter = fs.readFileSync(path.join(harness.configRoot, 'ConfigDumpInfo.xml'), 'utf-8');
+      assert.strictEqual(projectInfoAfter, projectInfo);
+      const nextDiff = diffConfigDumpInfo(parseConfigDumpInfo(projectInfoAfter), parseConfigDumpInfo(nextInfo), extractDumpInfoUnit);
+      assert.ok(nextDiff.changedOwners.map((owner) => dumpInfoOwnerToRepositoryFullName(owner, target)).includes('Справочник.Банки'));
       assert.strictEqual(notes.warning.length, 1);
       assert.ok(notes.warning[0].includes('Справочник.Банки (Petrov)'));
       assert.deepStrictEqual(notes.error, []);

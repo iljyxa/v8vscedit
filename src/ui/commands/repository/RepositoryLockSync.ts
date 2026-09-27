@@ -223,9 +223,14 @@ function summarizePartialLock(subject: RepositorySubject, output: string): Repos
 /**
  * Выгрузка без отказанных единиц: версия чужого захвата не сливается в проект и не
  * вызывает диалог конфликта. Область `all` полной выгрузки не фильтруется — она
- * описывает конфигурацию целиком, а не единицу.
+ * описывает конфигурацию целиком, а не единицу. ConfigDumpInfo.xml частичной выгрузки
+ * при отказах в проект не копируется: он уже несёт версии отказанных единиц, чьи файлы
+ * не слиты, и следующий инкремент корня перестал бы их видеть изменёнными. Прежняя
+ * базовая линия лишь заставит заново выгрузить изменившееся — слияние одинакового
+ * содержимого конфликтов не даёт.
  */
 function withoutRefusedUnits(dump: AcquiredRepositoryDump, refused: ReadonlySet<string>): AcquiredRepositoryDump {
+  const fullDump = dump.sources.some((source) => source.entries.some((entry) => entry.scope.kind === 'all'));
   return {
     ...dump,
     sources: dump.sources.map((source) => ({
@@ -233,6 +238,7 @@ function withoutRefusedUnits(dump: AcquiredRepositoryDump, refused: ReadonlySet<
       entries: source.entries.filter((entry) => entry.scope.kind === 'all' || !refused.has(entry.fullName)),
     })),
     added: dump.added.filter((fullName) => !refused.has(fullName)),
+    configDumpInfoSource: refused.size > 0 && !fullDump ? undefined : dump.configDumpInfoSource,
   };
 }
 
