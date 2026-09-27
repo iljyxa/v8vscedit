@@ -78,15 +78,31 @@ interface Outcome {
 
 function sendTcp(address: CrsAddress, body: Buffer, options: CrsTransportOptions, outcome: Outcome): () => void {
   const socket = net.connect({ host: address.host, port: address.port });
-  let received = Buffer.alloc(0);
+  // До конца заголовка байты копятся в одном буфере: он ограничен TCP_HEADER_LIMIT, поэтому
+  // повторная склейка дешёвая. Тело (до 128 МиБ) копится кусками и склеивается один раз —
+  // склейка на каждом событии data была бы квадратичной.
+  let head = Buffer.alloc(0);
   let requestSent = false;
+  let bodyState: { length: number; chunks: Buffer[]; received: number } | undefined;
+  const acceptBody = (part: Buffer, state: { length: number; chunks: Buffer[]; received: number }): void => {
+    state.chunks.push(part);
+    state.received += part.length;
+    // Терминатор после тела допускается, но не требуется: тело определяется Content-Length.
+    if (state.received >= state.length) {
+      outcome.succeed(Buffer.concat(state.chunks).subarray(0, state.length));
+    }
+  };
   socket.on('data', (chunk: Buffer) => {
-    received = Buffer.concat([received, chunk]);
-    if (!requestSent && received.length >= CRS_TCP_SERVER_GREETING_LENGTH) {
+    if (bodyState) {
+      acceptBody(chunk, bodyState);
+      return;
+    }
+    head = Buffer.concat([head, chunk]);
+    if (!requestSent && head.length >= CRS_TCP_SERVER_GREETING_LENGTH) {
       requestSent = true;
       socket.write(Buffer.concat([CRS_TCP_CLIENT_HELLO, buildCrsTcpRequestFrame(body)]));
     }
-    const response = received.subarray(CRS_TCP_SERVER_GREETING_LENGTH);
+    const response = head.subarray(CRS_TCP_SERVER_GREETING_LENGTH);
     const headerEnd = response.indexOf(HEADER_END);
     if (headerEnd < 0) {
       if (response.length > TCP_HEADER_LIMIT) {
@@ -94,12 +110,12 @@ function sendTcp(address: CrsAddress, body: Buffer, options: CrsTransportOptions
       }
       return;
     }
-    const head = response.subarray(0, headerEnd).toString('latin1');
-    if (!/^HTTP\/1\.[01] 200 /.test(head)) {
-      outcome.fail(protocolError(address, `статус кадра «${head.split('\r\n')[0]}»`));
+    const header = response.subarray(0, headerEnd).toString('latin1');
+    if (!/^HTTP\/1\.[01] 200 /.test(header)) {
+      outcome.fail(protocolError(address, `статус кадра «${header.split('\r\n')[0]}»`));
       return;
     }
-    const length = /\r\nContent-Length:\s*(\d+)/i.exec(head)?.[1];
+    const length = /\r\nContent-Length:\s*(\d+)/i.exec(header)?.[1];
     if (length === undefined) {
       outcome.fail(protocolError(address, 'в кадре ответа нет Content-Length'));
       return;
@@ -108,11 +124,8 @@ function sendTcp(address: CrsAddress, body: Buffer, options: CrsTransportOptions
       outcome.fail(tooLarge(address, options));
       return;
     }
-    // Терминатор после тела допускается, но не требуется: тело определяется Content-Length.
-    const start = headerEnd + HEADER_END.length;
-    if (response.length >= start + Number(length)) {
-      outcome.succeed(Buffer.from(response.subarray(start, start + Number(length))));
-    }
+    bodyState = { length: Number(length), chunks: [], received: 0 };
+    acceptBody(response.subarray(headerEnd + HEADER_END.length), bodyState);
   });
   socket.on('error', (error) => outcome.fail(classifyNetworkError(error, address)));
   socket.on('close', () => outcome.fail(protocolError(address, 'соединение закрыто сервером до конца ответа')));

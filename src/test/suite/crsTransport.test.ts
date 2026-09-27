@@ -73,6 +73,40 @@ for (const version of NETWORK_FIXTURE_VERSIONS) {
       assert.deepStrictEqual(server.requests, [exchange.client]);
     });
 
+    test('tcp: ответ мелкими порциями (разрывы в заголовке, на границе заголовка и в теле) собирается байт-в-байт', async () => {
+      const exchange = readTcpExchange(version, 'statistic-admin');
+      const stream = exchange.server.subarray(5);
+      const headerEnd = stream.indexOf('\r\n\r\n');
+      // Порции по 7 байт плюс разрезы внутри и точно на границе `\r\n\r\n`.
+      const cuts = new Set<number>([headerEnd + 2, headerEnd + 4]);
+      for (let offset = 7; offset < stream.length; offset += 7) {
+        cuts.add(offset);
+      }
+      const bounds = [0, ...[...cuts].sort((left, right) => left - right), stream.length];
+      const received: Buffer[] = [];
+      const server = await startRawTcpServer((socket) => {
+        socket.setNoDelay(true);
+        socket.write(exchange.server.subarray(0, 5));
+        socket.on('data', (chunk: Buffer) => {
+          received.push(chunk);
+          if (Buffer.concat(received).length < exchange.client.length) {
+            return;
+          }
+          // Каждая порция — отдельный write с ожиданием callback: разбиение задаёт сервер,
+          // склейка порций на стороне клиента результат не меняет.
+          void (async () => {
+            for (let index = 0; index + 1 < bounds.length; index += 1) {
+              await new Promise<void>((resolve) => socket.write(stream.subarray(bounds[index], bounds[index + 1]), () => resolve()));
+            }
+          })();
+        });
+      });
+      servers.push(server);
+      const body = await sendCrsRequest(tcpAddress(server.port), tcpRequestBody(exchange.client), OPTIONS);
+      assert.deepStrictEqual(body, tcpResponseBody(exchange.server));
+      assert.deepStrictEqual(Buffer.concat(received), exchange.client);
+    });
+
     test('tcp: кадр запроса (заголовок, тело, терминатор) равен снятому', () => {
       const { client } = readTcpExchange(version, 'statistic-admin');
       assert.deepStrictEqual(buildCrsTcpRequestFrame(tcpRequestBody(client)), client.subarray(20));
