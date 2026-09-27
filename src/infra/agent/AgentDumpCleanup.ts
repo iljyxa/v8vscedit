@@ -38,7 +38,7 @@ export async function pruneStaleAgentDumps(projectRoot: string, now: Date, maxAg
   for (const location of locations) {
     for (const entry of await readDirOrEmptyAsync(location.dir)) {
       const stamp = location.isEntry(entry) ? parseAgentDumpStamp(entry.name) : undefined;
-      if (stamp !== undefined && isStale(stamp, nowMs, maxAgeMs)) {
+      if (isStale(stamp, nowMs, maxAgeMs)) {
         const target = path.join(location.dir, entry.name);
         await fs.promises.rm(target, { recursive: true, force: true });
         removed.push(target);

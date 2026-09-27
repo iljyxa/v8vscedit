@@ -15,6 +15,7 @@ import {
   getImportTempRoot,
   isStale,
   pruneStaleImportTempDirs,
+  readMtimeMs,
 } from '../../infra/fs/WorkspaceTempDir';
 import { STALE_OPERATION_TEMP_MAX_AGE_MS, sweepStaleOperationTemp } from '../../infra/process/StaleOperationTempSweep';
 
@@ -82,7 +83,8 @@ suite('WorkspaceTempDir — раскладка import-temp (issue #76)', () => {
 });
 
 suite('WorkspaceTempDir — isStale', () => {
-  const cases: readonly { name: string; time: number; expected: boolean }[] = [
+  const cases: readonly { name: string; time: number | undefined; expected: boolean }[] = [
+    { name: 'нет метки', time: undefined, expected: false },
     { name: 'старше порога', time: NOW.getTime() - DAY - 1, expected: true },
     { name: 'ровно порог', time: NOW.getTime() - DAY, expected: false },
     { name: 'моложе порога', time: NOW.getTime() - HOUR, expected: false },
@@ -93,6 +95,25 @@ suite('WorkspaceTempDir — isStale', () => {
       assert.strictEqual(isStale(time, NOW.getTime(), DAY), expected);
     });
   }
+});
+
+suite('WorkspaceTempDir — readMtimeMs', () => {
+  test('существующий каталог — его mtime', async () => {
+    const dir = makeImportTempDir(makeWorkspace(), 'repository-dump-', NOW.getTime() - DAY);
+    assert.strictEqual(await readMtimeMs(dir), NOW.getTime() - DAY);
+  });
+
+  test('записи уже нет (удалена после readdir) — undefined, а не исключение', async () => {
+    const dir = makeImportTempDir(makeWorkspace(), 'repository-dump-', NOW.getTime());
+    fs.rmSync(dir, { recursive: true });
+    assert.strictEqual(await readMtimeMs(dir), undefined);
+  });
+
+  test('прочие ошибки пробрасываются (путь внутри обычного файла — ENOTDIR)', async () => {
+    const file = path.join(makeWorkspace(), 'file.txt');
+    fs.writeFileSync(file, '', 'utf-8');
+    await assert.rejects(readMtimeMs(path.join(file, 'child')), /ENOTDIR/);
+  });
 });
 
 suite('WorkspaceTempDir — pruneStaleImportTempDirs', () => {

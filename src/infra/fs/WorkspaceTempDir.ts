@@ -29,9 +29,28 @@ export async function readDirOrEmptyAsync(dir: string): Promise<fs.Dirent[]> {
   }
 }
 
-/** Возраст строго больше порога; метки из будущего (сбитые часы) устаревшими не считаются. */
-export function isStale(timeMs: number, nowMs: number, maxAgeMs: number): boolean {
-  return timeMs <= nowMs && nowMs - timeMs > maxAgeMs;
+/**
+ * Возраст строго больше порога; метки из будущего (сбитые часы) устаревшими не считаются.
+ * Нет метки — нет и оснований удалять: так же трактуются исчезнувший каталог и чужое имя.
+ */
+export function isStale(timeMs: number | undefined, nowMs: number, maxAgeMs: number): boolean {
+  return timeMs !== undefined && timeMs <= nowMs && nowMs - timeMs > maxAgeMs;
+}
+
+/**
+ * mtime или `undefined`, если записи уже нет: между `readdir` и `stat` каталог может
+ * удалить его собственный поток или подметание из другого окна — это не сбой, и
+ * остальные каталоги должны подметаться дальше. Прочие ошибки — наружу.
+ */
+export async function readMtimeMs(target: string): Promise<number | undefined> {
+  try {
+    return (await fs.promises.stat(target)).mtimeMs;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -51,8 +70,7 @@ export async function pruneStaleImportTempDirs(workspaceRoot: string, now: Date,
       continue;
     }
     const dir = path.join(root, entry.name);
-    const stat = await fs.promises.stat(dir);
-    if (isStale(stat.mtimeMs, nowMs, maxAgeMs)) {
+    if (isStale(await readMtimeMs(dir), nowMs, maxAgeMs)) {
       await fs.promises.rm(dir, { recursive: true, force: true });
       removed.push(dir);
     }
