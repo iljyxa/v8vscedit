@@ -23,6 +23,18 @@ export const SUPPORT_SUFFIX_RE = /-support(?:\d|ChangesForbidden)/g;
 /** Форма для встраивания в предложение («Добавление запрещено: …»). */
 export const CHANGES_FORBIDDEN_REASON = 'изменения конфигурации запрещены в настройках поддержки';
 
+/** Причина `Locked` без флага: запрет поставщика на конкретный объект. */
+export const OBJECT_SUPPORT_LOCKED_REASON = 'объект находится на поддержке с запретом редактирования';
+
+/**
+ * Причина отказа для узла в режиме `Locked`, в форме для встраивания в
+ * предложение. Флаг проверяется отдельно от режима: при нём `Locked` получает
+ * и объект вне поставки, и подсказка «объект на поддержке» ведёт не туда.
+ */
+export function supportLockedReasonOf(changesForbidden: boolean): string {
+  return changesForbidden ? CHANGES_FORBIDDEN_REASON : OBJECT_SUPPORT_LOCKED_REASON;
+}
+
 /** Самостоятельная подсказка индикатора. */
 export const CHANGES_FORBIDDEN_TITLE = 'Изменения конфигурации запрещены в настройках поддержки';
 

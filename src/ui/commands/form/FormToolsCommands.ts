@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { SupportMode } from '../../../infra/support/SupportInfoService';
+import { supportLockedReasonOf } from '../../support/supportLockReason';
 import { resolveFormBodyFromNode, resolveObjectFormNodeParts } from '../../tree/formNodePaths';
 import type { MetadataNode } from '../../tree/TreeNode';
 import type { CommandServices } from '../_shared';
@@ -126,7 +127,7 @@ async function addForm(node: MetadataNode | undefined, services: CommandServices
   }
 }
 
-async function removeForm(node: MetadataNode | undefined, services: CommandServices): Promise<void> {
+export async function removeForm(node: MetadataNode | undefined, services: CommandServices): Promise<void> {
   const target = await resolveRemoveTarget(node, services);
   if (!target) {
     return;
@@ -136,7 +137,8 @@ async function removeForm(node: MetadataNode | undefined, services: CommandServi
   // objectPath — это XML объекта-владельца формы, по нему проверяем поддержку и захват в хранилище
   // (тот же путь, что supportXmlPath в RemoveMetadataCommand).
   if (services.supportService?.getSupportMode(objectPath) === SupportMode.Locked) {
-    await vscode.window.showErrorMessage('Удаление запрещено: объект находится на поддержке с запретом редактирования.');
+    const reason = supportLockedReasonOf(services.supportService.hasChangesForbidden(objectPath));
+    await vscode.window.showErrorMessage(`Удаление запрещено: ${reason}.`);
     return;
   }
   const repositoryTarget = services.repositoryService.resolveTargetByXmlPath(objectPath);
