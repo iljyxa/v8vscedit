@@ -1,10 +1,14 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { globSync } from 'glob';
+import { escape as escapeGlob, globSync } from 'glob';
 
 const WINDOWS_EXECUTABLE = '1cv8.exe';
 const UNIX_EXECUTABLES = ['1cv8', '1cv8c'] as const;
+const UNIX_INSTALL_ROOTS: readonly string[] = ['/opt/1cv8', '/opt/1C/v8.3'];
+// Единый установщик (setup-full-*.run, 8.3.20+) кладёт каталоги версий на уровень ниже —
+// под каталог архитектуры: /opt/1cv8/x86_64/<версия>. Рядом лежат служебные common/ и conf/.
+const UNIX_ARCH_DIRS = ['x86_64', 'i386'] as const;
 
 export interface InstalledOnecPlatform {
   readonly executablePath: string;
@@ -80,8 +84,13 @@ function resolveUnixHome(platform: NodeJS.Platform): string {
 /**
  * Строит подсказку пути к платформе по версии из env.json.
  * Нужна, чтобы `--v8version` продолжал работать без Windows-only автоопределения.
+ * `unixInstallRoots` задаёт корни установки на macOS/Linux (для тестов на временной структуре).
  */
-export function resolveV8PathHintFromVersion(version: string, platform: NodeJS.Platform = process.platform): string {
+export function resolveV8PathHintFromVersion(
+  version: string,
+  platform: NodeJS.Platform = process.platform,
+  unixInstallRoots: readonly string[] = UNIX_INSTALL_ROOTS
+): string {
   const normalizedVersion = version.trim();
   if (!normalizedVersion) {
     return '';
@@ -92,19 +101,23 @@ export function resolveV8PathHintFromVersion(version: string, platform: NodeJS.P
       `C:/Program Files/1cv8/${normalizedVersion}/bin`,
       `C:/Program Files (x86)/1cv8/${normalizedVersion}/bin`,
     ]
-    : [
-      `/opt/1cv8/${normalizedVersion}`,
-      `/opt/1C/v8.3/${normalizedVersion}`,
-    ];
+    : unixInstallRoots.flatMap((root) => [
+      path.posix.join(root, normalizedVersion),
+      ...UNIX_ARCH_DIRS.map((arch) => path.posix.join(root, arch, normalizedVersion)),
+    ]);
 
   return candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[0];
 }
 
 /**
  * Возвращает все найденные установки платформы, чтобы пользователь мог явно выбрать версию для проекта.
+ * `unixInstallRoots` задаёт корни установки на macOS/Linux (для тестов на временной структуре).
  */
-export function scanInstalledOnecPlatforms(platform: NodeJS.Platform = process.platform): InstalledOnecPlatform[] {
-  const candidates = collectDefaultV8Candidates(platform);
+export function scanInstalledOnecPlatforms(
+  platform: NodeJS.Platform = process.platform,
+  unixInstallRoots: readonly string[] = UNIX_INSTALL_ROOTS
+): InstalledOnecPlatform[] {
+  const candidates = collectDefaultV8Candidates(platform, unixInstallRoots);
   const existing = Array.from(new Set(candidates)).filter((candidate) =>
     isExistingFile(candidate) && isAllowedExecutable(candidate, platform)
   );
@@ -166,7 +179,10 @@ function resolveExplicitV8Path(v8Path: string, platform: NodeJS.Platform): strin
   throw new Error(`Не удалось определить исполняемый файл 1С по пути: ${v8Path}`);
 }
 
-function collectDefaultV8Candidates(platform: NodeJS.Platform): string[] {
+function collectDefaultV8Candidates(
+  platform: NodeJS.Platform,
+  unixInstallRoots: readonly string[] = UNIX_INSTALL_ROOTS
+): string[] {
   const candidates: string[] = [];
 
   if (platform === 'win32') {
@@ -182,13 +198,11 @@ function collectDefaultV8Candidates(platform: NodeJS.Platform): string[] {
     candidates.push(
       ...collectMacAppCandidates('/Applications/**'),
       ...collectMacAppCandidates('/opt/1cv8/*'),
-      ...collectUnixVersionCandidates('/opt/1C/v8.3/*'),
-      ...collectUnixVersionCandidates('/opt/1cv8/*')
+      ...unixInstallRoots.flatMap(collectUnixVersionCandidates)
     );
   } else {
     candidates.push(
-      ...collectUnixVersionCandidates('/opt/1C/v8.3/*'),
-      ...collectUnixVersionCandidates('/opt/1cv8/*'),
+      ...unixInstallRoots.flatMap(collectUnixVersionCandidates),
       '/usr/local/bin/1cv8',
       '/usr/bin/1cv8',
       '/usr/local/bin/1cv8c',
@@ -213,6 +227,8 @@ function collectDirectoryCandidates(dirPath: string, platform: NodeJS.Platform):
     path.join(dirPath, 'bin', name),
     path.join(dirPath, 'Contents', 'MacOS', name),
   ]);
+  // Пользователь может указать корень установки (/opt/1cv8) или каталог архитектуры, а не версии.
+  candidates.push(...collectUnixVersionCandidates(dirPath));
 
   if (platform === 'darwin') {
     candidates.push(
@@ -308,8 +324,21 @@ function safeRealPath(filePath: string): string {
   }
 }
 
-function collectUnixVersionCandidates(versionGlob: string): string[] {
-  return UNIX_EXECUTABLES.flatMap((name) => globSync(path.join(versionGlob, name), { nodir: true }));
+/**
+ * Исполняемые файлы в каталогах версий под корнем установки: `<корень>/<версия>/` и
+ * `<корень>/<архитектура>/<версия>/`. Старый deb-формат `/opt/1C/v8.3/x86_64/1cv8` без
+ * каталога версии совпадает с первым шаблоном — архитектура стоит на месте версии.
+ */
+function collectUnixVersionCandidates(installRoot: string): string[] {
+  // Корень экранируется: путь пользователя может содержать символы шаблона ([, *, ?).
+  const escapedRoot = escapeGlob(installRoot);
+  const versionGlobs = [
+    path.posix.join(escapedRoot, '*'),
+    ...UNIX_ARCH_DIRS.map((arch) => path.posix.join(escapedRoot, arch, '*')),
+  ];
+  return versionGlobs.flatMap((versionGlob) =>
+    UNIX_EXECUTABLES.flatMap((name) => globSync(path.posix.join(versionGlob, name), { nodir: true }))
+  );
 }
 
 function collectMacAppCandidates(rootGlob: string): string[] {
