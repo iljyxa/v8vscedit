@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -61,15 +62,16 @@ export class InfoBaseRegistryService {
 }
 
 export function parseV8iContent(content: string, sourcePath: string): RegisteredInfoBase[] {
-  return parseSections(content).map((section, index) => {
+  return parseSections(content).map((section) => {
     const connection = section.values.get('connect') ?? '';
     const parsedConnection = parseConnectionString(connection);
+    const envConnection = buildEnvConnection(parsedConnection);
     const order = Number.parseInt(section.values.get('orderinlist') ?? '', 10);
     return {
-      id: `${sourcePath}#${String(index)}`,
+      id: buildInfoBaseId(section.name, envConnection),
       name: section.name,
       kind: parsedConnection.kind,
-      connection: buildEnvConnection(parsedConnection),
+      connection: envConnection,
       sourcePath,
       filePath: parsedConnection.filePath,
       server: parsedConnection.server,
@@ -345,11 +347,25 @@ function expandVariables(value: string): string {
     .replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (_, name: string) => getEnvironmentVariable(name) ?? '');
 }
 
+/**
+ * Ключ идентичности базы — имя и строка подключения, а не позиция секции в `ibases.v8i`:
+ * лаунчер 1С перезаписывает файл целиком в произвольном порядке, и позиционный id
+ * между сканами указывал бы на другую базу.
+ */
+function infoBaseIdentityKey(name: string, connection: string): string {
+  return `${name}\n${connection}`.toLowerCase();
+}
+
+// Хэш, а не сам ключ: id уходит в webview как значение <option>, а ключ содержит перевод строки.
+function buildInfoBaseId(name: string, connection: string): string {
+  return createHash('sha1').update(infoBaseIdentityKey(name, connection)).digest('hex');
+}
+
 function deduplicateBases(bases: RegisteredInfoBase[]): RegisteredInfoBase[] {
   const seen = new Set<string>();
   const result: RegisteredInfoBase[] = [];
   for (const base of bases) {
-    const key = `${base.name}\n${base.connection}`.toLowerCase();
+    const key = infoBaseIdentityKey(base.name, base.connection);
     if (seen.has(key)) {
       continue;
     }
