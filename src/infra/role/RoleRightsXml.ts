@@ -370,10 +370,15 @@ export interface SerializableRoleRights {
   readonly formatVersion: string;
 }
 
+/**
+ * Форма выгрузки платформы: `xsi:type="Rights"` у корня и без перевода строки после
+ * `</Rights>`. Точное совпадение нужно role-edit — он пересериализует весь файл, и любое
+ * расхождение превращало правку без изменений в перезапись реального Rights.xml.
+ */
 export function serializeRightsXml(rights: SerializableRoleRights): string {
   const lines: string[] = [
     '<?xml version="1.0" encoding="UTF-8"?>',
-    `<Rights xmlns="${RIGHTS_NS}" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="${escapeXml(rights.formatVersion)}">`,
+    `<Rights xmlns="${RIGHTS_NS}" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="Rights" version="${escapeXml(rights.formatVersion)}">`,
     `\t<setForNewObjects>${String(rights.setForNewObjects)}</setForNewObjects>`,
     `\t<setForAttributesByDefault>${String(rights.setForAttributesByDefault)}</setForAttributesByDefault>`,
     `\t<independentRightsOfChildObjects>${String(rights.independentRightsOfChildObjects)}</independentRightsOfChildObjects>`,
@@ -397,7 +402,7 @@ export function serializeRightsXml(rights: SerializableRoleRights): string {
       '\t</restrictionTemplate>'
     );
   }
-  lines.push('</Rights>', '');
+  lines.push('</Rights>');
   return lines.join('\n');
 }
 
