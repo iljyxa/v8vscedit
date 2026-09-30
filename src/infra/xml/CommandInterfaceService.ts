@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { XMLValidator } from 'fast-xml-parser';
-import { escapeRegExp, escapeXmlAttribute, escapeXmlText, extractMetaDataObjectVersion, unescapeXml, writeTextFilePreservingBomAndEol } from './XmlUtils';
+import { escapeRegExp, escapeXmlAttribute, escapeXmlText, extractMetaDataObjectVersion, hasRealChange, unescapeXml, writeTextFilePreservingBomAndEol } from './XmlUtils';
 
 const CI_NS = 'http://v8.1c.ru/8.3/xcf/extrnprops';
 const XR_NS = 'http://v8.1c.ru/8.3/xcf/readable';
@@ -89,7 +89,8 @@ export class CommandInterfaceService {
 
   edit(options: CommandInterfaceEditOptions): CommandInterfaceEditResult {
     const ciPath = resolveCommandInterfacePath(options.ciPath, options.createIfMissing);
-    if (!fs.existsSync(ciPath)) {
+    const created = !fs.existsSync(ciPath);
+    if (created) {
       if (!options.createIfMissing) {
         throw new Error(`CommandInterface.xml не найден: ${ciPath}`);
       }
@@ -150,7 +151,11 @@ export class CommandInterfaceService {
       }
     }
 
-    if (xml !== original) {
+    // Секции собираются с `\n`, поэтому на CRLF-файле идемпотентный повтор отличается
+    // от исходника только EOL — это не изменение (см. hasRealChange). Созданный файл —
+    // изменение даже без операций: post-mutation путь должен о нём узнать.
+    const changed = hasRealChange(original, xml);
+    if (changed) {
       writeTextFilePreservingBomAndEol(ciPath, original, xml);
     }
     return {
@@ -158,7 +163,7 @@ export class CommandInterfaceService {
       added,
       removed,
       modified,
-      changedFiles: xml === original ? [] : [ciPath],
+      changedFiles: created || changed ? [ciPath] : [],
       lines,
     };
   }
@@ -362,6 +367,11 @@ function extractSectionInner(xml: string, section: CommandInterfaceSection): str
   return new RegExp(`<${section}>([\\s\\S]*?)<\\/${section}>`).exec(xml)?.[1] ?? null;
 }
 
+/**
+ * `sectionXml` начинается с открывающего тега без отступа: при замене существующей секции
+ * отступ перед ней остаётся из исходного файла, при вставке — добавляется здесь. Иначе
+ * каждый повтор операции дописывал бы лишний `\t` и правка не была бы идемпотентной.
+ */
 function replaceSection(xml: string, section: CommandInterfaceSection, sectionXml: string): string {
   const re = new RegExp(`<${section}>[\\s\\S]*?<\\/${section}>`);
   if (re.test(xml)) {
@@ -380,20 +390,20 @@ function replaceSection(xml: string, section: CommandInterfaceSection, sectionXm
 
 function replaceListSection(xml: string, section: 'SubsystemsOrder' | 'GroupsOrder', tagName: 'Subsystem' | 'Group', items: readonly string[]): { xml: string; added: number; removed: number } {
   const current = parseTextEntries(extractSectionInner(xml, section) ?? '', tagName);
-  const sectionXml = `\t<${section}>\n${items.map((item) => `\t\t<${tagName}>${escapeXmlText(item)}</${tagName}>`).join('\n')}\n\t</${section}>`;
+  const sectionXml = `<${section}>\n${items.map((item) => `\t\t<${tagName}>${escapeXmlText(item)}</${tagName}>`).join('\n')}\n\t</${section}>`;
   return { xml: replaceSection(xml, section, sectionXml), added: items.length, removed: current.length };
 }
 
 function buildVisibilitySection(items: readonly { readonly command: string; readonly common: string }[]): string {
-  return `\t<CommandsVisibility>\n${items.map((item) => `\t\t<Command name="${escapeXmlAttribute(item.command)}">\n\t\t\t<Visibility>\n\t\t\t\t<xr:Common>${item.common}</xr:Common>\n\t\t\t</Visibility>\n\t\t</Command>`).join('\n')}\n\t</CommandsVisibility>`;
+  return `<CommandsVisibility>\n${items.map((item) => `\t\t<Command name="${escapeXmlAttribute(item.command)}">\n\t\t\t<Visibility>\n\t\t\t\t<xr:Common>${item.common}</xr:Common>\n\t\t\t</Visibility>\n\t\t</Command>`).join('\n')}\n\t</CommandsVisibility>`;
 }
 
 function buildPlacementSection(items: readonly { readonly command: string; readonly group: string; readonly placement: string }[]): string {
-  return `\t<CommandsPlacement>\n${items.map((item) => `\t\t<Command name="${escapeXmlAttribute(item.command)}">\n\t\t\t<CommandGroup>${escapeXmlText(item.group)}</CommandGroup>\n\t\t\t<Placement>${escapeXmlText(item.placement)}</Placement>\n\t\t</Command>`).join('\n')}\n\t</CommandsPlacement>`;
+  return `<CommandsPlacement>\n${items.map((item) => `\t\t<Command name="${escapeXmlAttribute(item.command)}">\n\t\t\t<CommandGroup>${escapeXmlText(item.group)}</CommandGroup>\n\t\t\t<Placement>${escapeXmlText(item.placement)}</Placement>\n\t\t</Command>`).join('\n')}\n\t</CommandsPlacement>`;
 }
 
 function buildOrderSection(items: readonly { readonly command: string; readonly group: string }[]): string {
-  return `\t<CommandsOrder>\n${items.map((item) => `\t\t<Command name="${escapeXmlAttribute(item.command)}">\n\t\t\t<CommandGroup>${escapeXmlText(item.group)}</CommandGroup>\n\t\t</Command>`).join('\n')}\n\t</CommandsOrder>`;
+  return `<CommandsOrder>\n${items.map((item) => `\t\t<Command name="${escapeXmlAttribute(item.command)}">\n\t\t\t<CommandGroup>${escapeXmlText(item.group)}</CommandGroup>\n\t\t</Command>`).join('\n')}\n\t</CommandsOrder>`;
 }
 
 function buildInfoLines(ciPath: string, parsed: ParsedCommandInterface): string[] {
