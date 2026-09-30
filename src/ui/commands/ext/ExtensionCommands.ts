@@ -213,6 +213,12 @@ export function registerExtensionCommands(
     }),
 
     vscode.commands.registerCommand('v8vscedit.connectExtension', async () => {
+      // Запрос списка расширений — отдельный запуск Конфигуратора и выбор
+      // пользователя; при занятом замке подключение всё равно не стартует.
+      if (isConfigurationOperationRunning()) {
+        void vscode.window.showInformationMessage('Операция с конфигурацией уже выполняется. Дождитесь её завершения.');
+        return;
+      }
       /* c8 ignore next -- строка вызова vscode-команды; не юнит-тестируется без полного харнесса CommandServices, ветвящаяся логика выбора имени — в planExtensionChoices (покрыта на 100%) */
       const normalizedExtensionName = await resolveExtensionNameToConnect(services);
       if (!normalizedExtensionName) {
@@ -229,7 +235,6 @@ export function registerExtensionCommands(
         return;
       }
 
-      fs.mkdirSync(extensionRoot, { recursive: true });
       await runExclusiveConfigurationOperation(
         {
           title: `Подключение расширения ${normalizedExtensionName}`,
@@ -245,13 +250,18 @@ export function registerExtensionCommands(
             await services.reloadEntries();
           },
         },
-        () =>
-          runDecompileExtension(
+        () => {
+          // Каталог создаётся только под захваченным замком: при отказе в захвате
+          // afterFailure не вызывается, и пустой src/cfe/<имя> остался бы, блокируя
+          // повторное подключение того же расширения.
+          fs.mkdirSync(extensionRoot, { recursive: true });
+          return runDecompileExtension(
             normalizedExtensionName,
             extensionRoot,
             services.workspaceFolder,
             services.outputChannel
-          )
+          );
+        }
       );
     }),
 
