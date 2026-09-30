@@ -323,7 +323,11 @@ export class CfeBorrowService {
       }
     }
 
-    this.registerFormInParentObject(extDir, folder, objectName, formName);
+    // XML родителя уже в files, если родитель заимствован этим же вызовом.
+    const parentXmlPath = path.join(extDir, folder, `${objectName}.xml`);
+    if (this.registerFormInParentObject(parentXmlPath, formName) && !files.includes(parentXmlPath)) {
+      files.push(parentXmlPath);
+    }
 
     return { alreadyBorrowed: false, files };
   }
@@ -781,35 +785,34 @@ export class CfeBorrowService {
     ].join('\n');
   }
 
-  /** Добавляет запись о форме в ChildObjects XML-файла родительского объекта в расширении */
-  private registerFormInParentObject(
-    extDir: string,
-    folder: string,
-    objectName: string,
-    formName: string
-  ): void {
-    const objFile = path.join(extDir, folder, `${objectName}.xml`);
+  /**
+   * Добавляет запись о форме в ChildObjects XML-файла родительского объекта в расширении.
+   * Возвращает true, если файл изменён: изменённый XML родителя обязан попасть в `files`
+   * результата, иначе он минует общий post-mutation путь и watcher видит правку как внешнюю.
+   */
+  private registerFormInParentObject(objFile: string, formName: string): boolean {
     if (!fs.existsSync(objFile)) {
-      return;
+      return false;
     }
     const xml = fs.readFileSync(objFile, 'utf-8');
 
     // Проверяем, не зарегистрирована ли форма
     const alreadyRegistered = new RegExp(`<Form>${escapeRegExp(formName)}</Form>`).test(xml);
     if (alreadyRegistered) {
-      return;
+      return false;
     }
 
     const formEntry = `\t\t\t<Form>${formName}</Form>`;
 
     const nextXml = this.insertIntoOwnerChildObjects(xml, 'Form', formEntry);
     if (nextXml === null) {
-      return;
+      return false;
     }
 
     // Вставляемый блок собран с `\n`: в CRLF-файле без нормализации по эталону
     // остались бы смешанные окончания строк (запрет №12).
     writeTextFilePreservingBomAndEol(objFile, xml, nextXml);
+    return true;
   }
 
   private newGuid(): string {
