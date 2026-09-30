@@ -14,6 +14,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { SupportMode } from '../../../infra/support/SupportInfoService';
 import type { CommandServices } from '../../commands/_shared';
 import type { MetadataNode } from '../../tree/TreeNode';
+import { CHANGES_FORBIDDEN_REASON } from '../../support/supportLockReason';
 
 type McpCommandServices = Omit<CommandServices, 'aiMcpViewProvider'>;
 
@@ -69,6 +70,9 @@ export class McpMutationGate {
       throw new Error('Не удалось определить XML-файл объекта для проверки блокировки изменения.');
     }
     if (this.services.supportService?.getSupportMode(objectXmlPath) === SupportMode.Locked) {
+      if (this.services.supportService.hasChangesForbidden(objectXmlPath)) {
+        throw new Error(`Объект защищён от изменения: ${CHANGES_FORBIDDEN_REASON}.`);
+      }
       throw new Error('Объект защищён от изменения: находится на поддержке с запретом редактирования.');
     }
     if (this.services.repositoryService.isEditRestricted(objectXmlPath)) {

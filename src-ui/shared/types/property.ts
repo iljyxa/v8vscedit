@@ -104,7 +104,7 @@ export interface PropertiesViewState {
   readonly icon?: IconDto;
   readonly sections: PropertySectionDto[];
   readonly readonly: boolean;
-  readonly readonlyReason?: 'support' | 'repository';
+  readonly readonlyReason?: 'support' | 'supportChangesForbidden' | 'repository';
   readonly diagnostics?: PropertyValidationMessage[];
   readonly subsystemSnapshot?: SubsystemMembershipSnapshot | null;
   readonly exchangePlanContentSnapshot?: ExchangePlanContentSnapshot | null;

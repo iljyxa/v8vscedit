@@ -325,4 +325,117 @@ suite('MetadataMutationService — проверка SupportMode.Locked при ad
       'XML нового справочника не должен быть создан при отклонённом репозиторной проверкой добавлении'
     );
   });
+
+  /**
+   * `getSupportMode` по-прежнему возвращает `Locked` для ЛЮБОГО
+   * файла при флаге «изменения запрещены», но `validateEditAccess` обязан
+   * различать причину и выдавать другой текст — как для дочернего элемента,
+   * так и для корневого объекта, — независимо от исходного кода конкретной
+   * записи `.bin` (см. `SupportInfoService — hasChangesForbidden`).
+   */
+  suite('текст отказа при флаге «изменения запрещены» в настройках поддержки', () => {
+    const FORBIDDEN_MESSAGE = 'Добавление запрещено: изменения конфигурации запрещены в настройках поддержки.';
+
+    test('дочерний элемент (a=2 вне запрета) отклоняется текстом про настройки поддержки', async () => {
+      writeConfigurationXml('77777777-7777-7777-7777-777777777777');
+      const { xmlPath: kontragentyXmlPath, uuid } = copySampleCatalog();
+      writeBin(configRoot, new Map([[uuid, SUPPORT_BIN_CODE.removed]]), { changesForbidden: true });
+
+      const supportService = new SupportInfoService(new TestLogger());
+      supportService.loadConfig(configRoot);
+      assert.strictEqual(
+        supportService.hasChangesForbidden(kontragentyXmlPath),
+        true,
+        'фикстура должна давать флаг запрета изменений'
+      );
+
+      const repositoryService = new RepositoryService(tempDir, createFakeProjectSecretStorage(tempDir));
+      const services = createCommandServices({ supportService, repositoryService });
+      const mutationService = new MetadataMutationService(services);
+
+      const xmlBefore = fs.readFileSync(kontragentyXmlPath, 'utf-8');
+
+      const result = await mutationService.addMetadata({
+        target: { kind: 'child', ownerObjectXmlPath: kontragentyXmlPath, childTag: 'Attribute' },
+        name: 'РеквизитПриЗапретеИзменений',
+      });
+
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.message, FORBIDDEN_MESSAGE);
+      assert.strictEqual(fs.readFileSync(kontragentyXmlPath, 'utf-8'), xmlBefore, 'XML объекта не должен измениться');
+    });
+
+    test('корневой объект отклоняется тем же текстом про настройки поддержки', async () => {
+      const configUuid = '17171717-1717-1717-1717-171717171717';
+      writeConfigurationXml(configUuid);
+      writeBin(configRoot, new Map([[configUuid, SUPPORT_BIN_CODE.editable]]), { changesForbidden: true });
+
+      const supportService = new SupportInfoService(new TestLogger());
+      supportService.loadConfig(configRoot);
+      const configXmlPath = path.join(configRoot, 'Configuration.xml');
+      assert.strictEqual(supportService.hasChangesForbidden(configXmlPath), true);
+
+      const repositoryService = new RepositoryService(tempDir, createFakeProjectSecretStorage(tempDir));
+      const services = createCommandServices({ supportService, repositoryService });
+      const mutationService = new MetadataMutationService(services);
+
+      const result = await mutationService.addMetadata({
+        target: { kind: 'root', configRoot, configKind: 'cf', targetKind: 'Catalog' },
+        name: 'СправочникПриЗапретеИзменений',
+      });
+
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.message, FORBIDDEN_MESSAGE);
+      assert.ok(!fs.existsSync(path.join(configRoot, 'Catalogs', 'СправочникПриЗапретеИзменений.xml')));
+    });
+
+    test('РЕГРЕССИЯ: без флага — дочерний элемент отклоняется прежним текстом «объект находится на поддержке с запретом редактирования»', async () => {
+      writeConfigurationXml('27272727-2727-2727-2727-272727272727');
+      const { xmlPath: catalogXmlPath, uuid } = copySampleCatalog();
+      writeParentConfigurationsBin(new Map([[uuid, SupportMode.Locked]]));
+
+      const supportService = new SupportInfoService(new TestLogger());
+      supportService.loadConfig(configRoot);
+      assert.strictEqual(supportService.hasChangesForbidden(catalogXmlPath), false);
+
+      const repositoryService = new RepositoryService(tempDir, createFakeProjectSecretStorage(tempDir));
+      const services = createCommandServices({ supportService, repositoryService });
+      const mutationService = new MetadataMutationService(services);
+
+      const result = await mutationService.addMetadata({
+        target: { kind: 'child', ownerObjectXmlPath: catalogXmlPath, childTag: 'Attribute' },
+        name: 'РеквизитБезФлагаЗапрета',
+      });
+
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.message, 'Добавление запрещено: объект находится на поддержке с запретом редактирования.');
+    });
+
+    test('РЕГРЕССИЯ: корень Locked без флага запрета (синтетический .bin) отклоняется прежним текстом «конфигурация находится на поддержке»', async () => {
+      const configUuid = '37373737-3737-3737-3737-373737373737';
+      writeConfigurationXml(configUuid);
+      writeBin(configRoot, new Map([[configUuid, SUPPORT_BIN_CODE.locked]]), {
+        changesForbidden: false,
+      });
+
+      const supportService = new SupportInfoService(new TestLogger());
+      supportService.loadConfig(configRoot);
+      const configXmlPath = path.join(configRoot, 'Configuration.xml');
+      assert.strictEqual(supportService.getSupportMode(configXmlPath), SupportMode.Locked);
+      assert.strictEqual(supportService.hasChangesForbidden(configXmlPath), false);
+
+      const repositoryService = new RepositoryService(tempDir, createFakeProjectSecretStorage(tempDir));
+      const services = createCommandServices({ supportService, repositoryService });
+      const mutationService = new MetadataMutationService(services);
+
+      const result = await mutationService.addMetadata({
+        target: { kind: 'root', configRoot, configKind: 'cf', targetKind: 'Catalog' },
+        name: 'СправочникПриЛокеБезФлага',
+      });
+
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.message, 'Добавление запрещено: конфигурация находится на поддержке с запретом редактирования.');
+      assert.ok(!fs.existsSync(path.join(configRoot, 'Catalogs', 'СправочникПриЛокеБезФлага.xml')));
+    });
+  });
 });

@@ -7,6 +7,7 @@ import { SupportMode } from '../../../infra/support/SupportInfoService';
 import type { TemplateType } from '../../../infra/xml';
 import type { AddMetadataTarget, MetadataNode } from '../../tree/TreeNode';
 import type { CommandServices } from '../_shared';
+import { CHANGES_FORBIDDEN_REASON } from '../../support/supportLockReason';
 
 export interface AddMetadataMutationInput {
   readonly target: AddMetadataTarget;
@@ -101,6 +102,9 @@ export class MetadataMutationService {
       ? path.join(target.configRoot, 'Configuration.xml')
       : target.ownerObjectXmlPath;
     if (this.services.supportService?.getSupportMode(supportProbePath) === SupportMode.Locked) {
+      if (this.services.supportService.hasChangesForbidden(supportProbePath)) {
+        return `Добавление запрещено: ${CHANGES_FORBIDDEN_REASON}.`;
+      }
       return target.kind === 'root'
         ? 'Добавление запрещено: конфигурация находится на поддержке с запретом редактирования.'
         : 'Добавление запрещено: объект находится на поддержке с запретом редактирования.';

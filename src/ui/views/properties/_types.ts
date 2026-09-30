@@ -73,7 +73,7 @@ export interface PropertySection {
 export interface PropertiesViewState {
   title: string;
   readonly: boolean;
-  readonlyReason?: 'support' | 'repository';
+  readonlyReason?: 'support' | 'supportChangesForbidden' | 'repository';
   sections: PropertySection[];
   subsystemSnapshot?: SubsystemMembershipSnapshot | null;
   exchangePlanContentSnapshot?: ExchangePlanContentSnapshot | null;

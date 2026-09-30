@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 /**
@@ -175,3 +176,62 @@ export const MALFORMED_BIN_CASES: readonly { readonly label: string; readonly te
     reason: 'неизвестное значение флага запрета изменений',
   },
 ];
+
+export interface SupportFixtureRoot {
+  /** Временный каталог-контейнер (удаляется целиком в dispose). */
+  readonly tempDir: string;
+  readonly configRoot: string;
+  readonly configurationXmlPath: string;
+  /** Catalog «Контрагенты» — код `a=2` (снят с поддержки). */
+  readonly kontragentyXmlPath: string;
+  /** Catalog «АвансовыйОтчетПрисоединенныеФайлы» — код `a=0` (не редактируется). */
+  readonly avansovyOtchetXmlPath: string;
+  /** Document «ПриходТовара» — код `a=1` (редактируется с сохранением поддержки). */
+  readonly prihodTovaraXmlPath: string;
+  dispose(): void;
+}
+
+/**
+ * Временный корень конфигурации на поддержке: Configuration.xml (код `a=1`) и три объекта трёх
+ * разных кодов `.bin`, флаг «изменения запрещены» снят (`normal`) или взведён (`forbidden`).
+ * Нужен тестам, которым требуется корень с несколькими объектами разных режимов, а не единичный XML.
+ */
+export function buildSupportFixtureRoot(variant: 'normal' | 'forbidden'): SupportFixtureRoot {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-support-fixture-'));
+  const configRoot = path.join(tempDir, 'cf');
+
+  const configUuid = fixtureUuid('support-root-configuration');
+  const kontragentyUuid = fixtureUuid('support-root-kontragenty');
+  const avansovyOtchetUuid = fixtureUuid('support-root-avansovy-otchet');
+  const prihodTovaraUuid = fixtureUuid('support-root-prihod-tovara');
+
+  const configurationXmlPath = writeConfigurationXml(configRoot, configUuid);
+  const kontragentyXmlPath = writeObjectXml(configRoot, 'Catalogs', 'Контрагенты', 'Catalog', kontragentyUuid, 'flat');
+  const avansovyOtchetXmlPath = writeObjectXml(
+    configRoot, 'Catalogs', 'АвансовыйОтчетПрисоединенныеФайлы', 'Catalog', avansovyOtchetUuid, 'flat'
+  );
+  const prihodTovaraXmlPath = writeObjectXml(configRoot, 'Documents', 'ПриходТовара', 'Document', prihodTovaraUuid, 'flat');
+
+  writeParentConfigurationsBin(
+    configRoot,
+    new Map<string, number>([
+      [configUuid, SUPPORT_BIN_CODE.editable],
+      [kontragentyUuid, SUPPORT_BIN_CODE.removed],
+      [avansovyOtchetUuid, SUPPORT_BIN_CODE.locked],
+      [prihodTovaraUuid, SUPPORT_BIN_CODE.editable],
+    ]),
+    { changesForbidden: variant === 'forbidden', bom: true }
+  );
+
+  return {
+    tempDir,
+    configRoot,
+    configurationXmlPath,
+    kontragentyXmlPath,
+    avansovyOtchetXmlPath,
+    prihodTovaraXmlPath,
+    dispose(): void {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    },
+  };
+}

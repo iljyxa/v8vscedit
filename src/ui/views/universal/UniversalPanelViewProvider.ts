@@ -13,6 +13,7 @@ import { resolveWebviewLocalResourceRoots } from '../webview/webviewResourceRoot
 import { isWebviewCommandAllowed } from '../webview/webviewCommandGuard';
 import type { MetadataTreeProvider } from '../../tree/MetadataTreeProvider';
 import type { MetadataNode } from '../../tree/TreeNode';
+import { supportIndicatorOf } from '../../support/supportLockReason';
 
 // ── DTO-типы (зеркалят src-ui/shared/types) ──
 
@@ -547,12 +548,9 @@ export class UniversalPanelViewProvider implements vscode.WebviewViewProvider, v
   private buildStateIcons(node: MetadataNode): TreeNodeStateIconDto[] {
     const contextValue = node.contextValue ?? '';
     const result: TreeNodeStateIconDto[] = [];
-    if (contextValue.includes('-support2')) {
-      result.push(this.themeStateIcon('support-locked', 'На поддержке, редактирование запрещено'));
-    } else if (contextValue.includes('-support1')) {
-      result.push(this.themeStateIcon('support-editable', 'На поддержке, редактирование разрешено'));
-    } else if (contextValue.includes('-support0')) {
-      result.push(this.themeStateIcon('support-none', 'Не на поддержке'));
+    const supportIndicator = supportIndicatorOf(contextValue);
+    if (supportIndicator) {
+      result.push(this.themeStateIcon(supportIndicator.icon, supportIndicator.title));
     }
 
     if (contextValue.includes('-repoLocked')) {

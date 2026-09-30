@@ -94,6 +94,8 @@ export function createFormMcpHarnessOverEntry(entry: ConfigEntry, options: FormM
           supportQueries.push(filePath);
           return supportMode;
         },
+        // Флаг «изменения запрещены» в заголовке .bin в этих сценариях не взведён.
+        hasChangesForbidden: () => false,
       } as unknown as SupportInfoService,
     repositoryService: {
       isEditRestricted: (filePath: string) => {

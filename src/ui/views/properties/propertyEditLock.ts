@@ -71,6 +71,19 @@ export function isEditLockedBySupport(node: MetadataNode, deps: PropertyEditLock
   return lockMode === SupportMode.Locked;
 }
 
+/**
+ * Уточняет причину блокировки поддержкой: флаг «изменения запрещены» всей
+ * конфигурации, а не режим конкретного объекта. Сам запрет по-прежнему
+ * решает {@link isEditLockedBySupport}; здесь только выбор текста для UI.
+ */
+export function isChangesForbiddenBySupport(node: MetadataNode, deps: PropertyEditLockDeps): boolean {
+  const xmlPath = node.metaContext?.ownerObjectXmlPath ?? node.xmlPath;
+  if (!xmlPath || !deps.supportService) {
+    return false;
+  }
+  return deps.supportService.hasChangesForbidden(xmlPath);
+}
+
 export function isEditLockedByRepository(node: MetadataNode, deps: PropertyEditLockDeps): boolean {
   const repositoryService = deps.repositoryService;
   if (!repositoryService) {
