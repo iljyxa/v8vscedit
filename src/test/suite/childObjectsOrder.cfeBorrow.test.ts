@@ -136,21 +136,26 @@ suite('CfeBorrowService — T-14: канон позиции заимствова
     assert.deepStrictEqual(directChildObjectsTagSequence(extXml, 'InformationRegister'), ['Resource']);
   });
 
-  test('нет <ChildObjects> в целевом XML владельца (уже заимствован, но файл повреждён) — заимствование ребёнка тихо не удаётся: alreadyBorrowed=true, files=[]', () => {
+  test('нет <ChildObjects> в целевом XML владельца (оболочка создана без блока) — блок дописывается после <Properties>, ребёнок регистрируется', () => {
     const { cfDir, extDir } = newDirs();
     writeSourceInformationRegister(cfDir);
     const extObjDir = path.join(extDir, 'InformationRegisters');
     fs.mkdirSync(extObjDir, { recursive: true });
     // Владелец УЖЕ «заимствован» (файл существует — isObjectBorrowed вернёт true),
-    // но без блока <ChildObjects> вовсе — намеренно повреждённый целевой файл.
+    // но без блока <ChildObjects> вовсе: так выглядели оболочки видов, которых не было
+    // в прежнем списке типов с дочерними объектами.
     fs.writeFileSync(
       path.join(extObjDir, 'КурсыВалют.xml'),
       '<?xml version="1.0" encoding="UTF-8"?>\n<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.21">\n\t<InformationRegister uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa">\n\t\t<Properties><Name>КурсыВалют</Name></Properties>\n\t</InformationRegister>\n</MetaDataObject>\n',
       'utf-8'
     );
     const service = new CfeBorrowService();
+    const ownerXml = path.join(extObjDir, 'КурсыВалют.xml');
     const result = service.borrowChild(cfDir, extDir, 'InformationRegister', 'КурсыВалют', 'Resource', 'Курс');
-    assert.deepStrictEqual(result, { alreadyBorrowed: true, files: [] });
+    assert.deepStrictEqual(result, { alreadyBorrowed: false, files: [ownerXml] });
+    const extXml = fs.readFileSync(ownerXml, 'utf-8');
+    assert.ok(extXml.includes('</Properties>\n\t\t<ChildObjects>'), 'блок встаёт сразу после </Properties> корня');
+    assert.deepStrictEqual(directChildObjectsTagSequence(extXml, 'InformationRegister'), ['Resource']);
   });
 
   test('повторное заимствование ТОГО ЖЕ ребёнка не дублирует запись', () => {

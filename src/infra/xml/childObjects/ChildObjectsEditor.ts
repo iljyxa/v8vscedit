@@ -1,4 +1,4 @@
-import { findDirectElementEntries } from '../XmlUtils';
+import { findDirectElementEntries, findNestingAwareElementRange } from '../XmlUtils';
 import { childTagRank } from './ChildObjectsOrder';
 
 /**
@@ -54,4 +54,26 @@ function lineStartOffset(inner: string, elementStart: number): number {
     offset -= 1;
   }
   return offset;
+}
+
+/**
+ * Гарантирует наличие главного `<ChildObjects>` в XML объекта: если блока нет, вставляет пустой
+ * `<ChildObjects/>` сразу после `</Properties>` корневого элемента — там, где его располагает
+ * платформа. Возвращает исходную строку, если блок уже есть, и `undefined`, если вставить некуда
+ * (в XML нет `<Properties>`).
+ *
+ * Нужна для оболочек обработок/отчётов/журналов, заимствованных в расширение без `<ChildObjects/>`:
+ * регистрация формы/макета в них молча не выполнялась.
+ */
+export function ensureMainChildObjects(xml: string): string | undefined {
+  if (findNestingAwareElementRange(xml, 'ChildObjects')) {
+    return xml;
+  }
+  // Без `<ChildObjects>` первый `<Properties>` — блок корневого элемента: свойства дочерних
+  // элементов лежат только внутри `<ChildObjects>`.
+  const properties = findNestingAwareElementRange(xml, 'Properties');
+  if (!properties) {
+    return undefined;
+  }
+  return `${xml.slice(0, properties.end)}\n\t\t<ChildObjects/>${xml.slice(properties.end)}`;
 }
