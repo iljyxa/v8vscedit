@@ -55,7 +55,12 @@ import { registerSupportWatcher } from './ui/support/SupportWatcher';
 import { RepositoryCommitViewProvider } from './ui/views/RepositoryCommitViewProvider';
 import { RepositoryConnectionViewProvider } from './ui/views/RepositoryConnectionViewProvider';
 import { updateMetadataCacheAfterRename } from './infra/cache/MetadataCache';
-import { BslAnalyzerConfigService, ProjectEnvironmentService, ProjectSecretStorage } from './infra/environment';
+import {
+  BslAnalyzerConfigService,
+  BslAnalyzerRootTracker,
+  ProjectEnvironmentService,
+  ProjectSecretStorage,
+} from './infra/environment';
 import { ProjectEnvironmentViewProvider } from './ui/views/environment/ProjectEnvironmentViewProvider';
 import { StandaloneServerViewProvider } from './ui/views/standalone/StandaloneServerViewProvider';
 import { TypeRegistryService } from './ui/views/properties/TypeRegistryService';
@@ -149,6 +154,7 @@ export class Container {
   // пометку «изменена» на хвосте запоздавших событий watcher после операции с базой.
   private readonly suppressedConfigurationReloads = new Map<string, number>();
   private readonly cleanWindow = new ConfigurationCleanWindow();
+  private readonly bslAnalyzerRootTracker = new BslAnalyzerRootTracker();
   private cleanWindowSettleTimer: NodeJS.Timeout | undefined;
 
   private constructor(
@@ -409,10 +415,27 @@ export class Container {
     if (this.isProjectInitialized()) {
       this.bslAnalyzerConfigService.ensureExists(getExtensionRootPaths(entries));
     }
+    this.restartLspOnRootsChange(entries);
     this.refreshChangedConfigurationState();
     const hasCfe = entries.some((e) => e.kind === 'cfe');
     void vscode.commands.executeCommand('setContext', 'v8vscedit.hasCfeEntries', hasCfe);
     this.outputChannel.appendLine(`[init] Найдено конфигураций: ${String(entries.length)}`);
+  }
+
+  /**
+   * bsl-analyzer выбирает корень конфигурации только при старте: без перезапуска после
+   * появления `src/cf` он продолжает индексировать всю рабочую область.
+   */
+  private restartLspOnRootsChange(entries: readonly ConfigEntry[]): void {
+    const decision = this.bslAnalyzerRootTracker.observe(entries, this.lspManager.mode !== 'off');
+    if (!decision.restart) {
+      return;
+    }
+    this.outputChannel.appendLine('[lsp] Появилась основная конфигурация — перезапуск bsl-analyzer');
+    void this.lspManager.restart().catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.outputChannel.appendLine(`[lsp] Не удалось перезапустить bsl-analyzer: ${message}`);
+    });
   }
 
   async deactivate(): Promise<void> {

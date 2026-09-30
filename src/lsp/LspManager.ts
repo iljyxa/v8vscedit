@@ -16,6 +16,15 @@ const BSL_DOCUMENT_SELECTOR: { scheme: string; language: string }[] = [
 ];
 
 /**
+ * Без `synchronize.fileEvents`: bsl-analyzer не обрабатывает workspace/didChangeWatchedFiles
+ * и следит за файлами сам, поэтому события клиента — лишний JSON-RPC-трафик на каждую
+ * выгрузку во временный каталог операции.
+ */
+export function buildBslAnalyzerDocumentOptions(): Pick<LanguageClientOptions, 'documentSelector' | 'synchronize'> {
+  return { documentSelector: BSL_DOCUMENT_SELECTOR };
+}
+
+/**
  * Управляет жизненным циклом LSP-клиента.
  * Поддерживает внешний сервер bsl-analyzer и полное отключение LSP.
  */
@@ -286,10 +295,7 @@ export class LspManager implements vscode.Disposable {
     const isCurrent = (): boolean => this.clientGeneration === generation;
 
     const clientOptions: LanguageClientOptions = {
-      documentSelector: BSL_DOCUMENT_SELECTOR,
-      synchronize: {
-        fileEvents: vscode.workspace.createFileSystemWatcher('**/*.bsl'),
-      },
+      ...buildBslAnalyzerDocumentOptions(),
       outputChannel: this.outputChannel,
       traceOutputChannel: this.traceChannel,
       errorHandler: {
