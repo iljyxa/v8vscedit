@@ -14,6 +14,7 @@ import {
   resolveV8PathHintFromVersion,
   runProcess,
 } from '../../../infra/process';
+import { endConfigurationOperation, tryBeginConfigurationOperation } from '../ext/configurationOperationLock';
 
 interface ConnectionParams {
   infoBasePath?: string;
@@ -51,7 +52,31 @@ export interface RepositoryCliServices {
   projectSecretStorage: ProjectSecretStorage;
 }
 
+/**
+ * Конфигуратор команды хранилища работает с той же базой, что импорт и обновление,
+ * поэтому процесс запускается только под общим замком операций над конфигурацией.
+ * Уведомления внутри замка показываются без `await`: иначе он держался бы до закрытия
+ * нотификации пользователем, и любая параллельная операция отбивалась бы как занятая.
+ */
 export async function runRepositoryCliCommand(
+  options: RepositoryCliRunOptions,
+  services: RepositoryCliServices
+): Promise<boolean> {
+  if (!await tryBeginConfigurationOperation()) {
+    services.outputChannel.appendLine(`[repository][busy] ${options.progressTitle}: пропущено, выполняется другая операция с конфигурацией`);
+    void vscode.window.showInformationMessage(
+      `${options.progressTitle}: операция с конфигурацией уже выполняется. Дождитесь её завершения.`
+    );
+    return false;
+  }
+  try {
+    return await runRepositoryCliCommandLocked(options, services);
+  } finally {
+    await endConfigurationOperation();
+  }
+}
+
+async function runRepositoryCliCommandLocked(
   options: RepositoryCliRunOptions,
   services: RepositoryCliServices
 ): Promise<boolean> {
@@ -172,7 +197,7 @@ export async function runRepositoryCliCommand(
     const message = error instanceof Error ? error.message : String(error);
     services.outputChannel.appendLine(`[repository][error] ${message}`);
     endRepositoryOperationStatus(options.progressTitle, 'ошибка');
-    await vscode.window.showErrorMessage(`${options.errorTitle}\n${message}`);
+    void vscode.window.showErrorMessage(`${options.errorTitle}\n${message}`);
     return false;
   } finally {
     try {

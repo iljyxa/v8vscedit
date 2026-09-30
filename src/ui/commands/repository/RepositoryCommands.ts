@@ -10,6 +10,11 @@ import {
   runUpdateMainConfiguration,
 } from '../ext/ExtensionCommandRunner';
 import {
+  endConfigurationOperation,
+  isConfigurationOperationRunning,
+  tryBeginConfigurationOperation,
+} from '../ext/configurationOperationLock';
+import {
   type RepositoryCliServices,
   runRepositoryCliCommand,
   runRepositoryCommitAction,
@@ -553,20 +558,32 @@ function toCliServices(services: CommandServices): RepositoryCliServices {
   };
 }
 
-function refreshRepositoryUi(services: CommandServices): void {
+function refreshRepositoryUi(services: Pick<CommandServices, 'treeProvider' | 'refreshActionsView'>): void {
   services.treeProvider.refresh();
   services.refreshActionsView();
 }
 
-async function ensureTargetUpdatedBeforeCommit(
+const CONFIGURATION_OPERATION_BUSY_MESSAGE = 'Операция с конфигурацией уже выполняется. Дождитесь её завершения.';
+
+/**
+ * Помещение в хранилище требует, чтобы локальные изменения уже были в базе. Обновление
+ * базы идёт под общим замком операций; занятость проверяется ещё до QuickPick, чтобы не
+ * предлагать обновление, которое всё равно не сможет стартовать.
+ */
+export async function ensureTargetUpdatedBeforeCommit(
   target: RepositoryTarget,
-  services: CommandServices
+  services: Pick<CommandServices, 'getChangedConfigurations' | 'workspaceFolder' | 'outputChannel' | 'markConfigurationsClean' | 'treeProvider' | 'refreshActionsView'>
 ): Promise<boolean> {
   const changed = services.getChangedConfigurations().find(
     (item) => path.resolve(item.rootPath).toLowerCase() === path.resolve(target.configRoot).toLowerCase()
   );
   if (!changed) {
     return true;
+  }
+
+  if (isConfigurationOperationRunning()) {
+    void vscode.window.showInformationMessage(CONFIGURATION_OPERATION_BUSY_MESSAGE);
+    return false;
   }
 
   const picked = await vscode.window.showQuickPick([
@@ -591,21 +608,31 @@ async function ensureTargetUpdatedBeforeCommit(
     return false;
   }
 
-  const updated = target.configKind === 'cfe'
-    ? await runUpdateExtension(
-        target.extensionName ?? target.displayName,
-        target.configRoot,
-        services.workspaceFolder,
-        services.outputChannel,
-        false
-      )
-    : await runUpdateMainConfiguration(
-        target.displayName,
-        target.configRoot,
-        services.workspaceFolder,
-        services.outputChannel,
-        false
-      );
+  // Пока QuickPick был открыт, замок мог занять другой путь.
+  if (!await tryBeginConfigurationOperation()) {
+    void vscode.window.showInformationMessage(CONFIGURATION_OPERATION_BUSY_MESSAGE);
+    return false;
+  }
+  let updated: boolean;
+  try {
+    updated = target.configKind === 'cfe'
+      ? await runUpdateExtension(
+          target.extensionName ?? target.displayName,
+          target.configRoot,
+          services.workspaceFolder,
+          services.outputChannel,
+          false
+        )
+      : await runUpdateMainConfiguration(
+          target.displayName,
+          target.configRoot,
+          services.workspaceFolder,
+          services.outputChannel,
+          false
+        );
+  } finally {
+    await endConfigurationOperation();
+  }
   if (!updated) {
     return false;
   }
@@ -615,7 +642,25 @@ async function ensureTargetUpdatedBeforeCommit(
   return true;
 }
 
-async function runPostRepositorySync(target: RepositoryTarget, services: CommandServices): Promise<void> {
+/**
+ * Применение конфигурации из хранилища к базе и загрузка результата в выгрузку. Замок
+ * держится на всю цепочку: иначе параллельный импорт/обновление запустил бы второй
+ * Конфигуратор на той же базе и в тот же каталог выгрузки.
+ */
+export async function runPostRepositorySync(
+  target: RepositoryTarget,
+  services: Pick<CommandServices, 'workspaceFolder' | 'outputChannel' | 'markConfigurationsClean' | 'reloadEntries' | 'treeProvider' | 'refreshActionsView'>
+): Promise<void> {
+  if (!await tryBeginConfigurationOperation()) {
+    services.outputChannel.appendLine(
+      `[repository][post-sync][busy] "${target.displayName}": пропущено, выполняется другая операция с конфигурацией`
+    );
+    void vscode.window.showInformationMessage(
+      `Конфигурация "${target.displayName}" подключена к хранилищу, но загрузка из базы пропущена: ` +
+      'уже выполняется операция с конфигурацией. После её завершения выполните «Импортировать из базы».'
+    );
+    return;
+  }
   try {
     const updated = await runApplyDatabaseConfiguration({
       kind: target.configKind,
@@ -650,6 +695,8 @@ async function runPostRepositorySync(target: RepositoryTarget, services: Command
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     services.outputChannel.appendLine(`[repository][post-sync][error] ${message}`);
+  } finally {
+    await endConfigurationOperation();
   }
 }
 
