@@ -2,6 +2,7 @@ import { XMLParser } from 'fast-xml-parser';
 import * as fs from 'fs';
 import { getDefaultStandardAttributeIndexing } from '../../domain/StandardAttribute';
 import { writeFileAtomic } from '../fs/AtomicFileWriter';
+import { preserveBomAndEol } from './LineEndings';
 
 export interface XmlTextNode { '#text': string }
 export type XmlElementNode = Record<string, XmlNodeList>;
@@ -774,12 +775,17 @@ export function extractColumnsXmlFromTabularSection(
  * тогда как исходный файл может быть в CRLF. Побайтовое `updated === original`
  * тогда ложно считает файл изменившимся на каждом идемпотентном вызове. Нормализуем
  * оба варианта к `\n` перед сравнением: реальное содержательное отличие детектится,
- * различие только в EOL-стиле — нет (запись всё равно вернёт исходный EOL через
- * {@link writeTextFilePreservingBomAndEol}).
+ * различие только в EOL-стиле — нет. Отсутствие BOM в `updated` при BOM в `original` —
+ * тоже не изменение: запись восстанавливает BOM сама; появление BOM, которого не было, —
+ * изменение, т.к. запись его добавит. Одиночный `\r` — разделитель строк, как в
+ * `preserveBomAndEol` (LineEndings.ts). На этом держится инвариант:
+ * `!hasRealChange(o, n)` ⇒ `preserveBomAndEol(o, n) === o` — запись через
+ * {@link writeTextFilePreservingBomAndEol} вернёт исходный файл байт-в-байт.
  */
 export function hasRealChange(original: string, updated: string): boolean {
   const normalize = (value: string): string => value.replace(/\r\n|\r|\n/g, '\n');
-  return normalize(original) !== normalize(updated);
+  const restored = original.startsWith('\ufeff') && !updated.startsWith('\ufeff') ? `\ufeff${updated}` : updated;
+  return normalize(original) !== normalize(restored);
 }
 
 /**
@@ -791,17 +797,18 @@ export function stripXmlTags(inner: string): string {
   return inner.replace(/<[^>]+>/g, '').trim();
 }
 
-/** Записывает XML, сохраняя BOM и преобладающий стиль переводов строк исходного файла. */
+/**
+ * Записывает XML, сохраняя BOM исходного файла и построчно — EOL неизменённых строк
+ * (в т.ч. голые LF текста запроса внутри CRLF-макета СКД); EOL новых строк выводится
+ * из окружения. Алгоритм — {@link preserveBomAndEol}.
+ */
 export function writeTextFilePreservingBomAndEol(
   filePath: string,
   originalContent: string,
   nextContent: string
 ): void {
-  const hasBom = originalContent.charCodeAt(0) === 0xfeff;
-  const eol = originalContent.includes('\r\n') ? '\r\n' : '\n';
-  const normalized = nextContent.replace(/\r\n|\n/g, eol);
   // Запись — только атомарной подменой файла: обрыв прямой записи на середине
   // оставил бы обрезанный XML, а битый XML одного объекта делает нечитаемой всю
   // конфигурацию.
-  writeFileAtomic(filePath, `${hasBom && normalized.charCodeAt(0) !== 0xfeff ? '\ufeff' : ''}${normalized}`);
+  writeFileAtomic(filePath, preserveBomAndEol(originalContent, nextContent));
 }
