@@ -737,3 +737,66 @@ suite('SupportInfoService — hasChangesForbidden', () => {
     });
   });
 });
+
+/**
+ * Подчинённые со своим XML лежат в подкаталогах владельца (`SUBORDINATE_OBJECT_FOLDERS`), и цепочка
+ * может быть вложенной: таблица внешнего источника → форма таблицы. Режим модуля берётся из XML
+ * самого глубокого существующего подчинённого цепочки, а не всегда из корневого владельца.
+ */
+suite('SupportInfoService — модули подчинённых со своим XML', () => {
+  test('таблица внешнего источника и её форма берут собственные режимы, а не режим источника', () => {
+    withConfigRoot((configRoot) => {
+      const configUuid = fixtureUuid('subordinates-config');
+      const sourceUuid = fixtureUuid('subordinates-source');
+      const tableUuid = fixtureUuid('subordinates-table');
+      const formUuid = fixtureUuid('subordinates-table-form');
+      writeConfigurationXml(configRoot, configUuid);
+      writeObjectXml(configRoot, 'ExternalDataSources', 'ИМ', 'ExternalDataSource', sourceUuid, 'flat');
+      writeObjectXml(configRoot, path.join('ExternalDataSources', 'ИМ', 'Tables'), 'Заказы', 'Table', tableUuid, 'flat');
+      writeObjectXml(configRoot, path.join('ExternalDataSources', 'ИМ', 'Tables', 'Заказы', 'Forms'), 'ФормаСписка', 'Form', formUuid, 'flat');
+      writeParentConfigurationsBin(configRoot, new Map([
+        [configUuid, SUPPORT_BIN_CODE.editable],
+        [sourceUuid, SUPPORT_BIN_CODE.locked],
+        [tableUuid, SUPPORT_BIN_CODE.editable],
+        [formUuid, SUPPORT_BIN_CODE.locked],
+      ]));
+      const tableModule = writeBslFile(path.join(configRoot, 'ExternalDataSources', 'ИМ', 'Tables', 'Заказы', 'Ext', 'ManagerModule.bsl'));
+      const formModule = writeBslFile(
+        path.join(configRoot, 'ExternalDataSources', 'ИМ', 'Tables', 'Заказы', 'Forms', 'ФормаСписка', 'Ext', 'Form', 'Module.bsl')
+      );
+      const sourceModule = writeBslFile(path.join(configRoot, 'ExternalDataSources', 'ИМ', 'Ext', 'ManagerModule.bsl'));
+
+      const service = new SupportInfoService(new TestLogger());
+      service.loadConfig(configRoot);
+
+      assert.strictEqual(service.getSupportMode(tableModule), SupportMode.Editable);
+      assert.strictEqual(service.getSupportMode(formModule), SupportMode.Locked);
+      assert.strictEqual(service.getSupportMode(sourceModule), SupportMode.Locked);
+    });
+  });
+
+  test('подчинённый без собственного XML — режим ближайшего предка цепочки со своим XML', () => {
+    withConfigRoot((configRoot) => {
+      const configUuid = fixtureUuid('subordinates-fallback-config');
+      const sourceUuid = fixtureUuid('subordinates-fallback-source');
+      const tableUuid = fixtureUuid('subordinates-fallback-table');
+      writeConfigurationXml(configRoot, configUuid);
+      writeObjectXml(configRoot, 'ExternalDataSources', 'ИМ', 'ExternalDataSource', sourceUuid, 'flat');
+      writeObjectXml(configRoot, path.join('ExternalDataSources', 'ИМ', 'Tables'), 'Заказы', 'Table', tableUuid, 'flat');
+      writeParentConfigurationsBin(configRoot, new Map([
+        [configUuid, SUPPORT_BIN_CODE.editable],
+        [sourceUuid, SUPPORT_BIN_CODE.locked],
+        [tableUuid, SUPPORT_BIN_CODE.editable],
+      ]));
+      // Формы ФормаБезXml в выгрузке нет — режим берётся у таблицы-владельца.
+      const formModule = writeBslFile(
+        path.join(configRoot, 'ExternalDataSources', 'ИМ', 'Tables', 'Заказы', 'Forms', 'ФормаБезXml', 'Ext', 'Form', 'Module.bsl')
+      );
+
+      const service = new SupportInfoService(new TestLogger());
+      service.loadConfig(configRoot);
+
+      assert.strictEqual(service.getSupportMode(formModule), SupportMode.Editable);
+    });
+  });
+});

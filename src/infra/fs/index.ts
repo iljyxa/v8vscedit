@@ -5,3 +5,4 @@
 export * from './ObjectLocation';
 export * from './ConfigLocator';
 export * from './MetaPathResolver';
+export * from './SubordinateObjectLayout';
