@@ -95,6 +95,12 @@ interface ObjectInfo {
 
 Это позволяет корректно разграничить `<ChildObjects>` объекта и `<ChildObjects>` табличных частей.
 
+Сам блок заимствуемого элемента (новый UUID, `<InternalInfo/>`, `ObjectBelonging`/
+`ExtendedConfigurationObject`, заимствование колонок ТЧ) собирает `buildBorrowedChildXml`
+(`infra/xml/BorrowedChildXml.ts`) — только срезами по индексам или функцией-заменителем. Исходный
+XML несёт пользовательские синонимы и комментарии, и строка-шаблон `String.replace` превращала бы
+`$&`, `` $` ``, `$'`, `$$` в них во фрагменты совпадения.
+
 ### Парсинг колонок табличной части
 
 После извлечения блока верхнего `<ChildObjects>` для каждой `<TabularSection>` вызывается `extractNestingAwareBlock` для извлечения её вложенного `<ChildObjects>` — это и есть колонки ТЧ.
