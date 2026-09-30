@@ -2,11 +2,17 @@ import * as path from 'path';
 import type { ConfigEntry } from '../../domain/Configuration';
 import { parseConfigXml } from '../xml';
 import {
-  buildHashSnapshot,
   diffHashSnapshots,
   loadHashCache,
   saveHashCache,
+  type HashCacheSnapshot,
 } from '../cache/HashCache';
+import {
+  buildHashSnapshotWithStatIndex,
+  loadFileStatIndex,
+  saveFileStatIndex,
+  type FileStatIndex,
+} from '../cache/FileStatIndex';
 import { buildMetadataCacheScopeKey, loadMetadataCache, saveMetadataCacheForEntry } from '../cache/MetadataCache';
 
 export interface ChangedConfiguration {
@@ -20,7 +26,10 @@ export interface ChangedConfiguration {
  * Определяет, в каких XML-исходниках есть изменения относительно локального хеш-кэша.
  */
 export class ConfigurationChangeDetector {
-  constructor(private readonly projectRoot: string) {}
+  constructor(
+    private readonly projectRoot: string,
+    private readonly now: () => number = () => Date.now()
+  ) {}
 
   describe(entry: ConfigEntry, changedFilesCount: number): ChangedConfiguration {
     const scope = this.resolveScope(entry);
@@ -49,7 +58,7 @@ export class ConfigurationChangeDetector {
       let entryCreated = false;
       if (!hasHashCache) {
         reportStatus?.(`Инициализация хеш-кэша: ${scope.name}`);
-        saveHashCache(this.projectRoot, buildHashSnapshot(scope.scopeKey, entry.rootPath));
+        saveHashCache(this.projectRoot, this.buildSnapshot(scope.scopeKey, entry.rootPath));
         entryCreated = true;
       }
       if (!metadata) {
@@ -70,7 +79,7 @@ export class ConfigurationChangeDetector {
     for (const entry of entries) {
       const scope = this.resolveScope(entry);
       const previous = loadHashCache(this.projectRoot, scope.scopeKey);
-      const current = buildHashSnapshot(scope.scopeKey, entry.rootPath);
+      const current = this.buildSnapshot(scope.scopeKey, entry.rootPath);
       const diff = diffHashSnapshots(previous, current);
       const changedFilesCount = diff.added.length + diff.modified.length + diff.deleted.length;
 
@@ -92,6 +101,29 @@ export class ConfigurationChangeDetector {
       }
       return left.name.localeCompare(right.name);
     });
+  }
+
+  /**
+   * Строит снапшот хешей через stat-индекс, чтобы повторные активации без правок
+   * выгрузки не читали содержимое всех файлов.
+   */
+  private buildSnapshot(scopeKey: string, rootPath: string): HashCacheSnapshot {
+    const previous = loadFileStatIndex(this.projectRoot, scopeKey);
+    const result = buildHashSnapshotWithStatIndex(scopeKey, rootPath, previous, this.now());
+    if (result.indexChanged) {
+      this.persistStatIndex(result.index);
+    }
+    return result.snapshot;
+  }
+
+  private persistStatIndex(index: FileStatIndex): void {
+    try {
+      saveFileStatIndex(this.projectRoot, index);
+    } catch {
+      // Индекс — только ускоритель: без него следующий проход просто перехеширует
+      // выгрузку. Раньше detect на диск не писал вовсе, и сбой записи здесь не
+      // должен обрывать reloadEntries при активации расширения.
+    }
   }
 
   private resolveScope(entry: ConfigEntry): { name: string; scopeKey: string } {
