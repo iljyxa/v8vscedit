@@ -214,24 +214,47 @@ export function removeSectionItemByText(xml: string, sectionTag: string, childTa
   return xml.replace(section, () => nextSection);
 }
 
+/**
+ * Переставляет параметры схемы на их собственных местах: i-й по позиции прямой
+ * `<parameter>` корня заменяется i-м блоком в новом порядке. Разделители между блоками и
+ * место параметров относительно `settingsVariant` сохраняются (порядок элементов корня —
+ * xs:sequence схемы СКД), а перестановка в текущем порядке возвращает исходный текст.
+ * Вложенные `<parameter>` (например, в `dataSetLink`) параметрами схемы не являются.
+ */
 export function reorderParameters(xml: string, value: string, warnings: string[]): string {
   const order = value.split(',').map((item) => item.trim()).filter(Boolean);
   if (order.length === 0) {
     warnings.push('reorder-parameters получил пустой список.');
     return xml;
   }
-  const blocks = matchBlocks(xml, 'parameter');
-  const byName = new Map(blocks.map((block) => [readText(block, 'name'), block]));
-  const sorted = [
-    ...order.map((name) => byName.get(name)).filter((block): block is string => Boolean(block)),
-    ...blocks.filter((block) => !order.includes(readText(block, 'name'))),
-  ];
-  let next = xml;
-  for (const block of blocks) {
-    next = next.replace(block, '');
+  const rootRange = findNestingAwareElementRange(xml, 'DataCompositionSchema');
+  if (!rootRange) {
+    warnings.push('reorder-parameters: не найден корень DataCompositionSchema.');
+    return xml;
   }
-  const sortedXml = sorted.join('\n');
-  return next.replace('</DataCompositionSchema>', () => `${sortedXml}\n</DataCompositionSchema>`);
+  const rootInner = xml.slice(rootRange.openEnd, rootRange.closeStart);
+  const ranges = findDirectElementRanges(rootInner, 'parameter');
+  const remaining = ranges.map((range) => {
+    const block = rootInner.slice(range.start, range.end);
+    return { name: readText(block, 'name'), block };
+  });
+  const sorted: string[] = [];
+  for (const name of order) {
+    const index = remaining.findIndex((item) => item.name === name);
+    if (index === -1) {
+      const repeated = sorted.some((block) => readText(block, 'name') === name);
+      warnings.push(`reorder-parameters: ${repeated ? 'параметр указан повторно' : 'параметр не найден'}: ${name}.`);
+      continue;
+    }
+    sorted.push(remaining.splice(index, 1)[0].block);
+  }
+  sorted.push(...remaining.map((item) => item.block));
+  let inner = rootInner;
+  // С конца, чтобы подстановка не смещала ещё не обработанные диапазоны.
+  for (let i = ranges.length - 1; i >= 0; i--) {
+    inner = inner.slice(0, ranges[i].start) + sorted[i] + inner.slice(ranges[i].end);
+  }
+  return xml.slice(0, rootRange.openEnd) + inner + xml.slice(rootRange.closeStart);
 }
 
 /**
