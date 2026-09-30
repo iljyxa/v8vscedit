@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import type { MetaKind } from '../../domain/MetaTypes';
+import { META_TYPES, type MetaKind } from '../../domain/MetaTypes';
 import type { ProjectSecretStorage } from '../environment/ProjectSecretStorage';
 import { escapeXmlAttribute as escapeXml, parseConfigXml, parseObjectXml } from '../xml';
 
@@ -438,6 +438,13 @@ export class RepositoryService {
    * активного подключения к хранилищу без локального захвата объекта.
    */
   isEditRestricted(filePath: string): boolean {
+    // Файлы корня (`Configuration.xml`, `Ext/**`) XML владельца не имеют — их захват
+    // это захват корня, как в дереве. Иначе свойства и модули корня правились бы без захвата.
+    const rootTarget = this.resolveRootFileTarget(filePath);
+    if (rootTarget) {
+      return this.hasBinding(rootTarget) && this.isConnected(rootTarget) && !this.isRootLocked(rootTarget);
+    }
+
     const ownerObjectXmlPath = this.resolveOwnerObjectXmlPath(filePath);
     if (!ownerObjectXmlPath) {
       return false;
@@ -505,7 +512,12 @@ export class RepositoryService {
       return this.resolveRootObjectFullName(ownerXmlPath);
     }
 
-    return this.buildRootObjectFullName(kind, node.xmlPath, node.label);
+    // label вложенной подсистемы — только её собственное имя, поэтому полное имя
+    // берётся по XML (с цепочкой родителей); label — запасной путь, если XML нет.
+    const subsystemFullName = kind === 'Subsystem' && node.xmlPath
+      ? this.resolveRootObjectFullName(node.xmlPath)
+      : null;
+    return subsystemFullName ?? this.buildRootObjectFullName(kind, node.xmlPath, node.label);
   }
 
   createObjectsFileForNode(node: RepositoryNodeRef, recursive: boolean): { filePath: string; fullNames: string[] } {
@@ -580,11 +592,53 @@ export class RepositoryService {
     }
 
     const objectInfo = parseObjectXml(xmlPath);
-    const fullName = objectInfo
-      ? this.buildRootObjectFullName(objectInfo.tag as MetaKind, undefined, objectInfo.name || path.basename(xmlPath, '.xml'))
-      : null;
+    const fullName = objectInfo?.tag === 'Subsystem'
+      ? this.resolveSubsystemFullName(xmlPath)
+      : objectInfo
+        ? this.buildRootObjectFullName(objectInfo.tag as MetaKind, undefined, objectInfo.name || path.basename(xmlPath, '.xml'))
+        : null;
     this.rootFullNameCache.set(cacheKey, { mtimeMs, value: fullName });
     return fullName;
+  }
+
+  /**
+   * Полное имя подсистемы с цепочкой родителей: XML вложенной подсистемы лежит в каталоге
+   * владельца (`Subsystems/A/Subsystems/B.xml`), а `<Name>` в нём — лишь собственное имя.
+   * Короткое `Подсистема.B` платформа отклоняет, и значок захвата считался бы по
+   * несуществующей единице. Цепочка читается из пути парами «Subsystems/<Имя>».
+   */
+  private resolveSubsystemFullName(xmlPath: string): string | null {
+    const configRoot = this.findConfigRoot(xmlPath);
+    const subsystemFolder = META_TYPES.Subsystem.folder;
+    const typeName = ONE_C_TYPE_NAMES.Subsystem;
+    /* c8 ignore next 3 -- папка и русское имя подсистемы заданы в реестрах статически */
+    if (!configRoot || !subsystemFolder || !typeName) {
+      return null;
+    }
+    const parts = path.relative(configRoot, xmlPath).split(path.sep).filter(Boolean);
+    const names: string[] = [];
+    for (let i = 0; i + 1 < parts.length; i += 1) {
+      if (parts[i] !== subsystemFolder) {
+        continue;
+      }
+      const name = parts[i + 1].replace(/\.xml$/i, '');
+      // Глубокая раскладка `Subsystems/A/A.xml` даёт то же имя дважды подряд.
+      if (names[names.length - 1] !== name) {
+        names.push(name);
+      }
+    }
+    return names.length > 0 ? names.map((name) => `${typeName}.${name}`).join('.') : null;
+  }
+
+  /** Цель хранилища, если файл относится к корню конфигурации/расширения; иначе `null`. */
+  private resolveRootFileTarget(filePath: string): RepositoryTarget | null {
+    const configRoot = this.findConfigRoot(filePath);
+    if (!configRoot) {
+      return null;
+    }
+    const parts = path.relative(configRoot, filePath).split(path.sep).filter(Boolean);
+    const isRootFile = (parts.length === 1 && parts[0] === 'Configuration.xml') || (parts.length > 1 && parts[0] === 'Ext');
+    return isRootFile ? this.resolveTargetByConfigRoot(configRoot) : null;
   }
 
   private resolveOwnerObjectXmlPath(filePath: string): string | null {
