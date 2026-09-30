@@ -4,17 +4,17 @@ import * as os from 'os';
 import * as path from 'path';
 import { SupportInfoService, SupportMode } from '../../infra/support/SupportInfoService';
 import type { Logger } from '../../infra/support/Logger';
-import { skipWithoutCorpus } from './support/corpus';
 import {
   fixtureUuid,
   writeConfigurationXml,
   writeObjectXml,
   writeBslFile,
   writeParentConfigurationsBin,
+  SUPPORT_BIN_CODE,
   type ObjectXmlLayout,
+  MALFORMED_BIN_CASES,
 } from './support/flatMetadataFixtures';
-
-const EXAMPLE_CF = path.resolve(__dirname, '../../../example/2.20/src/cf');
+import { skipWithoutCorpus } from './support/corpus';
 
 class TestLogger implements Logger {
   readonly messages: string[] = [];
@@ -23,6 +23,19 @@ class TestLogger implements Logger {
     this.messages.push(message);
   }
 }
+
+/** Создаёт временный каталог конфигурации, вызывает fn и гарантированно чистит его. */
+function withConfigRoot(fn: (configRoot: string) => void): void {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-support-'));
+  const configRoot = path.join(tempDir, 'cf');
+  try {
+    fn(configRoot);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+const EXAMPLE_CF = path.resolve(__dirname, '../../../example/2.20/src/cf');
 
 suite('SupportInfoService', () => {
   // `example/` не отслеживается git — без корпуса сьют пропускается, а не падает
@@ -49,6 +62,7 @@ suite('SupportInfoService', () => {
   });
 });
 
+
 /**
  * `SupportInfoService.resolveObjectXmlForBsl` раньше искал XML
  * объекта только в глубокой раскладке (`<Тип>/<Имя>/<Имя>.xml`), поэтому
@@ -58,44 +72,35 @@ suite('SupportInfoService', () => {
  *
  * Фикстуры — временные каталоги (`fs.mkdtempSync`) с минимальными XML,
  * синтезированными через `support/flatMetadataFixtures.ts`; `example/` не
- * используется.
+ * используется. Параметр — код файла `a` (см. `SUPPORT_BIN_CODE`), а не
+ * домен-режим: `SupportInfoService` транслирует 0→Locked, 1→Editable,
+ * 2→None.
  */
 suite('SupportInfoService — плоская и вложенная раскладка XML объекта', () => {
   const layouts: ObjectXmlLayout[] = ['flat', 'deep'];
-  const modes: { mode: SupportMode; label: string }[] = [
-    { mode: SupportMode.None, label: 'None' },
-    { mode: SupportMode.Editable, label: 'Editable' },
-    { mode: SupportMode.Locked, label: 'Locked' },
+  const codeCases: { code: number; codeLabel: string; expectedMode: SupportMode; modeLabel: string }[] = [
+    { code: SUPPORT_BIN_CODE.locked, codeLabel: 'a=0 (locked)', expectedMode: SupportMode.Locked, modeLabel: 'Locked' },
+    { code: SUPPORT_BIN_CODE.editable, codeLabel: 'a=1 (editable)', expectedMode: SupportMode.Editable, modeLabel: 'Editable' },
+    { code: SUPPORT_BIN_CODE.removed, codeLabel: 'a=2 (removed)', expectedMode: SupportMode.None, modeLabel: 'None' },
   ];
 
-  /** Создаёт временный каталог конфигурации, вызывает fn и гарантированно чистит его. */
-  function withConfigRoot(fn: (configRoot: string) => void): void {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8vscedit-support-flat-'));
-    const configRoot = path.join(tempDir, 'cf');
-    try {
-      fn(configRoot);
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  }
-
   for (const layout of layouts) {
-    for (const { mode, label } of modes) {
-      test(`CommonModules/X/Ext/Module.bsl: раскладка объекта ${layout}, режим ${label}`, () => {
+    for (const { code, codeLabel, expectedMode, modeLabel } of codeCases) {
+      test(`CommonModules/X/Ext/Module.bsl: раскладка объекта ${layout}, код файла ${codeLabel} → ${modeLabel}`, () => {
         withConfigRoot((configRoot) => {
-          const configUuid = fixtureUuid(`config-${layout}-${label}`);
-          const moduleUuid = fixtureUuid(`module-${layout}-${label}`);
+          const configUuid = fixtureUuid(`config-${layout}-${modeLabel}`);
+          const moduleUuid = fixtureUuid(`module-${layout}-${modeLabel}`);
           writeConfigurationXml(configRoot, configUuid);
           writeObjectXml(configRoot, 'CommonModules', 'ОбщийМодуль1', 'CommonModule', moduleUuid, layout);
           const bslPath = writeBslFile(path.join(configRoot, 'CommonModules', 'ОбщийМодуль1', 'Ext', 'Module.bsl'));
-          writeParentConfigurationsBin(configRoot, new Map([[moduleUuid, mode]]));
+          writeParentConfigurationsBin(configRoot, new Map([[moduleUuid, code]]));
 
           const logger = new TestLogger();
           const service = new SupportInfoService(logger);
           service.loadConfig(configRoot);
 
-          assert.strictEqual(service.getSupportMode(bslPath), mode);
-          assert.strictEqual(service.isLocked(bslPath), mode === SupportMode.Locked);
+          assert.strictEqual(service.getSupportMode(bslPath), expectedMode);
+          assert.strictEqual(service.isLocked(bslPath), expectedMode === SupportMode.Locked);
           assert.ok(
             !logger.messages.some((m) => /не существует|не найден/.test(m)),
             `Не ожидались ошибки резолвинга XML в логе: ${JSON.stringify(logger.messages)}`
@@ -117,15 +122,16 @@ suite('SupportInfoService — плоская и вложенная раскла�
       fs.mkdirSync(path.join(configRoot, 'Catalogs', 'Каталог1', 'Forms'), { recursive: true });
       fs.writeFileSync(
         path.join(configRoot, 'Catalogs', 'Каталог1', 'Forms', 'Форма1.xml'),
-        `\uFEFF<?xml version="1.0" encoding="UTF-8"?><MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses"><Form uuid="${formUuid}"><Properties><Name>Форма1</Name></Properties></Form></MetaDataObject>`,
+        // BOM через String.fromCharCode — без литерального невидимого символа в исходнике.
+        `${String.fromCharCode(0xfeff)}<?xml version="1.0" encoding="UTF-8"?><MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses"><Form uuid="${formUuid}"><Properties><Name>Форма1</Name></Properties></Form></MetaDataObject>`,
         'utf-8'
       );
       const bslPath = writeBslFile(
         path.join(configRoot, 'Catalogs', 'Каталог1', 'Forms', 'Форма1', 'Ext', 'Form', 'Module.bsl')
       );
       writeParentConfigurationsBin(configRoot, new Map([
-        [ownerUuid, SupportMode.Editable],
-        [formUuid, SupportMode.Locked],
+        [ownerUuid, SUPPORT_BIN_CODE.editable],
+        [formUuid, SUPPORT_BIN_CODE.locked],
       ]));
 
       const service = new SupportInfoService(new TestLogger());
@@ -145,7 +151,7 @@ suite('SupportInfoService — плоская и вложенная раскла�
       const bslPath = writeBslFile(
         path.join(configRoot, 'Catalogs', 'Каталог2', 'Forms', 'Форма1', 'Ext', 'Form', 'Module.bsl')
       );
-      writeParentConfigurationsBin(configRoot, new Map([[ownerUuid, SupportMode.Locked]]));
+      writeParentConfigurationsBin(configRoot, new Map([[ownerUuid, SUPPORT_BIN_CODE.locked]]));
 
       const service = new SupportInfoService(new TestLogger());
       service.loadConfig(configRoot);
@@ -164,7 +170,7 @@ suite('SupportInfoService — плоская и вложенная раскла�
       const bslPath = writeBslFile(
         path.join(configRoot, 'Catalogs', 'Каталог3', 'Templates', 'Шаблон1', 'Ext', 'Template.bsl')
       );
-      writeParentConfigurationsBin(configRoot, new Map([[ownerUuid, SupportMode.Locked]]));
+      writeParentConfigurationsBin(configRoot, new Map([[ownerUuid, SUPPORT_BIN_CODE.locked]]));
 
       const service = new SupportInfoService(new TestLogger());
       service.loadConfig(configRoot);
@@ -184,7 +190,7 @@ suite('SupportInfoService — плоская и вложенная раскла�
       const bslPath = writeBslFile(
         path.join(configRoot, 'Catalogs', 'Каталог4', 'Commands', 'Команда1', 'Ext', 'CommandModule.bsl')
       );
-      writeParentConfigurationsBin(configRoot, new Map([[ownerUuid, SupportMode.Locked]]));
+      writeParentConfigurationsBin(configRoot, new Map([[ownerUuid, SUPPORT_BIN_CODE.locked]]));
 
       const service = new SupportInfoService(new TestLogger());
       service.loadConfig(configRoot);
@@ -239,7 +245,7 @@ suite('SupportInfoService — плоская и вложенная раскла�
       writeConfigurationXml(configRoot, configUuid);
       writeObjectXml(configRoot, 'Foo', 'X', 'Catalog', objectUuid, 'flat');
       const bslPath = writeBslFile(path.join(configRoot, 'Foo', 'X', 'Ext', 'Module.bsl'));
-      writeParentConfigurationsBin(configRoot, new Map([[objectUuid, SupportMode.Locked]]));
+      writeParentConfigurationsBin(configRoot, new Map([[objectUuid, SUPPORT_BIN_CODE.locked]]));
 
       const service = new SupportInfoService(new TestLogger());
       service.loadConfig(configRoot);
@@ -257,7 +263,7 @@ suite('SupportInfoService — плоская и вложенная раскла�
       // Модуль лежит прямо в каталоге объекта, минуя Ext/ — платформа так
       // никогда не выгружает, но резолвер должен не найти сегмент 'ext'.
       const bslPath = writeBslFile(path.join(configRoot, 'CommonModules', 'ОбщийБезExt', 'Module.bsl'));
-      writeParentConfigurationsBin(configRoot, new Map([[moduleUuid, SupportMode.Locked]]));
+      writeParentConfigurationsBin(configRoot, new Map([[moduleUuid, SUPPORT_BIN_CODE.locked]]));
 
       const logger = new TestLogger();
       const service = new SupportInfoService(logger);
@@ -290,4 +296,264 @@ suite('SupportInfoService — плоская и вложенная раскла�
       }
     });
   });
+});
+
+/**
+ * Параметризация по флагу «изменения запрещены» для двух веток, где uuid/XML
+ * не резолвятся штатно: при выставленном флаге путь всё равно обязан
+ * получить Locked (см. общий контракт выше), при снятом — прежнее поведение.
+ */
+suite('SupportInfoService — changesForbidden переопределяет отсутствие данных', () => {
+  const flags: boolean[] = [false, true];
+
+  for (const changesForbidden of flags) {
+    const expectedMode = changesForbidden ? SupportMode.Locked : SupportMode.None;
+    const expectedLabel = changesForbidden ? 'Locked' : 'None';
+
+    test(`uuid объекта отсутствует в списке поставки, changesForbidden=${String(changesForbidden)} → ${expectedLabel}`, () => {
+      withConfigRoot((configRoot) => {
+        const configUuid = fixtureUuid(`cf-not-listed-${String(changesForbidden)}`);
+        const objectUuid = fixtureUuid(`obj-not-listed-${String(changesForbidden)}`);
+        writeConfigurationXml(configRoot, configUuid);
+        const xmlPath = writeObjectXml(configRoot, 'Catalogs', 'Об1', 'Catalog', objectUuid, 'flat');
+        // Записей нет вовсе — объект не значится в поставке.
+        writeParentConfigurationsBin(configRoot, new Map(), { changesForbidden });
+
+        const service = new SupportInfoService(new TestLogger());
+        service.loadConfig(configRoot);
+
+        assert.strictEqual(service.getSupportMode(xmlPath), expectedMode);
+      });
+    });
+
+    test(`XML объекта-владельца BSL-модуля не найден, changesForbidden=${String(changesForbidden)} → ${expectedLabel}`, () => {
+      withConfigRoot((configRoot) => {
+        const configUuid = fixtureUuid(`cf-no-owner-${String(changesForbidden)}`);
+        writeConfigurationXml(configRoot, configUuid);
+        fs.mkdirSync(path.join(configRoot, 'CommonModules'), { recursive: true });
+        const bslPath = writeBslFile(
+          path.join(configRoot, 'CommonModules', 'НетТакогоМодуля', 'Ext', 'Module.bsl')
+        );
+        writeParentConfigurationsBin(configRoot, new Map(), { changesForbidden });
+
+        const service = new SupportInfoService(new TestLogger());
+        service.loadConfig(configRoot);
+
+        assert.strictEqual(service.getSupportMode(bslPath), expectedMode);
+      });
+    });
+  }
+});
+
+suite('SupportInfoService — нераспознанный ParentConfigurations.bin', () => {
+  for (const { label, text } of MALFORMED_BIN_CASES) {
+    test(`${label} → hasConfigData=false, getSupportMode=None, лог «не распознан»`, () => {
+      withConfigRoot((configRoot) => {
+        const configUuid = fixtureUuid(`malformed-${label}`);
+        writeConfigurationXml(configRoot, configUuid);
+        fs.mkdirSync(path.join(configRoot, 'Ext'), { recursive: true });
+        fs.writeFileSync(path.join(configRoot, 'Ext', 'ParentConfigurations.bin'), text, 'utf-8');
+
+        const logger = new TestLogger();
+        const service = new SupportInfoService(logger);
+        service.loadConfig(configRoot);
+
+        const configXmlPath = path.join(configRoot, 'Configuration.xml');
+        assert.strictEqual(service.hasConfigData(configXmlPath), false);
+        assert.strictEqual(service.getSupportMode(configXmlPath), SupportMode.None);
+        assert.ok(
+          logger.messages.some((m) => m.includes('не распознан')),
+          `Ожидалась строка лога «не распознан»: ${JSON.stringify(logger.messages)}`
+        );
+      });
+    });
+  }
+});
+
+suite('SupportInfoService — переходы кэша при перезаписи .bin', () => {
+  test('валидный → перезаписан мусором → loadConfig → hasConfigData=false', () => {
+    withConfigRoot((configRoot) => {
+      const configUuid = fixtureUuid('cache-valid-to-garbage');
+      const objectUuid = fixtureUuid('cache-valid-to-garbage-object');
+      writeConfigurationXml(configRoot, configUuid);
+      const xmlPath = writeObjectXml(configRoot, 'Catalogs', 'Об1', 'Catalog', objectUuid, 'flat');
+      writeParentConfigurationsBin(configRoot, new Map([[objectUuid, SUPPORT_BIN_CODE.editable]]));
+
+      const logger = new TestLogger();
+      const service = new SupportInfoService(logger);
+      service.loadConfig(configRoot);
+      assert.strictEqual(service.getSupportMode(xmlPath), SupportMode.Editable);
+      assert.strictEqual(service.hasConfigData(xmlPath), true);
+
+      fs.writeFileSync(path.join(configRoot, 'Ext', 'ParentConfigurations.bin'), 'мусор', 'utf-8');
+      service.loadConfig(configRoot);
+
+      assert.strictEqual(service.hasConfigData(xmlPath), false);
+      assert.strictEqual(service.getSupportMode(xmlPath), SupportMode.None);
+    });
+  });
+
+  test('флаг запрета 0 → 1 (перезапись с теми же записями) → режимы становятся Locked', () => {
+    withConfigRoot((configRoot) => {
+      const configUuid = fixtureUuid('cache-flag-0-to-1');
+      const objectUuid = fixtureUuid('cache-flag-0-to-1-object');
+      writeConfigurationXml(configRoot, configUuid);
+      const xmlPath = writeObjectXml(configRoot, 'Catalogs', 'Об1', 'Catalog', objectUuid, 'flat');
+      writeParentConfigurationsBin(configRoot, new Map([[objectUuid, SUPPORT_BIN_CODE.editable]]), {
+        changesForbidden: false,
+      });
+
+      const service = new SupportInfoService(new TestLogger());
+      service.loadConfig(configRoot);
+      assert.strictEqual(service.getSupportMode(xmlPath), SupportMode.Editable);
+
+      writeParentConfigurationsBin(configRoot, new Map([[objectUuid, SUPPORT_BIN_CODE.editable]]), {
+        changesForbidden: true,
+      });
+      service.loadConfig(configRoot);
+
+      assert.strictEqual(service.getSupportMode(xmlPath), SupportMode.Locked);
+    });
+  });
+});
+
+suite('SupportInfoService — повторный loadConfig без изменения файла', () => {
+  test('hash не изменился → кэш переиспользуется, лог «кэш актуален», режим не меняется', () => {
+    withConfigRoot((configRoot) => {
+      const configUuid = fixtureUuid('cache-unchanged-config');
+      const objectUuid = fixtureUuid('cache-unchanged-object');
+      writeConfigurationXml(configRoot, configUuid);
+      const xmlPath = writeObjectXml(configRoot, 'Catalogs', 'Об1', 'Catalog', objectUuid, 'flat');
+      writeParentConfigurationsBin(configRoot, new Map([[objectUuid, SUPPORT_BIN_CODE.editable]]));
+
+      const logger = new TestLogger();
+      const service = new SupportInfoService(logger);
+      service.loadConfig(configRoot);
+      assert.strictEqual(service.getSupportMode(xmlPath), SupportMode.Editable);
+
+      logger.messages.length = 0;
+      service.loadConfig(configRoot);
+
+      assert.strictEqual(service.getSupportMode(xmlPath), SupportMode.Editable);
+      assert.ok(
+        logger.messages.some((m) => m.includes('кэш актуален')),
+        `Ожидалась строка лога «кэш актуален»: ${JSON.stringify(logger.messages)}`
+      );
+    });
+  });
+});
+
+suite('SupportInfoService — неизвестный код режима', () => {
+  test('код a=7 (не 0/1/2) → Locked, лог «неизвестный код: 1»', () => {
+    withConfigRoot((configRoot) => {
+      const configUuid = fixtureUuid('unknown-code-config');
+      const objectUuid = fixtureUuid('unknown-code-object');
+      writeConfigurationXml(configRoot, configUuid);
+      const xmlPath = writeObjectXml(configRoot, 'Catalogs', 'Об1', 'Catalog', objectUuid, 'flat');
+      writeParentConfigurationsBin(configRoot, new Map([[objectUuid, 7]]));
+
+      const logger = new TestLogger();
+      const service = new SupportInfoService(logger);
+      service.loadConfig(configRoot);
+
+      assert.strictEqual(service.getSupportMode(xmlPath), SupportMode.Locked);
+      assert.ok(
+        logger.messages.some((m) => m.includes('неизвестный код: 1')),
+        `Ожидалась строка лога «неизвестный код: 1»: ${JSON.stringify(logger.messages)}`
+      );
+    });
+  });
+});
+
+suite('SupportInfoService — рассинхронизация заявленного и фактического числа записей', () => {
+  test('объявлено 3, разобрано 2 → лог «объявлено 3, разобрано 2»', () => {
+    withConfigRoot((configRoot) => {
+      const configUuid = fixtureUuid('declared-mismatch-config');
+      const uuidA = fixtureUuid('declared-mismatch-a');
+      const uuidB = fixtureUuid('declared-mismatch-b');
+      writeConfigurationXml(configRoot, configUuid);
+      writeParentConfigurationsBin(
+        configRoot,
+        new Map([
+          [uuidA, SUPPORT_BIN_CODE.locked],
+          [uuidB, SUPPORT_BIN_CODE.editable],
+        ]),
+        { declaredCount: 3 }
+      );
+
+      const logger = new TestLogger();
+      const service = new SupportInfoService(logger);
+      service.loadConfig(configRoot);
+
+      assert.ok(
+        logger.messages.some((m) => m.includes('объявлено 3, разобрано 2')),
+        `Ожидалась строка лога «объявлено 3, разобрано 2»: ${JSON.stringify(logger.messages)}`
+      );
+    });
+  });
+});
+
+/**
+ * Несколько поставщиков — одна и та же запись объекта встречается в `.bin`
+ * несколько раз (по разу на поставщика) с разными кодами. Итоговый домен-режим
+ * — самый строгий среди них: Locked > Editable > None.
+ */
+suite('SupportInfoService — несколько поставщиков (дубли uuid)', () => {
+  test('коды (editable, затем locked) → итог Locked, лог «поставщиков: 2»', () => {
+    withConfigRoot((configRoot) => {
+      const configUuid = fixtureUuid('multi-vendor-1-config');
+      const objectUuid = fixtureUuid('multi-vendor-1-object');
+      writeConfigurationXml(configRoot, configUuid);
+      const xmlPath = writeObjectXml(configRoot, 'Catalogs', 'Об1', 'Catalog', objectUuid, 'flat');
+      writeParentConfigurationsBin(configRoot, new Map([[objectUuid, SUPPORT_BIN_CODE.editable]]), {
+        vendorCount: 2,
+        extraRecords: [[SUPPORT_BIN_CODE.locked, objectUuid]],
+      });
+
+      const logger = new TestLogger();
+      const service = new SupportInfoService(logger);
+      service.loadConfig(configRoot);
+
+      assert.strictEqual(service.getSupportMode(xmlPath), SupportMode.Locked);
+      assert.ok(
+        logger.messages.some((m) => m.includes('поставщиков: 2')),
+        `Ожидалась строка лога «поставщиков: 2»: ${JSON.stringify(logger.messages)}`
+      );
+    });
+  });
+
+  test('коды (removed, затем editable) → итог Editable', () => {
+    withConfigRoot((configRoot) => {
+      const configUuid = fixtureUuid('multi-vendor-2-config');
+      const objectUuid = fixtureUuid('multi-vendor-2-object');
+      writeConfigurationXml(configRoot, configUuid);
+      const xmlPath = writeObjectXml(configRoot, 'Catalogs', 'Об1', 'Catalog', objectUuid, 'flat');
+      writeParentConfigurationsBin(configRoot, new Map([[objectUuid, SUPPORT_BIN_CODE.removed]]), {
+        vendorCount: 2,
+        extraRecords: [[SUPPORT_BIN_CODE.editable, objectUuid]],
+      });
+
+      const service = new SupportInfoService(new TestLogger());
+      service.loadConfig(configRoot);
+
+      assert.strictEqual(service.getSupportMode(xmlPath), SupportMode.Editable);
+    });
+  });
+});
+
+suite('SupportInfoService — BOM в ParentConfigurations.bin', () => {
+  for (const bom of [true, false]) {
+    test(`${bom ? 'с BOM' : 'без BOM'} → Editable`, () => {
+      withConfigRoot((configRoot) => {
+        const configUuid = fixtureUuid(`bom-${String(bom)}`);
+        const configurationXml = writeConfigurationXml(configRoot, configUuid);
+        writeParentConfigurationsBin(configRoot, new Map([[configUuid, SUPPORT_BIN_CODE.editable]]), { bom });
+
+        const service = new SupportInfoService(new TestLogger());
+        service.loadConfig(configRoot);
+
+        assert.strictEqual(service.getSupportMode(configurationXml), SupportMode.Editable);
+      });
+    });
+  }
 });

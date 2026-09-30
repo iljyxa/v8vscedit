@@ -11,8 +11,7 @@
  * Фикстуры реальные: минимальный справочник копируется из
  * `example/2.21/src/cf`, а `ParentConfigurations.bin` синтезируется на
  * временной копии с UUID этого справочника/конфигурации и нужным кодом
- * режима — формат `<uuid>,<uuid>,<mode>` совпадает с тем, что разбирает
- * `SupportInfoService.parseBinFile`.
+ * режима в формате платформы (`support/flatMetadataFixtures.ts`).
  */
 import * as assert from 'assert';
 import * as fs from 'fs';
@@ -22,13 +21,14 @@ import * as vscode from 'vscode';
 import { MetadataMutationService } from '../../ui/commands/metadata/MetadataMutationService';
 import { MetadataXmlCreator } from '../../infra/xml/MetadataXmlCreator';
 import { MetadataXmlRemover } from '../../infra/xml/MetadataXmlRemover';
-import { SupportInfoService } from '../../infra/support/SupportInfoService';
+import { SupportInfoService, SupportMode } from '../../infra/support/SupportInfoService';
 import { RepositoryService } from '../../infra/repository/RepositoryService';
 import { ProjectSecretStorage } from '../../infra/environment/ProjectSecretStorage';
 import type { SecretStore } from '../../infra/ai/AiSecretStorage';
 import type { Logger } from '../../infra/support/Logger';
 import type { CommandServices } from '../../ui/commands/_shared';
 import { skipWithoutCorpus } from './support/corpus';
+import { SUPPORT_BIN_CODE, writeParentConfigurationsBin as writeBin } from './support/flatMetadataFixtures';
 
 /** Фейковый SecretStore на Map — структурный контракт vscode.SecretStorage. */
 function createFakeSecretStore(): SecretStore {
@@ -112,19 +112,19 @@ suite('MetadataMutationService — проверка SupportMode.Locked при ad
   }
 
   /**
-   * Синтезирует `Ext/ParentConfigurations.bin` в формате, который разбирает
-   * `SupportInfoService.parseBinFile`: строки `<uuid>,<uuid>,<mode>`.
-   * Реальный `.bin` из example/ не подходит — там нет объектов с mode=2
-   * (запрет редактирования), поэтому режим синтезируется явно под тест.
+   * Синтезирует `Ext/ParentConfigurations.bin` в формате платформы (`a,b,uuid,uuid`, код
+   * режима — перед парой uuid). Тест задаёт ожидаемый `SupportMode`, а в файл пишется
+   * соответствующий код записи: Locked ← 0, Editable ← 1, None ← 2.
    */
   function writeParentConfigurationsBin(uuidToMode: ReadonlyMap<string, number>): void {
-    const extDir = path.join(configRoot, 'Ext');
-    fs.mkdirSync(extDir, { recursive: true });
-    const rows = [...uuidToMode.entries()]
-      .map(([uuid, mode]) => `${uuid},${uuid},${String(mode)}`)
-      .join(',');
-    fs.writeFileSync(path.join(extDir, 'ParentConfigurations.bin'), `{6,0,1,${rows}}`, 'latin1');
+    const modeToCode: Record<number, number> = {
+      [SupportMode.Locked]: SUPPORT_BIN_CODE.locked,
+      [SupportMode.Editable]: SUPPORT_BIN_CODE.editable,
+      [SupportMode.None]: SUPPORT_BIN_CODE.removed,
+    };
+    writeBin(configRoot, new Map([...uuidToMode].map(([uuid, mode]) => [uuid, modeToCode[mode]])));
   }
+
 
   function createCommandServices(overrides: {
     supportService?: SupportInfoService;

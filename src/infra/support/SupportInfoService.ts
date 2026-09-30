@@ -3,11 +3,19 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { findObjectXmlInFolder } from '../fs/ObjectLocation';
 import type { Logger } from './Logger';
+import { parseParentConfigurations, type ParentConfigurationsInfo } from './ParentConfigurationsParser';
 
 /**
- * Режим поддержки объекта метаданных 1С.
- * Значения соответствуют числовым кодам в `ParentConfigurations.bin`:
- *   0 — снято с поддержки, 1 — разрешено, 2 — запрещено.
+ * Доменный режим поддержки объекта метаданных 1С — НЕ коды файла
+ * `ParentConfigurations.bin` (их трактовка — {@link BIN_CODE_TO_MODE}).
+ *   - None — объект не на поддержке: его нет в списке поставки, он снят с
+ *     поддержки или данных поддержки нет;
+ *   - Editable — редактируется с сохранением поддержки;
+ *   - Locked — не редактируется.
+ *
+ * Числовые значения заморожены: они вшиты в суффикс contextValue `-support<n>`
+ * (`MetadataTreeProvider`, разбор в `UniversalPanelViewProvider`) и в URI
+ * декораций `onec-support:///<n>` (`SupportDecorationProvider`).
  */
 export const enum SupportMode {
   None = 0,
@@ -15,8 +23,37 @@ export const enum SupportMode {
   Locked = 2,
 }
 
+/**
+ * Трактовка кода `a` записи `.bin` в доменный режим — единственное место, где
+ * известен смысл кодов файла: 0 — не редактируется, 1 — редактируется с
+ * сохранением поддержки, 2 — снят с поддержки. Неизвестный код трактуется как
+ * запрет (см. {@link modeOfBinCode}): ошибочно разрешить правку объекта
+ * поставщика опаснее, чем ошибочно запретить.
+ */
+const BIN_CODE_TO_MODE: Readonly<Partial<Record<number, SupportMode>>> = {
+  0: SupportMode.Locked,
+  1: SupportMode.Editable,
+  2: SupportMode.None,
+};
+
+/**
+ * Строгость режима для разрешения дублей uuid (объект у нескольких поставщиков):
+ * берётся самый строгий, т.к. правка допустима, только если её разрешают все.
+ */
+const MODE_STRICTNESS: Readonly<Record<SupportMode, number>> = {
+  [SupportMode.None]: 0,
+  [SupportMode.Editable]: 1,
+  [SupportMode.Locked]: 2,
+};
+
+function modeOfBinCode(code: number): SupportMode {
+  return BIN_CODE_TO_MODE[code] ?? SupportMode.Locked;
+}
+
 interface ConfigSupportData {
   fileHash: string;
+  /** Флаг «изменения запрещены» заголовка `.bin`: вся конфигурация только для чтения. */
+  changesForbidden: boolean;
   /** Нормализованный путь к корню конфигурации (нижний регистр, прямые слэши) */
   normalizedRoot: string;
   /** Оригинальный путь (для восстановления регистра) */
@@ -58,31 +95,41 @@ export class SupportInfoService {
       return;
     }
 
-    const fileHash = this.computeHash(binPath);
+    const content = fs.readFileSync(binPath);
+    const fileHash = this.computeHash(content);
+    const configName = path.basename(configRoot);
     const cached = this.cache.get(configRoot);
     if (cached?.fileHash === fileHash) {
-      this.log.appendLine(`[support] ${path.basename(configRoot)}: кэш актуален (hash=${fileHash.slice(0, 8)}…)`);
+      this.log.appendLine(`[support] ${configName}: кэш актуален (hash=${fileHash.slice(0, 8)}…)`);
       return;
     }
 
-    const uuidToMode = this.parseBinFile(binPath);
     const normalizedRoot = normPath(configRoot);
-
-    let locked = 0, editable = 0, none = 0;
-    for (const mode of uuidToMode.values()) {
-      if (mode === SupportMode.Locked) { locked++; }
-      else if (mode === SupportMode.Editable) { editable++; }
-      else { none++; }
+    const parsed = parseParentConfigurations(content.toString('utf-8'));
+    if (!parsed.ok) {
+      // Непонятый файл не должен давать ни «всё разрешено», ни ложных режимов
+      // от прежнего содержимого — данные корня сбрасываются целиком.
+      this.clearPathUuidCacheForRoot(normalizedRoot);
+      this.cache.delete(configRoot);
+      this.log.appendLine(
+        `[support] ${configName}: ParentConfigurations.bin не распознан (${parsed.reason})` +
+        ' — режимы поддержки не определяются'
+      );
+      return;
     }
 
-    this.log.appendLine(
-      `[support] ${path.basename(configRoot)}: загружено ${String(uuidToMode.size)} объектов` +
-      ` (запрещено: ${String(locked)}, разрешено: ${String(editable)}, снято: ${String(none)})` +
-      ` hash=${fileHash.slice(0, 8)}…`
-    );
+    const { info } = parsed;
+    const uuidToMode = buildUuidToMode(info);
+    this.logLoadSummary(configName, info, fileHash);
 
     this.clearPathUuidCacheForRoot(normalizedRoot);
-    this.cache.set(configRoot, { fileHash, normalizedRoot, originalRoot: configRoot, uuidToMode });
+    this.cache.set(configRoot, {
+      fileHash,
+      changesForbidden: info.changesForbidden,
+      normalizedRoot,
+      originalRoot: configRoot,
+      uuidToMode,
+    });
   }
 
   invalidate(configRoot: string): void {
@@ -105,6 +152,9 @@ export class SupportInfoService {
    * владельца есть собственный uuid, и его режим в `ParentConfigurations.bin`
    * может отличаться, но поиск uuid дочернего элемента внутри XML владельца
    * здесь не выполняется — прежнее поведение (всегда `None`) было хуже.
+   * При флаге «изменения запрещены» любой файл конфигурации — {@link SupportMode.Locked}
+   * сразу, без поиска XML и чтения uuid: это дешевле на горячем пути дерева и
+   * запрещает правку даже BSL-модуля, владелец которого не найден.
    * Если конфигурация не имеет данных поддержки — {@link SupportMode.None}.
    */
   getSupportMode(filePath: string): SupportMode {
@@ -112,6 +162,7 @@ export class SupportInfoService {
 
     for (const data of this.cache.values()) {
       if (!normFilePath.startsWith(data.normalizedRoot + '/')) { continue; }
+      if (data.changesForbidden) { return SupportMode.Locked; }
 
       const isBsl = filePath.toLowerCase().endsWith('.bsl');
       const xmlPath = isBsl
@@ -149,7 +200,8 @@ export class SupportInfoService {
 
   /**
    * Возвращает режим поддержки конкретного UUID в рамках конфигурации,
-   * к которой принадлежит filePath.
+   * к которой принадлежит filePath. Флаг «изменения запрещены» перекрывает
+   * режим записи так же, как в {@link getSupportMode}.
    */
   getSupportModeByUuid(filePath: string, uuid: string): SupportMode {
     const normFilePath = normPath(filePath);
@@ -158,6 +210,7 @@ export class SupportInfoService {
       if (!normFilePath.startsWith(data.normalizedRoot + '/')) {
         continue;
       }
+      if (data.changesForbidden) { return SupportMode.Locked; }
       return data.uuidToMode.get(normalizedUuid) ?? SupportMode.None;
     }
     return SupportMode.None;
@@ -179,9 +232,45 @@ export class SupportInfoService {
     }
   }
 
-  private computeHash(filePath: string): string {
-    const content = fs.readFileSync(filePath);
+  private computeHash(content: Buffer): string {
     return crypto.createHash('sha1').update(content).digest('hex');
+  }
+
+  private logLoadSummary(configName: string, info: ParentConfigurationsInfo, fileHash: string): void {
+    let locked = 0, editable = 0, removed = 0, unknown = 0;
+    for (const { code } of info.records) {
+      const mode = BIN_CODE_TO_MODE[code];
+      if (mode === undefined) { unknown++; }
+      else if (mode === SupportMode.Locked) { locked++; }
+      else if (mode === SupportMode.Editable) { editable++; }
+      else { removed++; }
+    }
+    const unknownPart = unknown > 0
+      ? `, неизвестный код: ${String(unknown)} — трактуется как запрет`
+      : '';
+    this.log.appendLine(
+      `[support] ${configName}: загружено ${String(info.records.length)} записей` +
+      ` (не редактируется: ${String(locked)}, редактируется с сохранением поддержки: ${String(editable)},` +
+      ` снят с поддержки: ${String(removed)}${unknownPart}) hash=${fileHash.slice(0, 8)}…`
+    );
+    if (info.changesForbidden) {
+      this.log.appendLine(
+        `[support] ${configName}: изменения конфигурации запрещены — все объекты только для чтения`
+      );
+    }
+    if (info.vendorCount === 1) {
+      if (info.records.length !== info.declaredRecordCount) {
+        this.log.appendLine(
+          `[support] ${configName}: число записей в заголовке и в теле не совпадает —` +
+          ` объявлено ${String(info.declaredRecordCount)}, разобрано ${String(info.records.length)}`
+        );
+      }
+    } else {
+      this.log.appendLine(
+        `[support] ${configName}: поставщиков: ${String(info.vendorCount)} — разбор нескольких поставщиков` +
+        ' не сверен с эталоном платформы; при расхождении режимов объекта берётся самый строгий'
+      );
+    }
   }
 
   /**
@@ -251,29 +340,19 @@ export class SupportInfoService {
       return undefined;
     }
   }
+}
 
-  /**
-   * Разбирает `ParentConfigurations.bin`: запись объекта поддержки — это
-   * строка с двумя одинаковыми UUID и кодом режима: `<uuid>,<uuid>,<mode>`.
-   */
-  private parseBinFile(binPath: string): Map<string, SupportMode> {
-    const uuidToMode = new Map<string, SupportMode>();
-
-    let content = fs.readFileSync(binPath).toString('latin1');
-    if (content.charCodeAt(0) === 0xfeff) { content = content.slice(1); }
-
-    const UUID_PAT = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
-    const RE = new RegExp(`(${UUID_PAT}),(${UUID_PAT}),(\\d)`, 'gi');
-
-    let m: RegExpExecArray | null;
-    while ((m = RE.exec(content)) !== null) {
-      if (m[1].toLowerCase() !== m[2].toLowerCase()) { continue; }
-      const uuid = m[1].toLowerCase();
-      const mode = parseInt(m[3], 10);
+/** Режим по uuid; дубль uuid (несколько поставщиков) — самый строгий из режимов. */
+function buildUuidToMode(info: ParentConfigurationsInfo): Map<string, SupportMode> {
+  const uuidToMode = new Map<string, SupportMode>();
+  for (const { code, uuid } of info.records) {
+    const mode = modeOfBinCode(code);
+    const prev = uuidToMode.get(uuid);
+    if (prev === undefined || MODE_STRICTNESS[mode] > MODE_STRICTNESS[prev]) {
       uuidToMode.set(uuid, mode);
     }
-    return uuidToMode;
   }
+  return uuidToMode;
 }
 
 function normPath(p: string): string {
